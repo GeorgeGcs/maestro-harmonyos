@@ -1,6 +1,6 @@
 # 远端建仓与活动启动
 
-## 计划建仓信息
+## 仓库信息
 
 | 字段 | 值 |
 | --- | --- |
@@ -12,15 +12,19 @@
 | 许可证 | Apache-2.0（本地已经提供） |
 | 简介 | Maestro 的 HarmonyOS UI 自动化测试适配：鸿蒙驱动、标准 YAML/Flow、录屏与 VSCode 录制辅助。课题 11，初始化阶段。 |
 
-远端创建状态：**待创建/核对，尚未发布**。本地仓库不等于已创建远端仓库。
+远端状态：**已创建，启动材料已推送至 `main`**。
 
-2026-10-28：检查现有 API 登录，未找到供 GitCode/AtomGit API 使用的已保存凭据。通过现有 SSH 配置查询目标地址时，服务端返回项目不存在或不可访问；未推送代码。现有 PandaKit 仓库的 SSH 配置可作为后续推送方式，创建远端和管理成员仍需网页或已授权 API。
+- [公开仓库](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos)
+- HTTPS 克隆地址：`https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos.git`
+- SSH 地址：`git@gitcode.com:HarmonyPandaWorkshop/maestro-harmonyos.git`
 
-创建空仓时不勾选 README、许可证或 .gitignore 初始化，以便正常推送本仓的首批提交。若远端已经有内容，先取回并核对，不强制覆盖。
+2026-10-28：组织管理员创建空仓并提供地址后，已通过 SSH 确认远端无已有引用，普通推送初始化提交 `31b00fe` 至 `main`，包含 19 个文件。未使用强制推送。本地 `main` 已设置跟踪 `origin/main`；发布状态随后随文档提交同步。
+
+目前使用既有 SSH 配置推送。尚无供 GitCode/AtomGit API 使用的已保存登录，成员权限管理需在网页或已授权 API 中进行。
 
 ## 推送
 
-远端确实创建在上述组织后，可通过现有 SSH 配置推送：
+后续可通过现有 SSH 配置推送。若远端新增其他提交，先取回并核对，不强制覆盖：
 
 ```powershell
 git remote -v
@@ -28,7 +32,7 @@ git ls-remote origin
 git push -u origin main
 ```
 
-计划 SSH 地址：`git@gitcode.com:HarmonyPandaWorkshop/maestro-harmonyos.git`。如活动要求个人空间或使用其他路径，先核对真实地址再修改 origin。
+如活动要求个人空间或使用其他路径，先核对真实地址再修改 origin。
 
 ## 报名成功后
 
