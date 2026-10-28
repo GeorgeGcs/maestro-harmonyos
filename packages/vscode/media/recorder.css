@@ -1,0 +1,43 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { max-width: 1600px; margin: 0 auto; padding: 20px 24px 32px; color: var(--vscode-foreground); background: var(--vscode-editor-background); font-family: var(--vscode-font-family); font-size: var(--vscode-font-size); }
+h1 { font-size: 21px; margin: 0 0 8px; font-weight: 600; }
+h2 { font-size: 14px; margin: 0 0 14px; font-weight: 600; }
+header p, footer { color: var(--vscode-descriptionForeground); line-height: 1.7; }
+nav, .row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+button, input, select, textarea { font: inherit; }
+button { border: 1px solid transparent; border-radius: 3px; padding: 6px 12px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; }
+button:hover:enabled { background: var(--vscode-button-hoverBackground); }
+button.secondary, button.node { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, input:focus, textarea:focus, select:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
+input, select, textarea { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); border-radius: 2px; padding: 7px; min-width: 0; }
+textarea { width: 100%; resize: vertical; }
+label { display: block; margin: 16px 0 6px; }
+#status { border-left: 3px solid var(--vscode-focusBorder); background: var(--vscode-textBlockQuote-background); padding: 10px 12px; line-height: 1.6; min-height: 40px; overflow-wrap: anywhere; }
+#status.busy { border-left-color: var(--vscode-progressBar-background); }
+.workspace { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(290px, 1fr); gap: 24px; align-items: start; }
+.device, .controls, .flow { border: 1px solid var(--vscode-panel-border); padding: 16px; border-radius: 5px; }
+.device { text-align: center; min-height: 300px; }
+.device h2 { text-align: left; }
+#dimensions, #stepCount { font-size: 12px; color: var(--vscode-descriptionForeground); margin-left: 8px; }
+#imageWrap { display: inline-block; position: relative; max-width: 100%; vertical-align: top; }
+#screen { display: block; max-width: 100%; max-height: 68vh; width: auto; height: auto; cursor: crosshair; }
+#screen[hidden], #highlight[hidden], #point[hidden] { display: none; }
+#highlight { position: absolute; border: 2px solid #ffbd45; background: #ffbd4526; pointer-events: none; }
+#point { position: absolute; width: 8px; height: 8px; border: 2px solid white; background: #df493f; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+#selection { min-height: 35px; overflow-wrap: anywhere; line-height: 1.5; }
+.controls > button { margin-top: 7px; }
+.controls .row { margin-top: 14px; }
+.controls .row label { margin: 0; }
+.controls > input { width: 100%; }
+details { margin-top: 20px; }
+summary { cursor: pointer; padding: 6px 0; }
+#nodes { max-height: 240px; overflow: auto; }
+button.node { display: block; text-align: left; width: 100%; margin: 3px 0; overflow-wrap: anywhere; }
+button.node[aria-pressed="true"] { border-color: #ffbd45; }
+.flow { margin-top: 24px; }
+.flow h2 { margin: 0 auto 0 0; }
+#yaml { margin-top: 12px; font-family: var(--vscode-editor-font-family), monospace; line-height: 1.5; }
+footer { margin-top: 16px; }
+@media (max-width: 720px) { body { padding: 14px; } .workspace { grid-template-columns: 1fr; } #screen { max-height: 55vh; } }

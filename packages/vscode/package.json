@@ -1,0 +1,109 @@
+{
+  "name": "maestro-harmonyos-recorder",
+  "displayName": "Maestro HarmonyOS Recorder",
+  "description": "Inspect HarmonyOS controls, record standard Maestro YAML, and replay it on a selected device.",
+  "version": "0.1.0",
+  "publisher": "HarmonyPandaWorkshop",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos.git"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Testing"
+  ],
+  "main": "./dist/src/extension.js",
+  "files": ["dist/src/*.js", "media/*.js", "media/*.css", "snippets/*.json", "README.md", "LICENSE"],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Device operations launch the configured local Java and HDC tools."
+    },
+    "virtualWorkspaces": false
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "harmonyosRecorder.open",
+        "title": "HarmonyOS: 打开流程录制"
+      },
+      {
+        "command": "harmonyosRecorder.connect",
+        "title": "HarmonyOS: 连接录制设备"
+      },
+      {
+        "command": "harmonyosRecorder.save",
+        "title": "HarmonyOS: 保存录制的 YAML"
+      },
+      {
+        "command": "harmonyosRecorder.replay",
+        "title": "HarmonyOS: 回放录制流程"
+      },
+      {
+        "command": "harmonyosRecorder.stop",
+        "title": "HarmonyOS: 停止当前任务"
+      }
+    ],
+    "configuration": {
+      "title": "HarmonyOS Recorder",
+      "properties": {
+        "harmonyosRecorder.cliDirectory": {
+          "type": "string",
+          "default": "",
+          "description": "Maestro installDist directory containing bin and lib. Empty uses this workspace's .upstream/maestro/maestro-cli/build/install/maestro."
+        },
+        "harmonyosRecorder.javaPath": {
+          "type": "string",
+          "default": "",
+          "description": "Java 17+ native executable. Empty uses JAVA_HOME or PATH."
+        },
+        "harmonyosRecorder.hdcPath": {
+          "type": "string",
+          "default": "",
+          "description": "HDC native executable. Empty uses MAESTRO_HARMONYOS_HDC or PATH."
+        },
+        "harmonyosRecorder.appId": {
+          "type": "string",
+          "default": "",
+          "description": "Test application's bundle name."
+        },
+        "harmonyosRecorder.abilityName": {
+          "type": "string",
+          "default": "EntryAbility",
+          "description": "Launch Ability name."
+        },
+        "harmonyosRecorder.moduleName": {
+          "type": "string",
+          "default": "",
+          "description": "Optional launch module."
+        }
+      }
+    },
+    "snippets": [
+      {
+        "language": "yaml",
+        "path": "./snippets/maestro.json"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "test": "npm run compile && node --test dist/test/*.test.js",
+    "test:extension": "npm run compile && node dist/test/runExtension.js",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --no-dependencies --out dist/maestro-harmonyos-recorder-0.1.0.vsix"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "@types/vscode": "1.95.0",
+    "@vscode/test-electron": "2.5.2",
+    "@vscode/vsce": "4.1.0",
+    "typescript": "5.8.3"
+  }
+}

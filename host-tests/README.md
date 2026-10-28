@@ -43,8 +43,11 @@ if ($LASTEXITCODE -ne 0) { throw 'CLI 会话测试失败。' }
 - YAML 集成：真实 `YamlCommandReader → Orchestra → Maestro → HarmonyOSDriver → HdcClient`，仅替换 `HdcCommandRunner`。有状态模拟设备提供布局和 PNG，验证参数、条件子流程、ID/文本点击、中文及引号输入、断言、滚动后重新定位、连续子流程、截图产物与失败中断。
 - 录屏收尾：通过真实 Orchestra 和 HarmonyOSDriver 验证断言失败、取消和停止失败；此组使用模拟录屏句柄，不调用系统录屏服务。
 - CLI 会话：参数约束、设备选择、环境配置、显式录屏开关和设备占用锁。
+- 操作录制接口：JSONL 边界和会话关闭、截图稳定性、状态栏排除、旧快照与歧义拒绝、字面文字保存、真实 Maestro 执行与生成 YAML 回放。此组与 CLI 会话测试一并位于 `maestro.cli.harmonyos.*`。
 
 运行脚本的参数与退出码回归使用 `./scripts/tests/test-run-harmonyos.ps1`，需要 JDK 17。脚本测试不操作手机。公共输出文件的生命周期回归位于上游 `maestro-orchestra` 的 `ScreenRecordingOutputTest` 和 `ArtifactsGeneratorTest`，可分别用 `:maestro-orchestra:test --tests '*ScreenRecordingOutputTest' --tests '*ArtifactsGeneratorTest'` 执行。
+
+逐台验证工具的主机回归入口为 `./scripts/tests/test-device-matrix.ps1`。扩展的 `npm test` 和隔离 ExtensionHost 检查见[插件说明](../packages/vscode/README.md)；主机检查通过后，仍需在真实面板上录制、保存并回放。
 
 这些检查不验证真实手机的授权、键盘、文本输入或系统兼容性，也不等同于 CLI 分发包已构建。CLI 构建与真机命令见[使用说明](../docs/setup.md)，实际结果分别记录在 `docs/progress/`。
 

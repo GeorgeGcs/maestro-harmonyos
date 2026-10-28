@@ -1,0 +1,5 @@
+{
+  "Maestro flow": { "prefix": "maestro-flow", "body": ["appId: ${1:org.example.app}", "---", "- launchApp", "- assertVisible: ${2:页面标题}"], "description": "Create a standard Maestro flow" },
+  "Maestro tap by id": { "prefix": "maestro-tap", "body": ["- tapOn:", "    id: ${1:control-id}"], "description": "Tap a control by its resource ID" },
+  "Maestro assertion": { "prefix": "maestro-assert", "body": ["- assertVisible: ${1:页面文字}"], "description": "Assert visible text" }
+}

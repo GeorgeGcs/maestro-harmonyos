@@ -1,8 +1,32 @@
 diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
-index 8df1b2f..faf7813 100644
+index 8df1b2f..61fb3d4 100644
 --- a/maestro-cli/src/main/java/maestro/cli/App.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/App.kt
-@@ -88,7 +88,7 @@ class App {
+@@ -29,6 +29,7 @@ import maestro.cli.command.CheckSyntaxCommand
+ import maestro.cli.command.CloudCommand
+ import maestro.cli.command.DownloadSamplesCommand
+ import maestro.cli.command.DriverCommand
++import maestro.cli.command.HarmonyOsBridgeCommand
+ import maestro.cli.command.ListCloudDevicesCommand
+ import maestro.cli.command.ListDevicesCommand
+ import maestro.cli.command.LoginCommand
+@@ -41,6 +42,7 @@ import maestro.cli.command.StartDeviceCommand
+ import maestro.cli.command.StudioCommand
+ import maestro.cli.command.TestCommand
+ import maestro.cli.insights.TestAnalysisManager
++import maestro.cli.harmonyos.HarmonyOsBridgeStdout
+ import maestro.cli.mcp.claimMcpStdout
+ import maestro.cli.update.Updates
+ import maestro.cli.util.ChangeLogUtils
+@@ -76,6 +78,7 @@ import kotlin.system.exitProcess
+         CheckSyntaxCommand::class,
+         DriverCommand::class,
+         McpCommand::class,
++        HarmonyOsBridgeCommand::class,
+     ]
+ )
+ class App {
+@@ -88,7 +91,7 @@ class App {
      @Option(names = ["-v", "--version"], versionHelp = true, description = ["Display CLI version"])
      var requestedVersion: Boolean? = false
  
@@ -11,6 +35,45 @@ index 8df1b2f..faf7813 100644
      var platform: String? = null
  
      @Option(names = ["--host"], hidden = true)
+@@ -123,6 +126,7 @@ fun main(args: Array<String>) {
+     // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
+     // channel and break the handshake for strict clients like Claude Desktop.
+     if (args.firstOrNull() == "mcp") claimMcpStdout()
++    if (args.contains("harmonyos-bridge")) HarmonyOsBridgeStdout.claim()
+ 
+     // Establish a consistent logging baseline for every command before any init
+     // logging fires. Without this, commands that don't call TestDebugReporter.install()
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsBridgeCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsBridgeCommand.kt
+new file mode 100644
+index 0000000..a7b39b1
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsBridgeCommand.kt
+@@ -0,0 +1,25 @@
++package maestro.cli.command
++
++import maestro.cli.App
++import maestro.cli.CliError
++import maestro.cli.harmonyos.HarmonyOsBridgeServer
++import maestro.cli.harmonyos.HarmonyOsBridgeStdout
++import maestro.cli.harmonyos.HarmonyOsRecorderBackend
++import maestro.cli.session.HarmonyOsSessionSupport
++import picocli.CommandLine
++import java.util.concurrent.Callable
++
++@CommandLine.Command(name = "harmonyos-bridge", description = ["Local JSON Lines interface for the HarmonyOS recorder"])
++class HarmonyOsBridgeCommand : Callable<Int> {
++    @CommandLine.ParentCommand
++    private var parent: App? = null
++
++    override fun call(): Int {
++        if (parent?.platform != "harmonyos") throw CliError("Use --platform harmonyos with harmonyos-bridge.")
++        if (parent?.deviceId != null) throw CliError("Select the device in the bridge connect request.")
++        HarmonyOsSessionSupport.validateOptions(host = parent?.host, port = parent?.port, driverHostPort = parent?.driverHostPort)
++        return HarmonyOsBridgeServer(
++            System.`in`, HarmonyOsBridgeStdout.output, System.err, HarmonyOsRecorderBackend(),
++        ).run()
++    }
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
 index b752de4..82513d1 100644
 --- a/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
@@ -267,6 +330,528 @@ index f2f7bae..a13e0e6 100644
          }
      }
  
+diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
+new file mode 100644
+index 0000000..0aacc4d
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
+@@ -0,0 +1,217 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.io.ByteArrayOutputStream
++import java.io.InputStream
++import java.io.OutputStream
++import java.io.PrintStream
++import java.nio.ByteBuffer
++import java.nio.charset.CodingErrorAction
++import java.nio.file.Path
++
++/** Claimed before logging, dependency initialization or analytics can write to stdout. */
++internal object HarmonyOsBridgeStdout {
++    var output: OutputStream = System.out
++        private set
++
++    fun claim() {
++        output = System.out
++        System.setOut(System.err)
++    }
++}
++
++internal class RecorderError(val code: String, message: String) : RuntimeException(message)
++
++internal data class RecorderConfig(
++    val deviceId: String,
++    val appId: String,
++    val abilityName: String,
++    val moduleName: String?,
++    val artifactsDir: Path,
++)
++
++internal interface RecorderConnection {
++    fun snapshot(): Any
++    fun action(parameters: JsonNode): Any
++}
++
++internal interface RecorderBackend {
++    fun devices(): List<String>
++    fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit)
++}
++
++internal class HarmonyOsBridgeServer(
++    input: InputStream,
++    private val output: OutputStream,
++    private val diagnostics: PrintStream,
++    private val backend: RecorderBackend,
++) {
++    private val input = input.buffered()
++    private val mapper = jacksonObjectMapper()
++    private data class Request(val id: Long, val method: String, val params: JsonNode)
++    private var eof = false
++
++    fun run(): Int {
++        while (!eof) {
++            val request = nextRequest() ?: continue
++            try {
++                when (request.method) {
++                    "devices" -> devices(request)
++                    "connect" -> connect(request)
++                    "disconnect" -> {
++                        request.params.onlyFields()
++                        success(request, mapOf("disconnected" to true))
++                    }
++                    "snapshot", "action" -> throw RecorderError("NOT_CONNECTED", "Connect to a device first.")
++                    else -> throw RecorderError("UNKNOWN_METHOD", "Unknown bridge method: ${request.method}")
++                }
++            } catch (error: Exception) {
++                failure(request.id, error)
++            }
++        }
++        return 0
++    }
++
++    private fun connect(request: Request) {
++        request.params.onlyFields("deviceId", "appId", "abilityName", "moduleName", "artifactsDir")
++        val p = request.params
++        val artifactPath = Path.of(p.requiredText("artifactsDir"))
++        if (!artifactPath.isAbsolute) throw RecorderError("INVALID_PARAMS", "artifactsDir must be an absolute path.")
++        val config = RecorderConfig(
++            p.requiredText("deviceId"), p.requiredText("appId"), p.requiredText("abilityName"),
++            p.optionalText("moduleName"), artifactPath.normalize(),
++        )
++        if (!config.deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*"))) {
++            throw RecorderError("INVALID_PARAMS", "Invalid device identifier.")
++        }
++        for (value in listOfNotNull(config.appId, config.abilityName, config.moduleName)) {
++            if (value.startsWith('-') || value.any { it.isWhitespace() || it == '\u0000' } || value.contains("\${")) {
++                throw RecorderError("INVALID_PARAMS", "Application and ability identifiers cannot contain whitespace or expressions.")
++            }
++        }
++        var acknowledged = false
++        var disconnect: Request? = null
++        try {
++            backend.withSession(config) { connection ->
++                success(request, mapOf("deviceId" to config.deviceId, "appId" to config.appId))
++                acknowledged = true
++                disconnect = connectedLoop(connection)
++            }
++        } catch (error: Exception) {
++            if (!acknowledged) throw error
++            val pending = disconnect
++            if (pending != null) failure(pending.id, error) else diagnostics.println(error.stackTraceToString())
++            return
++        }
++        // withSession has returned: both the driver and the device lock are now closed.
++        disconnect?.let { success(it, mapOf("disconnected" to true)) }
++    }
++
++    private fun connectedLoop(connection: RecorderConnection): Request? {
++        while (!eof) {
++            val request = nextRequest() ?: continue
++            try {
++                when (request.method) {
++                    "disconnect" -> {
++                        request.params.onlyFields()
++                        return request
++                    }
++                    "devices" -> devices(request)
++                    "snapshot" -> {
++                        request.params.onlyFields()
++                        success(request, connection.snapshot())
++                    }
++                    "action" -> success(request, connection.action(request.params))
++                    "connect" -> throw RecorderError("ALREADY_CONNECTED", "Disconnect the current device before connecting again.")
++                    else -> throw RecorderError("UNKNOWN_METHOD", "Unknown bridge method: ${request.method}")
++                }
++            } catch (error: Exception) {
++                failure(request.id, error)
++            }
++        }
++        return null
++    }
++
++    private fun devices(request: Request) {
++        request.params.onlyFields()
++        success(request, mapOf("devices" to backend.devices().map { mapOf("id" to it) }))
++    }
++
++    private fun nextRequest(): Request? {
++        val bytes = ByteArrayOutputStream()
++        var oversized = false
++        while (true) {
++            val value = input.read()
++            if (value < 0) {
++                eof = true
++                if (bytes.size() == 0 && !oversized) return null
++                break
++            }
++            if (value == '\n'.code) break
++            if (bytes.size() < MAX_REQUEST_BYTES) bytes.write(value) else oversized = true
++        }
++        var id: Long? = null
++        try {
++            if (oversized) throw RecorderError("REQUEST_TOO_LARGE", "Request exceeds 64 KiB.")
++            val decoder = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
++                .onUnmappableCharacter(CodingErrorAction.REPORT)
++            val line = decoder.decode(ByteBuffer.wrap(bytes.toByteArray())).toString()
++            val request = mapper.readTree(line) ?: throw RecorderError("INVALID_REQUEST", "Expected a JSON request.")
++            if (!request.isObject) throw RecorderError("INVALID_REQUEST", "Request must be an object.")
++            val idNode = request.get("id")
++            if (idNode == null || !idNode.isIntegralNumber || !idNode.canConvertToLong() ||
++                idNode.longValue() !in 1..9_007_199_254_740_991L
++            ) throw RecorderError("INVALID_REQUEST", "id must be a positive safe integer.")
++            id = idNode.longValue()
++            request.onlyFields("id", "method", "params")
++            val method = request.requiredText("method")
++            val params = request.get("params") ?: mapper.createObjectNode()
++            if (!params.isObject) throw RecorderError("INVALID_PARAMS", "params must be an object.")
++            return Request(id, method, params)
++        } catch (error: Exception) {
++            failure(id, if (error is RecorderError) error else RecorderError("INVALID_REQUEST", "Invalid UTF-8 JSON request: ${error.message}"))
++            return null
++        }
++    }
++
++    private fun success(request: Request, result: Any) {
++        val bytes = mapper.writeValueAsBytes(mapOf("id" to request.id, "result" to result))
++        if (bytes.size > MAX_RESPONSE_BYTES) throw RecorderError("RESPONSE_TOO_LARGE", "Response exceeds 32 MiB.")
++        write(bytes)
++    }
++
++    private fun failure(id: Long?, error: Exception) {
++        diagnostics.println(error.stackTraceToString())
++        val code = (error as? RecorderError)?.code ?: "DEVICE_ERROR"
++        val message = (error.message ?: error.javaClass.simpleName).take(4096)
++        write(mapper.writeValueAsBytes(mapOf("id" to id, "error" to mapOf("code" to code, "message" to message))))
++    }
++
++    private fun write(bytes: ByteArray) {
++        output.write(bytes)
++        output.write('\n'.code)
++        output.flush()
++    }
++
++    companion object {
++        const val MAX_REQUEST_BYTES = 64 * 1024
++        const val MAX_RESPONSE_BYTES = 32 * 1024 * 1024
++    }
++}
++
++internal fun JsonNode.onlyFields(vararg names: String) {
++    if (!isObject || fieldNames().asSequence().any { it !in names }) {
++        throw RecorderError("INVALID_PARAMS", "Unexpected parameter; allowed fields: ${names.joinToString()}.")
++    }
++}
++
++internal fun JsonNode.requiredText(name: String, allowEmpty: Boolean = false): String {
++    val value = get(name)
++    if (value == null || !value.isTextual || (!allowEmpty && value.textValue().isBlank()) || value.textValue().contains('\u0000')) {
++        throw RecorderError("INVALID_PARAMS", "$name must be ${if (allowEmpty) "a" else "a non-empty"} string without NUL.")
++    }
++    return value.textValue()
++}
++
++internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
+diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt
+new file mode 100644
+index 0000000..43f2eda
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt
+@@ -0,0 +1,293 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.TimeoutCancellationException
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.ensureActive
++import kotlinx.coroutines.withTimeout
++import maestro.Bounds
++import maestro.Filters
++import maestro.Maestro
++import maestro.TreeNode
++import maestro.UiElement.Companion.toUiElementOrNull
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.hdc.HdcClient
++import maestro.orchestra.Orchestra
++import maestro.orchestra.yaml.YamlCommandReader
++import maestro.utils.FileAccessScope
++import okio.Buffer
++import java.io.ByteArrayInputStream
++import java.nio.file.Files
++import java.util.Base64
++import java.util.UUID
++import java.util.regex.Pattern
++import javax.imageio.ImageIO
++
++internal class HarmonyOsRecorderBackend(private val hdc: HdcClient = HdcClient()) : RecorderBackend {
++    override fun devices(): List<String> = hdc.listDevices()
++
++    override fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit) {
++        val selected = HarmonyOsSessionSupport.selectDevice(config.deviceId, hdc)
++        Files.createDirectories(config.artifactsDir)
++        HarmonyOsSessionSupport.withSession(
++            selected, hdc, HarmonyOSDriverConfig(abilityName = config.abilityName, moduleName = config.moduleName),
++        ) { session -> block(HarmonyOsRecorder(session.maestro, config)) }
++    }
++}
++
++internal class HarmonyOsRecorder(
++    private val maestro: Maestro,
++    private val config: RecorderConfig,
++    private val snapshotTimeoutMs: Long = 20_000,
++    private val snapshotPollMs: Long = 100,
++) : RecorderConnection {
++    init {
++        require(snapshotTimeoutMs > 0 && snapshotPollMs > 0) { "Snapshot timing must be positive" }
++    }
++    private val mapper = jacksonObjectMapper()
++    private data class Snapshot(val id: String, val root: TreeNode, val comparison: TreeNode,
++        val width: Int, val height: Int, val nodes: Map<String, TreeNode>, val excludedBounds: List<Bounds>)
++    private data class ScopedHierarchy(val comparison: TreeNode, val excludedIds: Set<String>, val excludedBounds: List<Bounds>)
++    private var current: Snapshot? = null
++
++    override fun snapshot(): Any = runBlocking {
++        current = null
++        try {
++            withTimeout(snapshotTimeoutMs) { captureSnapshot() }
++        } catch (error: TimeoutCancellationException) {
++            current = null
++            throw RecorderError("UNSTABLE_PAGE", "The page did not settle and capture within the ${snapshotTimeoutMs} ms budget. Refresh after it stops changing.")
++                .also { it.initCause(error) }
++        }
++    }
++
++    private suspend fun captureSnapshot(): Any {
++        val (before, scoped) = stableHierarchy()
++        val buffer = Buffer()
++        maestro.takeScreenshot(buffer, compressed = false)
++        val bytes = buffer.readByteArray()
++        val image = ImageIO.read(ByteArrayInputStream(bytes))
++            ?: throw RecorderError("INVALID_SCREENSHOT", "The device did not return a readable image.")
++        val after = maestro.viewHierarchy().root
++        if (scoped.comparison != scope(after).comparison) throw RecorderError("UNSTABLE_PAGE", "The page changed while capturing. Refresh before selecting a control.")
++        val deviceInfo = maestro.cachedDeviceInfo
++        if (image.width != deviceInfo.widthPixels || image.height != deviceInfo.heightPixels) {
++            throw RecorderError("ORIENTATION_CHANGED", "The screen dimensions changed. Disconnect and reconnect before recording more actions.")
++        }
++        val nodes = linkedMapOf<String, TreeNode>()
++        val output = mutableListOf<Map<String, Any?>>()
++        fun visit(node: TreeNode, id: String, parentId: String?) {
++            if (id in scoped.excludedIds) return
++            val element = node.toUiElementOrNull()
++            var parent = parentId
++            if (element != null && element.bounds.width > 0 && element.bounds.height > 0) {
++                nodes[id] = node
++                val bounds = element.bounds
++                output += mapOf(
++                    "nodeId" to id, "parentId" to parentId,
++                    "text" to node.attributes["text"].orEmpty(), "hintText" to node.attributes["hintText"].orEmpty(),
++                    "resourceId" to node.attributes["resource-id"].orEmpty(), "className" to node.attributes["class"].orEmpty(),
++                    "bounds" to mapOf("left" to bounds.x, "top" to bounds.y, "right" to bounds.x + bounds.width, "bottom" to bounds.y + bounds.height),
++                    "enabled" to node.enabled, "clickable" to node.clickable,
++                )
++                parent = id
++            }
++            node.children.forEachIndexed { index, child -> visit(child, "$id.$index", parent) }
++        }
++        visit(before, "0", null)
++        val id = UUID.randomUUID().toString()
++        val screenshot = Base64.getEncoder().encodeToString(bytes)
++        currentCoroutineContext().ensureActive()
++        current = Snapshot(id, before, scoped.comparison, image.width, image.height, nodes, scoped.excludedBounds)
++        return mapOf(
++            "snapshotId" to id, "width" to image.width, "height" to image.height,
++            "screenshot" to mapOf("mimeType" to "image/png", "base64" to screenshot),
++            "nodes" to output,
++        )
++    }
++
++    private suspend fun stableHierarchy(): Pair<TreeNode, ScopedHierarchy> {
++        var previous: TreeNode? = null
++        while (true) {
++            val root = maestro.viewHierarchy().root
++            val scoped = scope(root)
++            if (previous == scoped.comparison) return root to scoped
++            previous = scoped.comparison
++            delay(snapshotPollMs)
++        }
++    }
++
++    override fun action(parameters: JsonNode): Any = runBlocking {
++        // Build and validate all user parameters before a device query or a side effect.
++        val action = prepare(parameters)
++        val command = try {
++            action()
++        } catch (error: Exception) {
++            current = null
++            throw error
++        }
++        current = null
++        val directory = config.artifactsDir.resolve("action-${UUID.randomUUID()}")
++        Files.createDirectory(directory)
++        val commands = YamlCommandReader.readSingleCommand(directory.resolve("action.yaml"), config.appId, command)
++        val orchestra = Orchestra(
++            maestro, artifactsDir = directory, scope = FileAccessScope.under(directory),
++            lookupTimeoutMs = 5000, captureFullArtifacts = true,
++        )
++        val result = orchestra.runFlow(commands)
++        if (!result.success) throw RecorderError("ACTION_FAILED", "The action failed; no YAML step was recorded. See $directory")
++        mapOf("yaml" to command.lineSequence().mapIndexed { index, line -> if (index == 0) "- $line" else "  $line" }.joinToString("\n"),
++            "artifactsDir" to directory.toString())
++    }
++
++    private fun prepare(p: JsonNode): suspend () -> String {
++        return when (val type = p.requiredText("type")) {
++            "launchApp", "back" -> {
++                p.onlyFields("type")
++                fixed(type)
++            }
++            "inputText" -> {
++                p.onlyFields("type", "text")
++                val text = p.requiredText("text", allowEmpty = true)
++                fixed("inputText: ${literal(text)}")
++            }
++            "swipe" -> {
++                p.onlyFields("type", "direction", "duration")
++                val direction = p.requiredText("direction")
++                if (direction !in setOf("UP", "DOWN", "LEFT", "RIGHT")) throw RecorderError("INVALID_PARAMS", "Unknown swipe direction.")
++                val duration = if (p.has("duration")) p.integer("duration", 1..10000) else 600
++                fixed("swipe:\n  direction: $direction\n  duration: $duration")
++            }
++            "takeScreenshot" -> {
++                p.onlyFields("type", "name")
++                val name = p.requiredText("name")
++                if (!name.matches(Regex("[A-Za-z0-9][A-Za-z0-9_-]{0,79}"))) {
++                    throw RecorderError("INVALID_PARAMS", "Screenshot name must use 1-80 letters, digits, underscore or hyphen and start with a letter or digit.")
++                }
++                fixed("takeScreenshot: ${literal(name)}")
++            }
++            "tapOn", "assertVisible" -> prepareSelection(type, p)
++            else -> throw RecorderError("INVALID_PARAMS", "Unsupported action: $type")
++        }
++    }
++
++    private fun prepareSelection(type: String, p: JsonNode): suspend () -> String {
++        if (type == "assertVisible" && p.has("text")) {
++            p.onlyFields("type", "text")
++            val text = p.requiredText("text")
++            return fixed("assertVisible:\n  text: ${literal(Pattern.quote(text))}")
++        }
++        val snapshotId = p.requiredText("snapshotId")
++        if (p.has("point")) {
++            if (type != "tapOn") throw RecorderError("INVALID_PARAMS", "Coordinates are only supported for tapOn.")
++            p.onlyFields("type", "snapshotId", "point")
++            val point = p.get("point")
++            point.onlyFields("x", "y")
++            val x = point.integer("x", 0..Int.MAX_VALUE)
++            val y = point.integer("y", 0..Int.MAX_VALUE)
++            val snapshot = requireSnapshot(snapshotId)
++            if (x >= snapshot.width || y >= snapshot.height) throw RecorderError("INVALID_PARAMS", "Point is outside the screenshot.")
++            if (snapshot.excludedBounds.any { it.contains(x, y) }) {
++                throw RecorderError("INVALID_PARAMS", "The system status bar is outside this app recording. Select a point inside the app.")
++            }
++            return {
++                checkFresh(snapshot)
++                "tapOn:\n  point: ${literal("$x,$y")}\n  retryTapIfNoChange: false"
++            }
++        }
++        p.onlyFields("type", "snapshotId", "nodeId")
++        val nodeId = p.requiredText("nodeId")
++        val snapshot = requireSnapshot(snapshotId)
++        val node = snapshot.nodes[nodeId] ?: throw RecorderError("INVALID_PARAMS", "Unknown node in this snapshot.")
++        if (type == "tapOn" && node.enabled == false) throw RecorderError("INVALID_PARAMS", "The selected node is disabled.")
++        val selector = selector(node, snapshot.root.aggregate())
++        return {
++            val refreshed = checkFresh(snapshot)
++            // Use the same Maestro filter as the generated YAML, including hint matching.
++            val matches = matching(selector.first, selector.second, refreshed.aggregate())
++            if (matches.size != 1 || matches.single() != node) {
++                throw RecorderError("STALE_SNAPSHOT", "The selected control changed. Refresh and select it again.")
++            }
++            "$type:\n  ${selector.first}: ${literal(selector.second)}" +
++                if (type == "tapOn") "\n  retryTapIfNoChange: false" else ""
++        }
++    }
++
++    private fun requireSnapshot(id: String): Snapshot = current?.takeIf { it.id == id }
++        ?: throw RecorderError("STALE_SNAPSHOT", "Refresh the screenshot before selecting a control.")
++
++    private suspend fun checkFresh(snapshot: Snapshot): TreeNode {
++        requireSnapshot(snapshot.id)
++        val root = maestro.viewHierarchy().root
++        if (scope(root).comparison != snapshot.comparison) throw RecorderError("STALE_SNAPSHOT", "The page changed. Refresh before performing this action.")
++        return root
++    }
++
++    /**
++     * UITest merges the app with the system status bar. Its clock/network text can
++     * change during capture. Exclude only a recognized, non-overlapping status
++     * bar's descendants, retaining the window's identity, geometry and state.
++     * Dialogs, keyboards, overlapping windows and unknown system content remain.
++     */
++    private fun scope(root: TreeNode): ScopedHierarchy {
++        val appBounds = root.aggregate().filter { it.attributes["bundleName"] == config.appId }
++            .mapNotNull { it.toUiElementOrNull()?.bounds }
++            .filter { it.width > 0 && it.height > 0 }
++        val excludedIds = linkedSetOf<String>()
++        val excludedBounds = mutableListOf<Bounds>()
++        fun overlaps(a: Bounds, b: Bounds): Boolean =
++            a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
++        fun visit(node: TreeNode, id: String): TreeNode {
++            val bounds = node.toUiElementOrNull()?.bounds
++            if (appBounds.isNotEmpty() && bounds != null && bounds.width > 0 && bounds.height > 0 &&
++                node.attributes["bundleName"] == "com.ohos.sceneboard" &&
++                node.attributes["class"] == "WindowScene" && appBounds.none { overlaps(it, bounds) } &&
++                node.aggregate().any { it.attributes["resource-id"] == "StatusBarBox" }
++            ) {
++                excludedIds += id
++                excludedBounds += bounds
++                return node.copy(children = emptyList())
++            }
++            return node.copy(children = node.children.mapIndexed { index, child -> visit(child, "$id.$index") })
++        }
++        return ScopedHierarchy(visit(root, "0"), excludedIds, excludedBounds)
++    }
++
++    private fun selector(node: TreeNode, nodes: List<TreeNode>): Pair<String, String> {
++        val candidates = listOf("id" to node.attributes["resource-id"], "text" to node.attributes["text"], "text" to node.attributes["hintText"])
++        for ((field, value) in candidates) {
++            if (value.isNullOrBlank()) continue
++            val pattern = Pattern.quote(value)
++            val matches = matching(field, pattern, nodes)
++            if (matches.size == 1 && matches.single() == node) return field to pattern
++        }
++        throw RecorderError("AMBIGUOUS_SELECTOR", "No unique ID or text identifies this control. Select another node or explicitly choose a coordinate tap.")
++    }
++
++    private fun matching(field: String, pattern: String, nodes: List<TreeNode>): List<TreeNode> =
++        (if (field == "id") Filters.idMatches(Regex(pattern)) else Filters.textMatches(Regex(pattern)))(nodes)
++
++    private fun fixed(command: String): suspend () -> String = { command }
++
++    /** Check the pinned Env.evaluateScripts escape rule without evaluating any user JavaScript. */
++    private fun literal(value: String): String {
++        val escaped = value.replace("\${", "\\\${")
++        val unescaped = escaped.replace(Regex("""\\\$\{([^$]*)}""")) { it.value.substringAfter('\\') }
++        if (unescaped != value) {
++            throw RecorderError("INVALID_PARAMS", "This text contains an incomplete or nested expression that Maestro cannot preserve literally.")
++        }
++        return mapper.writeValueAsString(escaped)
++    }
++}
++
++private fun JsonNode.integer(name: String, range: IntRange): Int {
++    val value = get(name)
++    if (value == null || !value.isIntegralNumber || !value.canConvertToInt() || value.intValue() !in range) {
++        throw RecorderError("INVALID_PARAMS", "$name must be an integer between ${range.first} and ${range.last}.")
++    }
++    return value.intValue()
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt b/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
 index 889a703..bc90232 100644
 --- a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
@@ -453,6 +1038,434 @@ index cc05d69..714c609 100644
                  },
                  device = selectedDevice.device,
              )
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt
+new file mode 100644
+index 0000000..8a71768
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt
+@@ -0,0 +1,138 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.ByteArrayOutputStream
++import java.io.PrintStream
++import java.nio.file.Path
++
++class HarmonyOsBridgeServerTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++
++    @Test
++    fun `discovery works without a connection and explicit disconnect is acknowledged after release`() {
++        val backend = Backend()
++        val result = run(backend, listOf(request(1, "devices"), connect(2), request(3, "disconnect"), request(4, "disconnect")))
++        assertThat(result[0]["result"]["devices"][0]["id"].asText()).isEqualTo("device-fixture")
++        assertThat(result[1]["result"]["appId"].asText()).isEqualTo("org.example.recorder")
++        assertThat(result[2]["result"]["disconnected"].asBoolean()).isTrue()
++        assertThat(backend.closed).isTrue()
++        assertThat(backend.connects).isEqualTo(1)
++    }
++
++    @Test
++    fun `EOF releases the active session without requiring disconnect`() {
++        val backend = Backend()
++        run(backend, listOf(connect(1), request(2, "snapshot")))
++        assertThat(backend.closed).isTrue()
++        assertThat(backend.snapshots).isEqualTo(1)
++    }
++
++    @Test
++    fun `failed actions return no yaml and do not retry or prevent a later disconnect`() {
++        val backend = Backend().apply { actionFailure = RecorderError("STALE_SNAPSHOT", "fixture changed") }
++        val response = run(backend, listOf(connect(1), request(2, "action", mapOf("type" to "back")), request(3, "disconnect")))
++        assertThat(response[1]["error"]["code"].asText()).isEqualTo("STALE_SNAPSHOT")
++        assertThat(response[1].has("result")).isFalse()
++        assertThat(backend.actions).isEqualTo(1)
++        assertThat(backend.closed).isTrue()
++    }
++
++    @Test
++    fun `malformed and oversized requests cannot connect and following valid requests still work`() {
++        val backend = Backend()
++        val source = listOf("{", "x".repeat(HarmonyOsBridgeServer.MAX_REQUEST_BYTES + 1),
++            request(-1, "connect"), request(5, "devices"))
++        val response = run(backend, source)
++        assertThat(response.map { it.path("error").path("code").asText() })
++            .containsExactly("INVALID_REQUEST", "REQUEST_TOO_LARGE", "INVALID_REQUEST", "").inOrder()
++        assertThat(response.last()["id"].asInt()).isEqualTo(5)
++        assertThat(backend.connects).isEqualTo(0)
++    }
++
++    @Test
++    fun `invalid connect parameters and commands outside session do not touch backend`() {
++        val backend = Backend()
++        val response = run(backend, listOf(
++            request(1, "connect", config() + ("deviceId" to "a,b")),
++            request(2, "connect", config() + ("artifactsDir" to "relative")),
++            request(3, "connect", config() + ("appId" to "\${evil}")),
++            request(4, "snapshot"), request(5, "action", mapOf("type" to "back")),
++            request(6, "devices", mapOf("unexpected" to true)),
++        ))
++        assertThat(response.all { it.has("error") }).isTrue()
++        assertThat(backend.connects).isEqualTo(0)
++        assertThat(backend.discoveryCalls).isEqualTo(0)
++    }
++
++    @Test
++    fun `a connection cannot be replaced while in use and another connection can follow disconnect`() {
++        val backend = Backend()
++        val response = run(backend, listOf(connect(1), connect(2), request(3, "disconnect"), connect(4)))
++        assertThat(response[1]["error"]["code"].asText()).isEqualTo("ALREADY_CONNECTED")
++        assertThat(backend.connects).isEqualTo(2)
++        assertThat(backend.closed).isTrue()
++    }
++
++    @Test
++    fun `close failure belongs to the disconnect response not to the already acknowledged connect`() {
++        val backend = Backend().apply { closeFailure = IllegalStateException("fixture close failure") }
++        val response = run(backend, listOf(connect(1), request(2, "disconnect")))
++        assertThat(response).hasSize(2)
++        assertThat(response[0].has("result")).isTrue()
++        assertThat(response[1]["id"].asInt()).isEqualTo(2)
++        assertThat(response[1]["error"]["message"].asText()).contains("fixture close failure")
++    }
++
++    private fun run(backend: Backend, requests: List<String>): List<JsonNode> {
++        val output = object : ByteArrayOutputStream() {
++            override fun write(bytes: ByteArray, offset: Int, length: Int) {
++                val text = String(bytes, offset, length, Charsets.UTF_8)
++                if (text.contains("\"disconnected\":true")) assertThat(backend.closed || backend.connects == 0).isTrue()
++                super.write(bytes, offset, length)
++            }
++        }
++        val diagnostics = ByteArrayOutputStream()
++        assertThat(HarmonyOsBridgeServer((requests.joinToString("\n") + "\n").byteInputStream(), output,
++            PrintStream(diagnostics), backend).run()).isEqualTo(0)
++        return output.toString(Charsets.UTF_8).lineSequence().filter { it.isNotEmpty() }.map(mapper::readTree).toList()
++    }
++
++    private fun config() = mapOf("deviceId" to "device-fixture", "appId" to "org.example.recorder",
++        "abilityName" to "EntryAbility", "artifactsDir" to directory.toString())
++    private fun connect(id: Int) = request(id, "connect", config())
++    private fun request(id: Int, method: String, params: Map<String, Any> = emptyMap()) =
++        mapper.writeValueAsString(mapOf("id" to id, "method" to method, "params" to params))
++
++    private class Backend : RecorderBackend {
++        var closed = false
++        var connects = 0
++        var discoveryCalls = 0
++        var actions = 0
++        var snapshots = 0
++        var actionFailure: Exception? = null
++        var closeFailure: Exception? = null
++        override fun devices(): List<String> { discoveryCalls++; return listOf("device-fixture") }
++        override fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit) {
++            connects++
++            closed = false
++            try {
++                block(object : RecorderConnection {
++                    override fun snapshot(): Any { snapshots++; return mapOf("snapshotId" to "fixture") }
++                    override fun action(parameters: JsonNode): Any {
++                        actions++
++                        actionFailure?.let { throw it }
++                        return mapOf("yaml" to "- back", "artifactsDir" to config.artifactsDir.toString())
++                    }
++                })
++            } finally {
++                closed = true
++                closeFailure?.let { throw it }
++            }
++        }
++    }
++}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt
+new file mode 100644
+index 0000000..002a0ab
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt
+@@ -0,0 +1,278 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.runBlocking
++import maestro.Maestro
++import maestro.TreeNode
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSDevice
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.orchestra.Orchestra
++import maestro.orchestra.yaml.YamlCommandReader
++import maestro.utils.FileAccessScope
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import org.junit.jupiter.api.io.TempDir
++import java.awt.image.BufferedImage
++import java.io.ByteArrayOutputStream
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import javax.imageio.ImageIO
++
++class HarmonyOsRecorderTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++
++    @Test
++    fun `snapshot provides real pixel dimensions and hierarchical selectable nodes`() = fixture { recorder, _, _ ->
++        val snapshot = json(recorder.snapshot())
++        assertThat(snapshot["width"].asInt()).isEqualTo(80)
++        assertThat(snapshot["height"].asInt()).isEqualTo(120)
++        assertThat(snapshot["screenshot"]["mimeType"].asText()).isEqualTo("image/png")
++        val input = snapshot["nodes"].first { it["resourceId"].asText() == "field.[1]" }
++        assertThat(input["parentId"].asText()).isEqualTo("0")
++        assertThat(input["bounds"]["left"].asInt()).isEqualTo(5)
++        assertThat(input["hintText"].asText()).isEqualTo("请输入姓名")
++    }
++
++    @Test
++    fun `node tap uses a literal unique selector and executes only once`() = fixture { recorder, device, _ ->
++        val snapshot = json(recorder.snapshot())
++        val result = json(recorder.action(nodeAction("tapOn", snapshot, "0.1")))
++        assertThat(result["yaml"].asText()).contains("id:")
++        assertThat(result["yaml"].asText()).contains("retryTapIfNoChange: false")
++        assertThat(device.commands.count { it.take(3) == listOf("uitest", "uiInput", "click") }).isEqualTo(1)
++        assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", snapshot, "0.1")) }.code)
++            .isEqualTo("STALE_SNAPSHOT")
++    }
++
++    @Test
++    fun `changed page is rejected before tapping and old coordinates cannot be used`() = fixture { recorder, device, _ ->
++        val snapshot = json(recorder.snapshot())
++        device.title = "Different page"
++        assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", snapshot, "0.1")) }.code)
++            .isEqualTo("STALE_SNAPSHOT")
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `ambiguous node needs explicit coordinate selection`() = fixture { recorder, device, _ ->
++        device.duplicate = true
++        val snapshot = json(recorder.snapshot())
++        assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", snapshot, "0.1")) }.code)
++            .isEqualTo("AMBIGUOUS_SELECTOR")
++        assertThat(device.commands).isEmpty()
++        val response = json(recorder.action(json(mapOf("type" to "tapOn", "snapshotId" to snapshot["snapshotId"].asText(),
++            "point" to mapOf("x" to 20, "y" to 50)))))
++        assertThat(response["yaml"].asText()).contains("point: \"20,50\"")
++        assertThat(device.commands.count { it.take(3) == listOf("uitest", "uiInput", "click") }).isEqualTo(1)
++    }
++
++    @Test
++    fun `recorded input preserves Unicode quotes newlines slashes and literal expressions through actual Orchestra`() = fixture { recorder, device, maestro ->
++        val texts = listOf("中文 'quoted' \"double\"", "line 1\nline 2", "C:\\work\\", "\${1+1}", "\\\${doNotExecute()}", "成本$42 😀")
++        for (text in texts) {
++            val response = json(recorder.action(json(mapOf("type" to "inputText", "text" to text))))
++            assertThat(device.inputs.last()).isEqualTo(text)
++            val replay = directory.resolve("replay-${device.inputs.size}.yaml")
++            Files.writeString(replay, "appId: org.example.recorder\n---\n${response["yaml"].asText()}\n")
++            val replayDir = Files.createDirectory(directory.resolve("replay-${device.inputs.size}"))
++            val result = runBlocking { Orchestra(maestro, artifactsDir = replayDir, scope = FileAccessScope.under(directory))
++                .runFlow(YamlCommandReader.readCommands(replay, FileAccessScope.under(directory))) }
++            assertThat(result.success).isTrue()
++            assertThat(device.inputs.takeLast(2)).containsExactly(text, text).inOrder()
++        }
++    }
++
++    @Test
++    fun `unrepresentable interpolation and invalid action parameters fail before device queries`() = fixture { recorder, device, _ ->
++        val invalid = listOf(
++            mapOf("type" to "inputText", "text" to "\${outer\${inner}}"),
++            mapOf("type" to "inputText", "text" to "\${unfinished"),
++            mapOf("type" to "inputText", "text" to "\${a\$b}"),
++            mapOf("type" to "takeScreenshot", "name" to "../outside"),
++            mapOf("type" to "swipe", "direction" to "UP", "duration" to -1),
++            mapOf("type" to "back", "shell" to "ignored"),
++        )
++        val reads = device.reads
++        for (params in invalid) assertThat(assertThrows<RecorderError> { recorder.action(json(params)) }.code).isEqualTo("INVALID_PARAMS")
++        assertThat(device.commands).isEmpty()
++        assertThat(device.reads).isEqualTo(reads)
++    }
++
++    @Test
++    fun `launch back swipe assertion and screenshots run through standard YAML commands`() = fixture { recorder, device, _ ->
++        val actions = listOf(mapOf("type" to "launchApp"), mapOf("type" to "back"),
++            mapOf("type" to "swipe", "direction" to "UP", "duration" to 600),
++            mapOf("type" to "assertVisible", "text" to "Ready"), mapOf("type" to "takeScreenshot", "name" to "recorded-page"))
++        for (action in actions) {
++            val response = json(recorder.action(json(action)))
++            assertThat(response["yaml"].asText()).startsWith("- ")
++            assertThat(Files.isDirectory(Path.of(response["artifactsDir"].asText()))).isTrue()
++        }
++        assertThat(device.commands.any { it.take(2) == listOf("aa", "start") }).isTrue()
++        assertThat(device.commands.any { it.take(3) == listOf("uitest", "uiInput", "swipe") }).isTrue()
++        assertThat(Files.walk(directory).use { paths -> paths.anyMatch { it.fileName.toString() == "recorded-page.png" } }).isTrue()
++    }
++
++    @Test
++    fun `action failure is preserved and does not retry input`() = fixture { recorder, device, _ ->
++        val failure = IllegalStateException("fixture command failed")
++        device.failure = failure
++        val error = assertThrows<Exception> { recorder.action(json(mapOf("type" to "inputText", "text" to "once"))) }
++        assertThat(generateSequence(error as Throwable?) { it.cause }.any { it === failure || it.message == failure.message }).isTrue()
++        assertThat(device.commands.count { it.take(3) == listOf("uitest", "uiInput", "text") }).isEqualTo(1)
++    }
++
++    @Test
++    fun `rotation requires reconnect instead of using cached dimensions`() = fixture { recorder, device, _ ->
++        recorder.snapshot()
++        device.image = png(120, 80)
++        assertThat(assertThrows<RecorderError> { recorder.snapshot() }.code).isEqualTo("ORIENTATION_CHANGED")
++    }
++
++    @Test
++    fun `non overlapping recognized status bar text may change but cannot be selected or coordinate tapped`() = fixture { recorder, device, _ ->
++        device.statusBar = true
++        device.changeStatusOnScreenshot = true
++        val snapshot = json(recorder.snapshot())
++        assertThat(snapshot["nodes"].none { it["resourceId"].asText().contains("StatusBar") }).isTrue()
++        assertThat(assertThrows<RecorderError> {
++            recorder.action(json(mapOf("type" to "tapOn", "snapshotId" to snapshot["snapshotId"].asText(), "point" to mapOf("x" to 20, "y" to 2))))
++        }.code).isEqualTo("INVALID_PARAMS")
++        assertThat(device.commands).isEmpty()
++        val response = json(recorder.action(nodeAction("assertVisible", snapshot, "0.0.0")))
++        assertThat(response["yaml"].asText()).contains("assertVisible")
++    }
++
++    @Test
++    fun `ignored status bar still participates in selector uniqueness checks`() = fixture { recorder, device, _ ->
++        device.statusBar = true
++        val snapshot = json(recorder.snapshot())
++        device.statusText = "Ready"
++        assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", snapshot, "0.0.0")) }.code)
++            .isEqualTo("STALE_SNAPSHOT")
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `status bar geometry and new overlapping windows invalidate the snapshot`() {
++        for (change in listOf<(Device) -> Unit>({ it.statusBounds = "[0,0][80,10]" }, { it.overlay = true })) fixture { recorder, device, _ ->
++            device.statusBar = true
++            val snapshot = json(recorder.snapshot())
++            change(device)
++            assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", snapshot, "0.0.1")) }.code)
++                .isEqualTo("STALE_SNAPSHOT")
++            assertThat(device.commands).isEmpty()
++        }
++    }
++
++    @Test
++    fun `overlapping or unrecognized system windows cannot be excluded from capture stability`() {
++        for (change in listOf<(Device) -> Unit>({ it.statusBounds = "[0,0][80,10]" }, { it.statusId = "UnknownSystemContent" })) fixture { recorder, device, _ ->
++            device.statusBar = true
++            device.changeStatusOnScreenshot = true
++            change(device)
++            assertThat(assertThrows<RecorderError> { recorder.snapshot() }.code).isEqualTo("UNSTABLE_PAGE")
++        }
++    }
++
++    @Test
++    fun `local snapshot settles despite continuous status updates that prevent global driver stability`() = fixture { recorder, device, maestro ->
++        device.statusBar = true
++        device.changeStatusOnHierarchy = true
++        assertThat(runBlocking { maestro.waitForAppToSettle(appId = "org.example.recorder") }).isNull()
++        val snapshot = json(recorder.snapshot())
++        assertThat(snapshot["nodes"].any { it["text"].asText() == "Ready" }).isTrue()
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `continuous application changes exhaust the snapshot budget and discard the previous snapshot`() = fixture { recorder, device, _ ->
++        val previous = json(recorder.snapshot())
++        device.changeAppOnHierarchy = true
++        val started = System.nanoTime()
++        val failure = assertThrows<RecorderError> { recorder.snapshot() }
++        assertThat(failure.code).isEqualTo("UNSTABLE_PAGE")
++        assertThat(failure.message).contains("budget")
++        assertThat(Duration.ofNanos(System.nanoTime() - started).toMillis()).isLessThan(3000)
++        device.changeAppOnHierarchy = false
++        assertThat(assertThrows<RecorderError> { recorder.action(nodeAction("tapOn", previous, "0.1")) }.code).isEqualTo("STALE_SNAPSHOT")
++        assertThat(device.commands).isEmpty()
++    }
++
++    private fun nodeAction(type: String, snapshot: JsonNode, nodeId: String) = json(mapOf(
++        "type" to type, "snapshotId" to snapshot["snapshotId"].asText(), "nodeId" to nodeId))
++    private fun json(value: Any): JsonNode = mapper.valueToTree(value)
++
++    private fun fixture(block: (HarmonyOsRecorder, Device, Maestro) -> Unit) {
++        val device = Device()
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(abilityName = "EntryAbility",
++            commandTimeout = Duration.ofSeconds(2), settleTimeout = Duration.ofMillis(100), pollInterval = Duration.ofMillis(1)))
++        driver.open()
++        Maestro(driver).use { maestro -> block(HarmonyOsRecorder(maestro,
++            RecorderConfig("fixture-device", "org.example.recorder", "EntryAbility", null, directory),
++            snapshotTimeoutMs = 500, snapshotPollMs = 1), device, maestro) }
++    }
++
++    private class Device : HarmonyOSDevice {
++        var title = "Ready"
++        var duplicate = false
++        var reads = 0
++        var image = png(80, 120)
++        var statusBar = false
++        var statusText = "250"
++        var statusId = "StatusBarBox"
++        var statusBounds = "[0,0][80,4]"
++        var changeStatusOnScreenshot = false
++        var changeStatusOnHierarchy = false
++        var changeAppOnHierarchy = false
++        var overlay = false
++        private var statusUpdates = 0
++        var failure: Exception? = null
++        val commands = mutableListOf<List<String>>()
++        val inputs = mutableListOf<String>()
++        override fun connect() = Unit
++        override fun isAvailable() = true
++        override fun screenshot(timeout: Duration): ByteArray {
++            if (changeStatusOnScreenshot) statusText = (++statusUpdates).toString()
++            return image
++        }
++        override fun hierarchy(timeout: Duration): TreeNode {
++            reads++
++            if (changeStatusOnHierarchy) statusText = (++statusUpdates).toString()
++            if (changeAppOnHierarchy) title = "Changed $reads"
++            val input = TreeNode(mutableMapOf("bounds" to "[5,35][75,65]", "resource-id" to "field.[1]", "hintText" to "请输入姓名"), enabled = true)
++            val children = mutableListOf(TreeNode(mutableMapOf("bounds" to "[5,5][75,30]", "text" to title)), input)
++            if (duplicate) children += input.copy(attributes = input.attributes.toMutableMap().apply { put("bounds", "[5,70][75,100]") })
++            if (!statusBar) return TreeNode(mutableMapOf("bounds" to "[0,0][80,120]"), children)
++            val app = TreeNode(mutableMapOf("bounds" to "[0,5][80,120]", "bundleName" to "org.example.recorder"), children)
++            val bar = TreeNode(mutableMapOf("bounds" to statusBounds, "bundleName" to "com.ohos.sceneboard", "class" to "WindowScene"),
++                listOf(TreeNode(mutableMapOf("bounds" to statusBounds, "resource-id" to statusId),
++                    listOf(TreeNode(mutableMapOf("bounds" to statusBounds, "text" to statusText))))))
++            val windows = mutableListOf(app, bar)
++            if (overlay) windows += TreeNode(mutableMapOf("bounds" to "[0,10][80,110]", "bundleName" to "org.example.permissions", "text" to "Permission dialog"))
++            return TreeNode(mutableMapOf("bounds" to "[0,0][80,120]"), windows)
++        }
++        override fun execute(arguments: List<String>, timeout: Duration): String {
++            commands += arguments
++            failure?.let { throw it }
++            if (arguments.take(3) == listOf("uitest", "uiInput", "text")) inputs += arguments[3]
++            return when (arguments.take(2)) {
++                listOf("aa", "start") -> "start ability successfully."
++                listOf("aa", "force-stop") -> "force stop process successfully."
++                else -> "No Error"
++            }
++        }
++    }
++
++    companion object {
++        private fun png(width: Int, height: Int): ByteArray = ByteArrayOutputStream().use { out ->
++            ImageIO.write(BufferedImage(width, height, BufferedImage.TYPE_INT_RGB), "png", out)
++            out.toByteArray()
++        }
++    }
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
 new file mode 100644
 index 0000000..85a3f5f

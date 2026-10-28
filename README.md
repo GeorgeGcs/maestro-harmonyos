@@ -4,7 +4,9 @@
 
 **当前进度：M3 部分完成。** 标准 YAML 已在一台真机上通过启动、定位、中文输入、滑动后重新定位、断言和截图，单设备批量执行 2/2 通过。
 
-实验性的 Huawei 系统录屏后端已通过正常流程实测，默认关闭。失败流程也能自动停止、导出视频；短视频出现过尾部解码错误，原样复跑通过，偶发原因尚未查明。VSCode 扩展、20 轮稳定性和跨设备兼容测试尚未完成。
+VSCode 操作录制辅助已提供 0.1.0 VSIX。在 VSCode 1.140 和现有 ALN-AL80 / API 26 真机上，8 步录制、YAML 保存和一键 CLI 回放通过。逐台设备验证工具也已在该设备执行 1/1 通过；第二台设备和正式 20 轮尚未验证。
+
+实验性的 Huawei 系统录屏后端默认关闭。正常流程已实测，失败流程也能自动停止、导出视频；短视频出现过尾部解码错误，原样复跑通过，偶发原因尚未查明。
 
 ## 目标
 
@@ -19,8 +21,11 @@
 - [验收清单与证据要求](docs/acceptance.md)
 - [开发环境与上游接入](docs/setup.md)
 - [主机端测试与设备查询](host-tests/README.md)
+- [VSCode 录制插件](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md)
+- [逐台设备验证](docs/device-matrix.md)
 - [仓库发布与活动启动事项](docs/publishing.md)
 - [2026-10-28 启动记录](docs/progress/2026-10-28.md)
+- [2026-10-29 插件与逐台验证](docs/progress/2026-10-29.md)
 - [第三方依赖及 AI 辅助开发记录](THIRD_PARTY.md)
 
 ## 目录
@@ -30,7 +35,7 @@ docs/                   技术方案、里程碑、验收与进展
 scripts/                环境检查、固定版本上游获取
 patches/maestro/         驱动、CLI 和测试补丁
 host-tests/              不依赖设备的编译和测试入口
-packages/vscode/        后续 VSCode 扩展
+packages/vscode/        VSCode 操作录制扩展、测试和打包入口
 examples/flows/          参数化的标准 YAML 示例
 upstream.lock.json      上游来源与固定提交
 .upstream/maestro/      本地上游工作副本（不提交）
@@ -54,11 +59,13 @@ if (Test-Path ./config.local.ps1) { . ./config.local.ps1 }
 
 构建 CLI 后，可用 [run-harmonyos.ps1](scripts/run-harmonyos.ps1) 运行单个 YAML 或流程目录。脚本加载本地配置，为每次运行创建产物目录，并保留 CLI 退出码；PowerShell 7 和 Windows PowerShell 5.1 的中文、引号参数回归已通过。参数和编码限制见[环境与使用说明](docs/setup.md)。
 
+安装录制插件后，可在 VSCode 查看截图和控件树，点选控件、执行动作、保存标准 YAML，再交由 CLI 回放。第一版只记录插件发出的操作，不监听手机上的手动触摸。截图按操作刷新；旋转或尺寸改变后需要重新连接。安装、配置和使用步骤见[插件说明](packages/vscode/README.md)。
+
 示例包括 [input-smoke.yaml](examples/flows/input-smoke.yaml)（输入与截图）、[scroll-input.yaml](examples/flows/scroll-input.yaml)（滑动后重新定位输入框）、[recording-smoke.yaml](examples/flows/recording-smoke.yaml)（视频录屏）和 [smoke.yaml](examples/flows/smoke.yaml)（按控件 ID 点击）。需按测试应用提供包名、启动 Ability 和页面文字。
 
 视频录屏需要显式设置 `MAESTRO_HARMONYOS_RECORDING=huawei-system`。该后端依赖 Huawei 系统录屏服务和 `mediatool`，不是通用 OpenHarmony 接口；测试期间需独占系统录屏，不要手工切换。默认最长 3 分钟、导出上限 512 MiB，详细限制见[录屏说明](docs/setup.md#视频录屏)，正常与失败视频的实测结果见[验收记录](docs/acceptance.md)。
 
-当前仅支持连接到本机 HDC 的单台设备，可以在该设备上批量运行 Flow。HAP 安装、权限修改、清除应用数据、Studio/MCP 和多设备分片尚未支持。已通过的流程使用本地演示应用，不代替活动约定的官方示例、20 轮统计或跨设备兼容验证。
+每个 CLI 会话操作一台本机 HDC 设备，可批量运行 Flow；[矩阵脚本](docs/device-matrix.md)按指定设备列表逐台调用并汇总结果。HAP 安装、权限修改、清除应用数据、Studio/MCP 和多设备分片尚未支持。已通过的流程使用本地演示应用，不代替活动约定的官方示例、20 轮统计或跨设备兼容验证。
 
 ## 活动交付
 
