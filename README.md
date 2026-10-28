@@ -2,7 +2,7 @@
 
 为 Maestro 增加 HarmonyOS 原生 UI 自动化测试能力，参与「课题 11：YAML 声明式 UI 测试框架 Maestro 支持鸿蒙」。
 
-**当前阶段：仓库初始化。鸿蒙驱动、录屏和 VSCode 扩展尚未实现，尚未完成编译或真机验证。**
+**当前进度：已提交技术方案与开发计划，本机工具检查通过。鸿蒙驱动、录屏和 VSCode 扩展尚未实现，尚未完成 Maestro 编译或真机验证。**
 
 ## 目标
 
@@ -12,8 +12,8 @@
 
 ## 开发资料
 
-- [技术方案](docs/technical-plan.md)
-- [开发里程碑](docs/milestones.md)
+- [课题开发技术方案](docs/technical-plan.md)：实现办法、主要风险和测试安排。
+- [开发里程碑计划](docs/milestones.md)：10 月 28 日至 12 月 23 日的阶段任务、交付物和完成标准。
 - [验收清单与证据要求](docs/acceptance.md)
 - [开发环境与上游接入](docs/setup.md)
 - [仓库发布与活动启动事项](docs/publishing.md)
