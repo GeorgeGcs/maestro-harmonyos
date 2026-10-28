@@ -11,12 +11,16 @@
 - 可授权 USB 调试的鸿蒙真机。具体系统和 API 版本由实际设备记录决定。
 
 ```powershell
+# 如本机已有个人工具路径配置，先加载到当前进程：
+if (Test-Path -LiteralPath ./config.local.ps1) { . ./config.local.ps1 }
 ./scripts/check-environment.ps1
 # HDC 尚未加入 PATH 时：
 ./scripts/check-environment.ps1 -HdcPath 'D:\path\to\hdc.exe'
 ```
 
 环境检查只定位工具并读取 Java/Node 版本，不修改环境变量、不安装依赖、不启动或操作设备。缺少工具时返回非零退出码。
+
+个人安装路径可放在被 Git 忽略的 `config.local.ps1` 中，设置当前 PowerShell 进程的 `JAVA_HOME` 和 PATH。该文件由各开发者按本机情况维护，不提交绝对路径，也不修改系统级环境变量。固定上游当前指定 Java 17 toolchain，优先使用完整 JDK 17（包含 `javac`）。
 
 ## 固定上游
 
