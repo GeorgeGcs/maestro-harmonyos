@@ -4,7 +4,7 @@
 
 项目仓库：[HarmonyPandaWorkshop/maestro-harmonyos](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos)
 
-目前已完成建仓和本机工具检查。JDK 17.0.13、HDC 3.2.0d 可用；已有鸿蒙真机，但最近一次设备列表为空，尚未连接验证。Maestro 构建、鸿蒙驱动和 VSCode 扩展均未开始。
+目前已完成建仓和工具检查，并开始 HDC 调用、设备选择与布局转换的主机端开发。JDK 17.0.13、HDC 3.2.0d 可用；已有鸿蒙真机，最近一次设备列表为空。完整驱动、平台接入和 VSCode 扩展尚未完成，实际构建与测试结果见[进展记录](progress/2026-10-28.md)。
 
 ## 要完成什么
 
@@ -71,7 +71,7 @@ YAML → Maestro CLI / Orchestra → HarmonyOSDriver → HDC / UITest → 鸿蒙
 3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c
 ```
 
-上游工作副本放在 `.upstream/maestro`，适配改动以补丁保存在 `patches/maestro/`；VSCode 扩展放在 `packages/vscode/`。交付时提供补丁顺序、构建命令和使用说明，从干净检出能够重建。当前只有上游获取脚本，尚无适配补丁或构建结果。
+上游工作副本放在 `.upstream/maestro`，适配改动以补丁保存在 `patches/maestro/`；VSCode 扩展放在 `packages/vscode/`。目前已提供主机模块补丁、回放脚本和独立测试入口。交付时仍需从干净检出验证完整构建和设备流程。
 
 固定上游使用 JDK 17。CLI 构建还包含 npm 资源构建、模拟器服务资源下载和 iOS 相关模块依赖，所以本机 Java 可用还不足以证明能编译。M1 先检查当前 Windows 主机能否完成构建，必要调整单独保留补丁。
 
@@ -86,7 +86,7 @@ YAML → Maestro CLI / Orchestra → HarmonyOSDriver → HDC / UITest → 鸿蒙
 | 操作录制和验收范围理解不一致 | M0～M1 | 确认示例、命令、录制方式及通过率口径，保留确认记录 |
 | 重试掩盖失败或导致重复操作 | M2 起持续检查 | 限制重试次数，检查动作结果，首次失败和重试后结果分别统计 |
 
-目前最大的未知项是真机能力和上游构建情况。两项通过后，才能更准确地判断剩余工作量。详细日期、阶段任务和交付物见[开发里程碑](milestones.md)。
+当前 Windows 上的客户端编译和新增测试已通过。真机 UITest、中文输入和录屏仍待验证，这几项会影响后续工作量。详细日期、阶段任务和交付物见[开发里程碑](milestones.md)。
 
 ## 怎么验证和交付
 

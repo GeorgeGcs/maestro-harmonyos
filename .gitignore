@@ -1,6 +1,8 @@
 # Local upstream checkout and generated outputs
 .upstream/
 .gradle/
+.gradle-user-home/
+**/.kotlin/
 **/build/
 **/node_modules/
 **/dist/

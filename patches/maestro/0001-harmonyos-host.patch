@@ -1,0 +1,1557 @@
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/HarmonyOsHostCli.kt b/maestro-client/src/main/java/maestro/harmonyos/HarmonyOsHostCli.kt
+new file mode 100644
+index 0000000..d740aef
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/HarmonyOsHostCli.kt
+@@ -0,0 +1,36 @@
++package maestro.harmonyos
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.harmonyos.hdc.HdcClient
++import kotlin.system.exitProcess
++
++/** Development entry point. This does not replace Maestro's Flow runner. */
++object HarmonyOsHostCli {
++    @JvmStatic
++    fun main(args: Array<String>) {
++        exitProcess(run(args.toList(), HdcClient(), ::println, System.err::println))
++    }
++
++    internal fun run(
++        args: List<String>,
++        client: HdcClient,
++        output: (String) -> Unit,
++        error: (String) -> Unit,
++    ): Int {
++        if (args != listOf("devices")) {
++            error("Usage: HarmonyOsHostCli devices")
++            return 2
++        }
++        return try {
++            output(ObjectMapper().writeValueAsString(mapOf("devices" to client.listDevices())))
++            0
++        } catch (failure: InterruptedException) {
++            Thread.currentThread().interrupt()
++            error("Device discovery interrupted")
++            130
++        } catch (failure: Exception) {
++            error("Device discovery failed: ${failure.message ?: failure.javaClass.simpleName}")
++            1
++        }
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
+new file mode 100644
+index 0000000..d5f352e
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
+@@ -0,0 +1,115 @@
++package maestro.harmonyos.hdc
++
++import java.nio.file.Path
++import java.time.Duration
++
++class HdcCommandException(val result: HdcCommandResult) :
++    HdcException("HDC command failed (exit ${result.exitCode}): ${diagnostic(result)}") {
++    companion object {
++        private fun diagnostic(result: HdcCommandResult): String =
++            result.stderr.ifBlank { result.stdout }.trim().take(2048)
++    }
++}
++
++class HdcDeviceSelectionException(message: String) : HdcException(message)
++
++/** Host transport only; shell command availability must be checked on the target device. */
++class HdcClient(
++    private val executablePath: String = defaultExecutable(),
++    private val runner: HdcCommandRunner = ProcessHdcCommandRunner(),
++    private val commandTimeout: Duration = Duration.ofSeconds(10),
++) {
++    init {
++        require(executablePath.isNotBlank() && '\u0000' !in executablePath) { "A valid HDC executable is required" }
++        require(!commandTimeout.isZero && !commandTimeout.isNegative) { "Timeout must be positive" }
++    }
++
++    fun listDevices(): List<String> {
++        val result = execute(listOf("list", "targets"), commandTimeout)
++        if (result.stderr.isNotBlank()) {
++            throw HdcException("HDC device listing returned diagnostics: ${result.stderr.trim().take(2048)}")
++        }
++        return parseDeviceList(result.stdout)
++    }
++
++    fun selectDevice(requestedId: String? = null): String {
++        if (requestedId != null) validateDeviceId(requestedId)
++        val devices = listDevices()
++        if (requestedId != null) {
++            if (requestedId !in devices) throw HdcDeviceSelectionException("The requested HDC device is not available")
++            return requestedId
++        }
++        return when (devices.size) {
++            0 -> throw HdcDeviceSelectionException("No HDC device found. Connect and authorize a device first.")
++            1 -> devices.single()
++            else -> throw HdcDeviceSelectionException("Multiple HDC devices found. Select a device explicitly.")
++        }
++    }
++
++    /**
++     * Arguments are quoted for the device shell as well as kept separate from host options.
++     * The exit code belongs to the host HDC process; callers must also check device-command results.
++     */
++    fun shell(
++        deviceId: String,
++        arguments: List<String>,
++        timeout: Duration = commandTimeout,
++    ): HdcCommandResult {
++        validateDeviceId(deviceId)
++        require(arguments.isNotEmpty() && arguments.first().isNotBlank()) { "A shell command is required" }
++        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
++        return execute(listOf("-t", deviceId, "shell", command), timeout)
++    }
++
++    fun receiveFile(
++        deviceId: String,
++        remotePath: String,
++        localPath: Path,
++        timeout: Duration = commandTimeout,
++    ): HdcCommandResult {
++        validateDeviceId(deviceId)
++        require(remotePath.startsWith('/') && '\u0000' !in remotePath && '\n' !in remotePath && '\r' !in remotePath) {
++            "An absolute device file path is required"
++        }
++        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout)
++    }
++
++    private fun execute(arguments: List<String>, timeout: Duration): HdcCommandResult {
++        val result = runner.run(listOf(executablePath) + arguments, timeout)
++        if (result.exitCode != 0 || hasHdcFailure(result.stdout) || hasHdcFailure(result.stderr)) {
++            throw HdcCommandException(result)
++        }
++        return result
++    }
++
++    companion object {
++        private val deviceIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")
++        private val diagnosticTokens = setOf("error", "fail", "failed", "failure", "warning", "warn", "usage", "help", "hdc")
++        private val hdcFailurePattern = Regex("(?im)^\\s*(?:\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
++
++        private fun defaultExecutable(): String = System.getenv("MAESTRO_HARMONYOS_HDC")
++            ?.takeIf { it.isNotBlank() } ?: "hdc"
++
++        private fun hasHdcFailure(output: String): Boolean = hdcFailurePattern.containsMatchIn(output)
++
++        internal fun parseDeviceList(output: String): List<String> {
++            val lines = output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
++            if (lines.isEmpty() || lines == listOf("[Empty]")) return emptyList()
++            if (lines.any { !deviceIdPattern.matches(it) || it.lowercase() in diagnosticTokens }) {
++                throw HdcException("Unexpected HDC device-list output; no device was selected")
++            }
++            return lines.distinct()
++        }
++
++        private fun validateDeviceId(deviceId: String) {
++            require(deviceIdPattern.matches(deviceId) && deviceId.lowercase() !in diagnosticTokens) {
++                "Invalid HDC device identifier"
++            }
++        }
++
++        internal fun quoteShellArgument(value: String): String {
++            require('\u0000' !in value) { "Shell arguments cannot contain NUL" }
++            return "'" + value.replace("'", "'\"'\"'") + "'"
++        }
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
+new file mode 100644
+index 0000000..5b3e7ec
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
+@@ -0,0 +1,171 @@
++package maestro.harmonyos.hdc
++
++import java.io.ByteArrayOutputStream
++import java.io.IOException
++import java.io.InputStream
++import java.time.Duration
++import java.util.concurrent.ExecutionException
++import java.util.concurrent.Executors
++import java.util.concurrent.Future
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.TimeoutException
++
++data class HdcCommandResult(val exitCode: Int, val stdout: String, val stderr: String)
++
++fun interface HdcCommandRunner {
++    fun run(command: List<String>, timeout: Duration): HdcCommandResult
++}
++
++open class HdcException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
++
++class HdcTimeoutException(val timeout: Duration) : HdcException("HDC command exceeded ${timeout.toMillis()} ms")
++
++class HdcOutputLimitException(stream: String, limit: Int) :
++    HdcException("HDC $stream exceeded the $limit byte output limit")
++
++/** Runs one finite command. Each output stream has its own memory limit. */
++class ProcessHdcCommandRunner(private val maxOutputBytes: Int = 4 * 1024 * 1024) : HdcCommandRunner {
++
++    init {
++        require(maxOutputBytes > 0) { "Output limit must be positive" }
++    }
++
++    override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++        require(command.isNotEmpty() && command.first().isNotBlank()) { "An executable is required" }
++        require(command.none { '\u0000' in it }) { "Command arguments cannot contain NUL" }
++        require(!timeout.isZero && !timeout.isNegative) { "Timeout must be positive" }
++        val timeoutNanos = timeout.toNanos()
++        val deadline = System.nanoTime() + timeoutNanos
++        val process = try {
++            ProcessBuilder(processArguments(command)).start()
++        } catch (e: IOException) {
++            throw HdcException("Unable to start HDC executable: ${command.first()}", e)
++        }
++        val descendants = linkedMapOf<Long, ProcessHandle>()
++        val readers = Executors.newFixedThreadPool(2) { task ->
++            Thread(task, "maestro-hdc-output").apply { isDaemon = true }
++        }
++        try {
++            // Finite commands must not wait for keyboard input.
++            process.outputStream.close()
++            val stdout = readers.submit<String> { readOutput(process.inputStream, "stdout") }
++            val stderr = readers.submit<String> { readOutput(process.errorStream, "stderr") }
++            while (true) {
++                rememberDescendants(process, descendants)
++                checkReader(stdout)
++                checkReader(stderr)
++                val remaining = remainingNanos(deadline, timeout)
++                if (process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25)), TimeUnit.NANOSECONDS)) {
++                    break
++                }
++            }
++            return HdcCommandResult(
++                process.exitValue(),
++                awaitOutput(stdout, deadline, timeout),
++                awaitOutput(stderr, deadline, timeout),
++            )
++        } catch (e: InterruptedException) {
++            terminate(process, descendants)
++            Thread.currentThread().interrupt()
++            throw e
++        } catch (e: Exception) {
++            terminate(process, descendants)
++            throw e
++        } finally {
++            readers.shutdownNow()
++            runCatching { process.inputStream.close() }
++            runCatching { process.errorStream.close() }
++            runCatching { process.outputStream.close() }
++        }
++    }
++
++    private fun readOutput(stream: InputStream, name: String): String {
++        val output = ByteArrayOutputStream(minOf(maxOutputBytes, 8192))
++        val buffer = ByteArray(8192)
++        while (true) {
++            val count = stream.read(buffer)
++            if (count < 0) break
++            if (count > maxOutputBytes - output.size()) throw HdcOutputLimitException(name, maxOutputBytes)
++            output.write(buffer, 0, count)
++        }
++        return output.toString(Charsets.UTF_8)
++    }
++
++    @Suppress("DEPRECATION")
++    private fun processArguments(command: List<String>): List<String> {
++        if (!System.getProperty("os.name").startsWith("Windows")) return command
++        val executable = command.first()
++        require('"' !in executable) { "Pass the Windows executable path without surrounding quotes" }
++        require(!executable.endsWith(".cmd", true) && !executable.endsWith(".bat", true)) {
++            "HDC must be a native executable, not a Windows command script"
++        }
++        val securityManager = System.getSecurityManager()
++        val ambiguousCommands = System.getProperty(
++            "jdk.lang.Process.allowAmbiguousCommands", if (securityManager == null) "true" else "false",
++        )
++        if (ambiguousCommands.equals("false", ignoreCase = true)) {
++            // The JDK escapes embedded quotes in strict mode, but interprets a leading/trailing
++            // quote pair as caller-supplied quoting and would silently strip literal quotes.
++            require(command.drop(1).none { it.length >= 2 && it.startsWith('"') && it.endsWith('"') }) {
++                "This JDK Windows strict quoting mode cannot preserve an argument enclosed in literal double quotes"
++            }
++            return command
++        }
++        require(securityManager == null) { "Legacy Windows argument quoting with a SecurityManager is not supported" }
++
++        // JDK 17's default Windows mode does not escape embedded quotes. Encode complete CRT
++        // arguments here; ProcessImpl preserves these outer-quoted strings without re-encoding.
++        return listOf(executable) + command.drop(1).map(::quoteWindowsArgument)
++    }
++
++    private fun quoteWindowsArgument(value: String): String = buildString {
++        append('"')
++        var backslashes = 0
++        value.forEach { character ->
++            if (character == '\\') {
++                backslashes++
++            } else {
++                repeat(if (character == '"') backslashes * 2 + 1 else backslashes) { append('\\') }
++                append(character)
++                backslashes = 0
++            }
++        }
++        // Backslashes immediately before the closing quote must be doubled.
++        repeat(backslashes * 2) { append('\\') }
++        append('"')
++    }
++
++    private fun checkReader(reader: Future<String>) {
++        if (reader.isDone) unwrap { reader.get() }
++    }
++
++    private fun awaitOutput(reader: Future<String>, deadline: Long, timeout: Duration): String = try {
++        unwrap { reader.get(remainingNanos(deadline, timeout), TimeUnit.NANOSECONDS) }
++    } catch (_: TimeoutException) {
++        throw HdcTimeoutException(timeout)
++    }
++
++    private fun <T> unwrap(action: () -> T): T = try {
++        action()
++    } catch (e: ExecutionException) {
++        val cause = e.cause
++        if (cause is HdcException) throw cause
++        throw HdcException("Unable to read HDC command output", cause ?: e)
++    }
++
++    private fun remainingNanos(deadline: Long, timeout: Duration): Long {
++        val remaining = deadline - System.nanoTime()
++        if (remaining <= 0) throw HdcTimeoutException(timeout)
++        return remaining
++    }
++
++    private fun rememberDescendants(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
++        process.descendants().use { children -> children.forEach { descendants[it.pid()] = it } }
++    }
++
++    private fun terminate(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
++        runCatching { rememberDescendants(process, descendants) }
++        descendants.values.toList().asReversed().forEach { child -> runCatching { child.destroyForcibly() } }
++        runCatching { process.destroyForcibly() }
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
+new file mode 100644
+index 0000000..9c3df94
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
+@@ -0,0 +1,153 @@
++package maestro.harmonyos.layout
++
++import maestro.TreeNode
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcException
++import maestro.utils.TempFileHandler
++import java.nio.ByteBuffer
++import java.nio.charset.CharacterCodingException
++import java.nio.charset.CodingErrorAction
++import java.nio.charset.StandardCharsets
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++
++/**
++ * Reads a fresh dump using the OpenHarmony UITest `dumpLayout -p` interface.
++ * Availability and permissions on commercial HarmonyOS devices remain unverified.
++ */
++class HierarchyReader(
++    private val hdc: HdcClient,
++    private val deviceId: String,
++    private val parser: UitestLayoutParser = UitestLayoutParser(),
++    private val commandTimeout: Duration = Duration.ofSeconds(15),
++    private val cleanupTimeout: Duration = Duration.ofSeconds(2),
++    private val maxLayoutBytes: Int = 8 * 1024 * 1024,
++) {
++    init {
++        require(deviceId.isNotBlank()) { "A target device is required" }
++        require(!commandTimeout.isNegative && !commandTimeout.isZero) { "Command timeout must be positive" }
++        require(!cleanupTimeout.isNegative && !cleanupTimeout.isZero) { "Cleanup timeout must be positive" }
++        require(maxLayoutBytes in 1..8 * 1024 * 1024) { "Layout limit must be between 1 byte and 8 MiB" }
++    }
++
++    @Synchronized
++    fun read(): TreeNode {
++        if (Thread.currentThread().isInterrupted) {
++            throw InterruptedException("Hierarchy read interrupted before creating temporary files")
++        }
++        val files = TempFileHandler()
++        var localDirectory: Path? = null
++        var localFile: Path? = null
++        val remotePath = "/data/local/tmp/maestro-layout-${UUID.randomUUID()}.json"
++        var dumpAttempted = false
++        var failure: Throwable? = null
++        try {
++            localDirectory = files.createTempDirectory("maestro-harmonyos-layout-").toPath()
++            // No pre-existing local file can satisfy a failed or incomplete transfer.
++            localFile = localDirectory.resolve("layout.json")
++            checkInterrupted()
++            dumpAttempted = true
++            val result = hdc.shell(deviceId, listOf("uitest", "dumpLayout", "-p", remotePath), commandTimeout)
++            if (DUMP_FAILURE.containsMatchIn(result.stdout) || DUMP_FAILURE.containsMatchIn(result.stderr)) {
++                throw HierarchyReadException("UITest failed to create the requested layout")
++            }
++            checkInterrupted()
++            hdc.receiveFile(deviceId, remotePath, localFile, commandTimeout)
++            checkInterrupted()
++            val root = parser.parse(readLayout(localFile))
++            checkInterrupted()
++            return root
++        } catch (error: Throwable) {
++            failure = error
++            if (error is InterruptedException) Thread.currentThread().interrupt()
++            throw error
++        } finally {
++            val cleanupErrors = mutableListOf<Throwable>()
++            var cleanupInterruption: InterruptedException? = null
++            if (dumpAttempted) {
++                if (Thread.currentThread().isInterrupted) {
++                    cleanupErrors += HierarchyReadException(
++                        "Device cleanup skipped after interruption; temporary layout may remain at $remotePath",
++                    )
++                } else {
++                    try {
++                        val result = hdc.shell(deviceId, listOf("rm", "-f", remotePath), cleanupTimeout)
++                        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
++                            throw HierarchyReadException("Device cleanup returned diagnostics for $remotePath")
++                        }
++                    } catch (error: Throwable) {
++                        if (error is InterruptedException) {
++                            Thread.currentThread().interrupt()
++                            cleanupInterruption = error
++                            cleanupErrors += HierarchyReadException(
++                                "Device cleanup interrupted; temporary layout may remain at $remotePath",
++                            )
++                        } else {
++                            cleanupErrors += HierarchyReadException("Could not remove temporary layout $remotePath", error)
++                        }
++                    }
++                }
++            }
++            for (path in listOfNotNull(localFile, localDirectory)) {
++                try {
++                    Files.deleteIfExists(path)
++                } catch (error: Exception) {
++                    cleanupErrors += HierarchyReadException("Could not remove a local layout temporary file", error)
++                }
++            }
++            // Keep upstream's lifecycle cleanup as a fallback if explicit deletion failed.
++            files.close()
++            if (cleanupErrors.isNotEmpty()) {
++                val originalFailure = failure
++                val interruption = cleanupInterruption
++                if (originalFailure != null) {
++                    interruption?.let(originalFailure::addSuppressed)
++                    cleanupErrors.forEach(originalFailure::addSuppressed)
++                } else if (interruption != null) {
++                    cleanupErrors.forEach(interruption::addSuppressed)
++                    throw interruption
++                } else {
++                    val error = HierarchyReadException("Layout was read but temporary file cleanup failed")
++                    cleanupErrors.forEach(error::addSuppressed)
++                    throw error
++                }
++            }
++        }
++    }
++
++    private fun readLayout(path: Path): String {
++        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
++            throw HierarchyReadException("HDC did not create the requested local layout file")
++        }
++        val size = Files.size(path)
++        if (size <= 0 || size > maxLayoutBytes) {
++            throw HierarchyReadException("Layout file must contain between 1 and $maxLayoutBytes bytes")
++        }
++        val bytes = Files.newInputStream(path).use { it.readNBytes(maxLayoutBytes + 1) }
++        if (bytes.size.toLong() != size || Files.size(path) != size) {
++            throw HierarchyReadException("Layout file changed while it was being read")
++        }
++        if (bytes.size > maxLayoutBytes) throw HierarchyReadException("Layout file exceeds $maxLayoutBytes bytes")
++        return try {
++            StandardCharsets.UTF_8.newDecoder()
++                .onMalformedInput(CodingErrorAction.REPORT)
++                .onUnmappableCharacter(CodingErrorAction.REPORT)
++                .decode(ByteBuffer.wrap(bytes)).toString()
++        } catch (error: CharacterCodingException) {
++            throw HierarchyReadException("Layout file is not valid UTF-8", error)
++        }
++    }
++
++    private fun checkInterrupted() {
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("Hierarchy read interrupted")
++    }
++
++    private companion object {
++        val DUMP_FAILURE = Regex("(?im)^\\s*DumpLayout failed:")
++    }
++}
++
++class HierarchyReadException(message: String, cause: Throwable? = null) : HdcException(message, cause)
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/UitestLayoutParser.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/UitestLayoutParser.kt
+new file mode 100644
+index 0000000..7670c31
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/layout/UitestLayoutParser.kt
+@@ -0,0 +1,137 @@
++package maestro.harmonyos.layout
++
++import com.fasterxml.jackson.core.JsonFactory
++import com.fasterxml.jackson.core.JsonProcessingException
++import com.fasterxml.jackson.core.StreamReadFeature
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.TreeNode
++
++/** Parses the attributes/children format produced by OpenHarmony UITest dumpLayout. */
++class UitestLayoutParser {
++
++    fun parse(json: String): TreeNode {
++        if (json.length > MAX_INPUT_CHARS) {
++            throw UitestLayoutException("UITest layout exceeds $MAX_INPUT_CHARS characters")
++        }
++        val root = try {
++            mapper.readTree(json)
++        } catch (error: JsonProcessingException) {
++            throw UitestLayoutException("Invalid UITest layout JSON", error)
++        }
++        if (root == null || root.isNull || root.isMissingNode) {
++            throw UitestLayoutException("UITest layout is empty")
++        }
++        val state = ParseState()
++        return if (root.isArray) {
++            // dumpLayout -i emits a window array. This wrapper has no clickable coordinates.
++            TreeNode(children = root.mapIndexed { index, node -> parseNode(node, "$[$index]", 0, state) })
++        } else {
++            parseNode(root, "$", 0, state)
++        }
++    }
++
++    private fun parseNode(node: JsonNode, path: String, depth: Int, state: ParseState): TreeNode {
++        if (depth > MAX_DEPTH) fail(path, "layout nesting exceeds $MAX_DEPTH")
++        if (++state.nodes > MAX_NODES) fail(path, "layout contains more than $MAX_NODES nodes")
++        if (!node.isObject) fail(path, "expected a node object")
++        val source = node.get("attributes")
++        if (source == null || !source.isObject) fail(path, "expected an attributes object")
++
++        val attributes = linkedMapOf<String, String>()
++        source.fields().forEach { (name, value) ->
++            when {
++                value.isNull -> Unit
++                value.isValueNode -> attributes[name] = value.asText()
++                else -> fail("$path.attributes.$name", "expected a scalar attribute")
++            }
++        }
++        val clickable = booleanAttribute(source, "clickable", path)
++        val enabled = booleanAttribute(source, "enabled", path)
++        val focused = booleanAttribute(source, "focused", path)
++        val checked = booleanAttribute(source, "checked", path)
++        val selected = booleanAttribute(source, "selected", path)
++        val visible = booleanAttribute(source, "visible", path)
++
++        // id and key are InspectorKey in the referenced UITest implementation;
++        // accessibilityId is a runtime identifier and must not become a resource-id.
++        attributes.remove("resource-id")
++        val id = attributes["id"]?.takeIf { it.isNotEmpty() }
++            ?: attributes["key"]?.takeIf { it.isNotEmpty() }
++        id?.let { attributes["resource-id"] = it }
++        attributes.remove("hintText")
++        attributes["hint"]?.let { attributes["hintText"] = it }
++        attributes.remove("class")
++        attributes["type"]?.let { attributes["class"] = it }
++
++        attributes.remove("bounds")
++        val bounds = parseBounds(source.get("bounds"), "$path.attributes.bounds")
++        // Keep hidden ancestors for their children, but do not expose a hidden node as tappable.
++        if (bounds != null && visible != false) attributes["bounds"] = bounds
++
++        val children = node.get("children")
++        if (children != null && !children.isNull && !children.isArray) {
++            fail("$path.children", "expected an array")
++        }
++        return TreeNode(
++            attributes = attributes,
++            children = children?.takeUnless { it.isNull }?.mapIndexed { index, child ->
++                parseNode(child, "$path.children[$index]", depth + 1, state)
++            } ?: emptyList(),
++            clickable = clickable,
++            enabled = enabled,
++            focused = focused,
++            checked = checked,
++            selected = selected,
++        )
++    }
++
++    private fun booleanAttribute(attributes: JsonNode, name: String, path: String): Boolean? {
++        val value = attributes.get(name) ?: return null
++        if (value.isNull) return null
++        if (value.isBoolean) return value.booleanValue()
++        if (value.isTextual) {
++            return when (value.textValue()) {
++                "" -> null // The merged-window root uses empty strings for unavailable states.
++                "true" -> true
++                "false" -> false
++                else -> fail("$path.attributes.$name", "expected true, false or an empty state")
++            }
++        }
++        fail("$path.attributes.$name", "expected a boolean state")
++    }
++
++    private fun parseBounds(value: JsonNode?, path: String): String? {
++        if (value == null || value.isNull || (value.isTextual && value.textValue().isEmpty())) return null
++        if (!value.isTextual) fail(path, "expected bounds in [left,top][right,bottom] form")
++        val match = BOUNDS.matchEntire(value.textValue())
++            ?: fail(path, "expected bounds in [left,top][right,bottom] form")
++        val (left, top, right, bottom) = match.groupValues.drop(1).map {
++            it.toIntOrNull() ?: fail(path, "coordinate is outside the integer range")
++        }
++        val width = right.toLong() - left
++        val height = bottom.toLong() - top
++        if (width < 0 || height < 0) fail(path, "bounds have reversed edges")
++        if (width > Int.MAX_VALUE || height > Int.MAX_VALUE) fail(path, "bounds dimensions exceed the integer range")
++        // UITest can report a zero-area synthetic root or clipped node. It has no tap target.
++        if (width == 0L || height == 0L) return null
++        return "[$left,$top][$right,$bottom]"
++    }
++
++    private fun fail(path: String, reason: String): Nothing = throw UitestLayoutException("$path: $reason")
++
++    private class ParseState(var nodes: Int = 0)
++
++    private companion object {
++        const val MAX_INPUT_CHARS = 8 * 1024 * 1024
++        const val MAX_DEPTH = 128
++        const val MAX_NODES = 50_000
++        val BOUNDS = Regex("\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*]\\s*\\[\\s*(-?\\d+)\\s*,\\s*(-?\\d+)\\s*]")
++        val mapper = ObjectMapper(
++            JsonFactory.builder().enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build(),
++        ).enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++    }
++}
++
++class UitestLayoutException(message: String, cause: Throwable? = null) : IllegalArgumentException(message, cause)
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/HarmonyOsHostCliTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/HarmonyOsHostCliTest.kt
+new file mode 100644
+index 0000000..7785dcd
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/HarmonyOsHostCliTest.kt
+@@ -0,0 +1,46 @@
++package maestro.harmonyos
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertFalse
++import org.junit.jupiter.api.Assertions.assertTrue
++import org.junit.jupiter.api.Test
++
++class HarmonyOsHostCliTest {
++    @Test
++    fun `an empty device list is a successful discovery result`() {
++        val output = mutableListOf<String>()
++        val errors = mutableListOf<String>()
++        val client = HdcClient(runner = HdcCommandRunner { _, _ -> HdcCommandResult(0, "[Empty]\n", "") })
++
++        assertEquals(0, HarmonyOsHostCli.run(listOf("devices"), client, output::add, errors::add))
++        assertTrue(ObjectMapper().readTree(output.single())["devices"].isEmpty)
++        assertTrue(errors.isEmpty())
++    }
++
++    @Test
++    fun `failed discovery must not become a successful empty list`() {
++        val output = mutableListOf<String>()
++        val errors = mutableListOf<String>()
++        val client = HdcClient(runner = HdcCommandRunner { _, _ -> HdcCommandResult(1, "", "connection failed") })
++
++        assertEquals(1, HarmonyOsHostCli.run(listOf("devices"), client, output::add, errors::add))
++        assertTrue(output.isEmpty())
++        assertTrue(errors.single().contains("connection failed"))
++    }
++
++    @Test
++    fun `unknown commands fail without invoking hdc`() {
++        var invoked = false
++        val client = HdcClient(runner = HdcCommandRunner { _, _ ->
++            invoked = true
++            HdcCommandResult(0, "", "")
++        })
++
++        assertEquals(2, HarmonyOsHostCli.run(listOf("test", "flow.yaml"), client, {}, {}))
++        assertFalse(invoked)
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
+new file mode 100644
+index 0000000..267dbab
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
+@@ -0,0 +1,133 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.nio.file.Path
++import java.time.Duration
++
++class HdcClientTest {
++    @Test
++    fun `empty device output is an empty list`() {
++        listOf("", "  \r\n", "[Empty]\r\n").forEach { output ->
++            assertThat(client(output).listDevices()).isEmpty()
++        }
++    }
++
++    @Test
++    fun `device discovery uses plain listing and removes duplicates`() {
++        val runner = RecordingRunner(HdcCommandResult(0, "USB-001\r\n192.0.2.1:8710\r\nUSB-001\r\n", ""))
++        val client = HdcClient("C:/SDK with spaces/hdc.exe", runner)
++
++        assertThat(client.listDevices()).containsExactly("USB-001", "192.0.2.1:8710").inOrder()
++        assertThat(runner.command).containsExactly("C:/SDK with spaces/hdc.exe", "list", "targets").inOrder()
++    }
++
++    @Test
++    fun `diagnostics are not treated as device identifiers`() {
++        listOf(
++            "[Fail] failed to connect",
++            "error: device not found",
++            "daemon started successfully",
++            "error",
++            "USB-001 USB Connected",
++            "USB-001\n[Empty]",
++            "USB-001\n[Warning] daemon restarted",
++        ).forEach { output ->
++            assertThrows(HdcException::class.java) { client(output).listDevices() }
++        }
++    }
++
++    @Test
++    fun `listing diagnostics on stderr fail even with zero exit code`() {
++        val runner = RecordingRunner(HdcCommandResult(0, "USB-001", "connection warning"))
++        assertThrows(HdcException::class.java) { HdcClient("hdc", runner).listDevices() }
++    }
++
++    @Test
++    fun `single device is selected automatically`() {
++        assertThat(client("USB-001").selectDevice()).isEqualTo("USB-001")
++    }
++
++    @Test
++    fun `missing and ambiguous devices require user selection`() {
++        assertThrows(HdcDeviceSelectionException::class.java) { client("[Empty]").selectDevice() }
++        assertThrows(HdcDeviceSelectionException::class.java) { client("USB-001\nUSB-002").selectDevice() }
++        assertThrows(HdcDeviceSelectionException::class.java) { client("USB-001").selectDevice("USB-002") }
++        assertThat(client("USB-001\nUSB-002").selectDevice("USB-002")).isEqualTo("USB-002")
++    }
++
++    @Test
++    fun `nonzero exit preserves error output`() {
++        val result = HdcCommandResult(17, "output", "connection lost")
++        val error = assertThrows(HdcCommandException::class.java) {
++            HdcClient("hdc", RecordingRunner(result)).listDevices()
++        }
++        assertThat(error.result).isEqualTo(result)
++        assertThat(error.message).contains("exit 17")
++        assertThat(error.message).contains("connection lost")
++    }
++
++    @Test
++    fun `failure text with a successful host exit is still an error`() {
++        val error = assertThrows(HdcCommandException::class.java) {
++            HdcClient("hdc", RecordingRunner(HdcCommandResult(0, "[Fail] device offline", "")))
++                .shell("USB-001", listOf("uitest", "dumpLayout"))
++        }
++        assertThat(error.result.exitCode).isEqualTo(0)
++    }
++
++    @Test
++    fun `shell arguments are quoted for device shell and target is explicit`() {
++        val runner = RecordingRunner(HdcCommandResult(0, "done", ""))
++        val timeout = Duration.ofSeconds(3)
++        HdcClient("hdc", runner).shell(
++            "USB-001", listOf("printf", "%s", "中文 text\n'quoted'; echo \$HOME", ""), timeout,
++        )
++
++        assertThat(runner.command).containsExactly(
++            "hdc", "-t", "USB-001", "shell",
++            "'printf' '%s' '中文 text\n'\"'\"'quoted'\"'\"'; echo \$HOME' ''",
++        ).inOrder()
++        assertThat(runner.timeout).isEqualTo(timeout)
++    }
++
++    @Test
++    fun `invalid targets and NUL arguments fail before starting a command`() {
++        val runner = RecordingRunner(HdcCommandResult(0, "", ""))
++        val client = HdcClient("hdc", runner)
++        listOf("", "-t", "USB 001", "USB;reboot", "USB\n001").forEach { target ->
++            assertThrows(IllegalArgumentException::class.java) { client.shell(target, listOf("echo")) }
++        }
++        assertThrows(IllegalArgumentException::class.java) { client.shell("USB-001", listOf("echo", "\u0000")) }
++        assertThrows(IllegalArgumentException::class.java) { client.shell("USB-001", emptyList()) }
++        assertThat(runner.command).isEmpty()
++    }
++
++    @Test
++    fun `receive file uses explicit target and separate path arguments`() {
++        val runner = RecordingRunner(HdcCommandResult(0, "FileTransfer finish", ""))
++        val target = Path.of("artifacts", "screen capture.png")
++        HdcClient("hdc", runner).receiveFile("USB-001", "/data/local/tmp/capture.png", target)
++
++        assertThat(runner.command).containsExactly(
++            "hdc", "-t", "USB-001", "file", "recv", "/data/local/tmp/capture.png", target.toAbsolutePath().toString(),
++        ).inOrder()
++        assertThrows(IllegalArgumentException::class.java) {
++            HdcClient("hdc", runner).receiveFile("USB-001", "-a", target)
++        }
++    }
++
++    private fun client(output: String): HdcClient = HdcClient("hdc", RecordingRunner(HdcCommandResult(0, output, "")))
++
++    private class RecordingRunner(private val result: HdcCommandResult) : HdcCommandRunner {
++        var command: List<String> = emptyList()
++        var timeout: Duration? = null
++
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            this.command = command
++            this.timeout = timeout
++            return result
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
+new file mode 100644
+index 0000000..e8bdd2d
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
+@@ -0,0 +1,189 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.io.File
++import java.nio.file.Path
++import java.time.Duration
++import java.util.Base64
++import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.atomic.AtomicReference
++import kotlin.system.exitProcess
++
++class ProcessHdcCommandRunnerTest {
++    @Test
++    fun `captures stdout stderr and nonzero exit independently`() {
++        val result = ProcessHdcCommandRunner().run(HdcProcessTestChild.command("failure"), Duration.ofSeconds(10))
++
++        assertThat(result.exitCode).isEqualTo(7)
++        assertThat(result.stdout.trim()).isEqualTo("command output")
++        assertThat(result.stderr.trim()).isEqualTo("command error")
++    }
++
++    @Test
++    fun `host arguments remain literal without a command shell`() {
++        val arguments = listOf(
++            "space separated", "中文", "a'\"b", "\$HOME; echo injected", "", "line\nbreak",
++            "\"", "\"\"", "\"quoted\"", "plain\\", "path with space\\", "\\", "\\\\",
++            " leading ", "\ttab\t", "line\r\nbreak",
++        ) + (0..5).flatMap { count ->
++            val slashes = "\\".repeat(count)
++            listOf("before${slashes}\"after", "before${slashes}\"", "tail with space$slashes")
++        }
++        val result = ProcessHdcCommandRunner().run(
++            HdcProcessTestChild.command("arguments", *arguments.toTypedArray()), Duration.ofSeconds(10),
++        )
++        val decoded = result.stdout.lineSequence().filter { it.startsWith("arg:") }
++            .map { String(Base64.getDecoder().decode(it.removePrefix("arg:")), Charsets.UTF_8) }.toList()
++
++        assertThat(result.exitCode).isEqualTo(0)
++        assertThat(decoded).containsExactlyElementsIn(arguments).inOrder()
++    }
++
++    @Test
++    fun `drains both streams while process is running`() {
++        val result = ProcessHdcCommandRunner().run(HdcProcessTestChild.command("flood"), Duration.ofSeconds(10))
++
++        assertThat(result.exitCode).isEqualTo(0)
++        assertThat(result.stdout.length).isEqualTo(262144)
++        assertThat(result.stderr.length).isEqualTo(262144)
++    }
++
++    @Test
++    fun `output limit fails explicitly instead of truncating a result`() {
++        assertThrows(HdcOutputLimitException::class.java) {
++            ProcessHdcCommandRunner(maxOutputBytes = 1024).run(
++                HdcProcessTestChild.command("flood"), Duration.ofSeconds(10),
++            )
++        }
++    }
++
++    @Test
++    fun `timeout terminates the command and its child`() {
++        TempFileHandler().use { temporary ->
++            val parentPid = temporary.createTempFile("hdc-parent", ".pid")
++            val childPid = temporary.createTempFile("hdc-child", ".pid")
++            try {
++                assertThrows(HdcTimeoutException::class.java) {
++                    ProcessHdcCommandRunner().run(
++                        HdcProcessTestChild.command("spawn", parentPid.path, childPid.path), Duration.ofSeconds(3),
++                    )
++                }
++                assertStopped(parentPid)
++                assertStopped(childPid)
++            } finally {
++                stopFromPidFile(parentPid)
++                stopFromPidFile(childPid)
++            }
++        }
++    }
++
++    @Test
++    fun `interruption terminates the command and preserves interrupted status`() {
++        TempFileHandler().use { temporary ->
++            val pidFile = temporary.createTempFile("hdc-interrupted", ".pid")
++            val thrown = AtomicReference<Throwable>()
++            val interrupted = AtomicBoolean()
++            val thread = Thread {
++                try {
++                    ProcessHdcCommandRunner().run(
++                        HdcProcessTestChild.command("sleep", pidFile.path), Duration.ofSeconds(30),
++                    )
++                } catch (e: Throwable) {
++                    thrown.set(e)
++                    interrupted.set(Thread.currentThread().isInterrupted)
++                }
++            }
++            thread.start()
++            try {
++                waitUntil { pidFile.readText().trim().toLongOrNull() != null }
++                thread.interrupt()
++                thread.join(5000)
++
++                assertThat(thread.isAlive).isFalse()
++                assertThat(thrown.get()).isInstanceOf(InterruptedException::class.java)
++                assertThat(interrupted.get()).isTrue()
++                assertStopped(pidFile)
++            } finally {
++                thread.interrupt()
++                stopFromPidFile(pidFile)
++                thread.join(5000)
++            }
++        }
++    }
++
++    @Test
++    fun `missing executable and invalid inputs fail clearly`() {
++        assertThrows(HdcException::class.java) {
++            ProcessHdcCommandRunner().run(listOf("maestro-nonexistent-hdc-test-executable"), Duration.ofSeconds(1))
++        }
++        assertThrows(IllegalArgumentException::class.java) {
++            ProcessHdcCommandRunner().run(HdcProcessTestChild.command("failure"), Duration.ZERO)
++        }
++        assertThrows(IllegalArgumentException::class.java) {
++            ProcessHdcCommandRunner().run(listOf("hdc", "\u0000"), Duration.ofSeconds(1))
++        }
++    }
++
++    private fun assertStopped(pidFile: File) {
++        val pid = pidFile.readText().trim().toLong()
++        waitUntil { !ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }
++    }
++
++    private fun stopFromPidFile(pidFile: File) {
++        pidFile.readText().trim().toLongOrNull()?.let { pid ->
++            ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
++        }
++    }
++
++    private fun waitUntil(condition: () -> Boolean) {
++        val deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
++        while (!condition() && System.nanoTime() < deadline) Thread.sleep(20)
++        assertThat(condition()).isTrue()
++    }
++}
++
++/** Local JVM fixture; never invokes HDC or accesses a device. */
++object HdcProcessTestChild {
++    fun command(vararg arguments: String): List<String> {
++        val windows = System.getProperty("os.name").startsWith("Windows")
++        val java = Path.of(System.getProperty("java.home"), "bin", if (windows) "java.exe" else "java").toString()
++        val classpath = listOf(HdcProcessTestChild::class.java, Unit::class.java)
++            .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toString() }
++            .distinct().joinToString(File.pathSeparator)
++        return listOf(java, "-Dfile.encoding=UTF-8", "-cp", classpath, HdcProcessTestChild::class.java.name) + arguments
++    }
++
++    @JvmStatic
++    fun main(arguments: Array<String>) {
++        when (arguments[0]) {
++            "failure" -> {
++                println("command output")
++                System.err.println("command error")
++                exitProcess(7)
++            }
++            "arguments" -> arguments.drop(1).forEach {
++                println("arg:" + Base64.getEncoder().encodeToString(it.toByteArray(Charsets.UTF_8)))
++            }
++            "flood" -> {
++                val bytes = ByteArray(4096) { 'x'.code.toByte() }
++                repeat(64) {
++                    System.out.write(bytes)
++                    System.err.write(bytes)
++                }
++            }
++            "sleep" -> {
++                File(arguments[1]).writeText(ProcessHandle.current().pid().toString())
++                Thread.sleep(30000)
++            }
++            "spawn" -> {
++                File(arguments[1]).writeText(ProcessHandle.current().pid().toString())
++                ProcessBuilder(command("sleep", arguments[2])).inheritIO().start()
++                Thread.sleep(30000)
++            }
++            else -> error("Unknown fixture mode")
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt
+new file mode 100644
+index 0000000..b63d848
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt
+@@ -0,0 +1,227 @@
++package maestro.harmonyos.layout
++
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandException
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++
++class HierarchyReaderTest {
++    @Test
++    fun `reads fresh layout with target bound to dump transfer and cleanup`() {
++        val runner = LayoutRunner()
++        val reader = reader(runner)
++        val root = reader.read()
++
++        assertThat(root.attributes["text"]).isEqualTo("新的布局")
++        assertThat(runner.calls.map { it.command.subList(1, 3) })
++            .containsExactly(listOf("-t", "USB-TEST"), listOf("-t", "USB-TEST"), listOf("-t", "USB-TEST")).inOrder()
++        val remote = runner.remotePaths.single()
++        assertThat(remote).matches("/data/local/tmp/maestro-layout-[a-f0-9-]{36}\\.json")
++        assertThat(runner.calls.first().command.last()).isEqualTo("'uitest' 'dumpLayout' '-p' '$remote'")
++        assertThat(runner.calls[1].command.subList(3, 6)).containsExactly("file", "recv", remote).inOrder()
++        assertThat(runner.calls.last().command.last()).isEqualTo("'rm' '-f' '$remote'")
++        assertThat(runner.calls.last().timeout).isEqualTo(Duration.ofSeconds(2))
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `does not require a particular success sentence`() {
++        val runner = LayoutRunner(dumpResult = HdcCommandResult(0, "布局已保存", ""))
++        assertThat(reader(runner).read().attributes["text"]).isEqualTo("新的布局")
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `success without a newly received file fails`() {
++        val runner = LayoutRunner(writeFile = false)
++        assertThrows(HierarchyReadException::class.java) { reader(runner).read() }
++        assertThat(runner.calls).hasSize(3)
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `a later failed transfer cannot reuse a previous layout`() {
++        val runner = LayoutRunner()
++        val reader = reader(runner)
++        reader.read()
++        runner.writeFile = false
++        assertThrows(HierarchyReadException::class.java) { reader.read() }
++
++        assertThat(runner.remotePaths.toSet()).hasSize(2)
++        assertThat(runner.localPaths.toSet()).hasSize(2)
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `dump command failure still cleans up and does not receive a file`() {
++        val runner = LayoutRunner(dumpResult = HdcCommandResult(4, "", "UITest unavailable"))
++        val error = assertThrows(HdcCommandException::class.java) { reader(runner).read() }
++        assertThat(error.result.exitCode).isEqualTo(4)
++        assertThat(runner.calls).hasSize(2)
++        assertThat(runner.localPaths).isEmpty()
++        assertThat(runner.calls.last().command.last()).startsWith("'rm' '-f'")
++    }
++
++    @Test
++    fun `device failure text with zero host exit does not trigger a transfer`() {
++        val runner = LayoutRunner(dumpResult = HdcCommandResult(0, "DumpLayout failed:permission denied", ""))
++        assertThrows(HierarchyReadException::class.java) { reader(runner).read() }
++        assertThat(runner.calls).hasSize(2)
++        assertThat(runner.localPaths).isEmpty()
++    }
++
++    @Test
++    fun `partial transfer failure preserves the original error and removes the partial file`() {
++        val runner = LayoutRunner(receiveResult = HdcCommandResult(1, "", "transfer interrupted"))
++        val error = assertThrows(HdcCommandException::class.java) { reader(runner).read() }
++        assertThat(error.result.stderr).isEqualTo("transfer interrupted")
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `empty oversized invalid encoding and malformed layouts fail and clean up`() {
++        listOf(byteArrayOf(), ByteArray(33) { 65 }, byteArrayOf(0xc3.toByte(), 0x28))
++            .forEach { bytes ->
++                val runner = LayoutRunner(contents = bytes)
++                assertThrows(HierarchyReadException::class.java) { reader(runner, maxLayoutBytes = 32).read() }
++                assertRemoved(runner)
++            }
++        val invalidJson = LayoutRunner(contents = "not-json".toByteArray())
++        assertThrows(UitestLayoutException::class.java) { reader(invalidJson).read() }
++        assertRemoved(invalidJson)
++    }
++
++    @Test
++    fun `cleanup failure does not replace a parse failure`() {
++        val runner = LayoutRunner(contents = "invalid-json".toByteArray(), cleanupResult = HdcCommandResult(1, "", "denied"))
++        val error = assertThrows(UitestLayoutException::class.java) { reader(runner).read() }
++        assertThat(error.suppressed).hasLength(1)
++        assertThat(error.suppressed.single().message).contains(runner.remotePaths.single())
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `cleanup failure after a successful parse is reported`() {
++        val runner = LayoutRunner(cleanupResult = HdcCommandResult(0, "", "rm: permission denied"))
++        val error = assertThrows(HierarchyReadException::class.java) { reader(runner).read() }
++        assertThat(error.message).contains("cleanup failed")
++        assertThat(error.suppressed.single().message).contains(runner.remotePaths.single())
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `cleanup interruption is rethrown after removing local files`() {
++        val interruption = InterruptedException("cleanup interrupted")
++        val runner = LayoutRunner(cleanupInterruption = interruption)
++        try {
++            val error = assertThrows(InterruptedException::class.java) { reader(runner).read() }
++            assertThat(error).isSameInstanceAs(interruption)
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(runner.calls).hasSize(3)
++            assertThat(error.suppressed.single().message).contains(runner.remotePaths.single())
++            assertRemoved(runner)
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    @Test
++    fun `cleanup interruption does not replace an earlier parse failure`() {
++        val interruption = InterruptedException("cleanup interrupted")
++        val runner = LayoutRunner(contents = "invalid-json".toByteArray(), cleanupInterruption = interruption)
++        try {
++            val error = assertThrows(UitestLayoutException::class.java) { reader(runner).read() }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(error.suppressed).asList().contains(interruption)
++            assertThat(error.suppressed.last().message).contains(runner.remotePaths.single())
++            assertRemoved(runner)
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    @Test
++    fun `interruption skips remote cleanup and preserves its path for later removal`() {
++        val runner = LayoutRunner(interruptTransfer = true)
++        try {
++            val error = assertThrows(InterruptedException::class.java) { reader(runner).read() }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(runner.calls).hasSize(2)
++            assertThat(error.suppressed.single().message).contains(runner.remotePaths.single())
++            assertRemoved(runner)
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    @Test
++    fun `already interrupted caller does not issue commands`() {
++        val runner = LayoutRunner()
++        try {
++            Thread.currentThread().interrupt()
++            assertThrows(InterruptedException::class.java) { reader(runner).read() }
++            assertThat(runner.calls).isEmpty()
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    private fun reader(runner: LayoutRunner, maxLayoutBytes: Int = 1024) = HierarchyReader(
++        hdc = HdcClient("hdc", runner),
++        deviceId = "USB-TEST",
++        maxLayoutBytes = maxLayoutBytes,
++    )
++
++    private fun assertRemoved(runner: LayoutRunner) {
++        runner.localPaths.forEach { path ->
++            assertThat(Files.exists(path)).isFalse()
++            assertThat(Files.exists(path.parent)).isFalse()
++        }
++    }
++
++    private data class Call(val command: List<String>, val timeout: Duration)
++
++    private class LayoutRunner(
++        private val contents: ByteArray = """{"attributes":{"text":"新的布局"},"children":[]}""".toByteArray(),
++        var writeFile: Boolean = true,
++        private val dumpResult: HdcCommandResult = HdcCommandResult(0, "", ""),
++        private val receiveResult: HdcCommandResult = HdcCommandResult(0, "", ""),
++        private val cleanupResult: HdcCommandResult = HdcCommandResult(0, "", ""),
++        private val interruptTransfer: Boolean = false,
++        private val cleanupInterruption: InterruptedException? = null,
++    ) : HdcCommandRunner {
++        val calls = mutableListOf<Call>()
++        val localPaths = mutableListOf<Path>()
++        val remotePaths = mutableListOf<String>()
++
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            calls += Call(command, timeout)
++            return when {
++                command[3] == "shell" && command.last().startsWith("'uitest' 'dumpLayout'") -> {
++                    remotePaths += command.last().substringAfter("'-p' '").removeSuffix("'")
++                    dumpResult
++                }
++                command[3] == "file" -> {
++                    val path = Path.of(command.last())
++                    localPaths.add(path)
++                    assertThat(Files.exists(path)).isFalse()
++                    if (writeFile) Files.write(path, contents)
++                    if (interruptTransfer) throw InterruptedException("transfer interrupted")
++                    receiveResult
++                }
++                command[3] == "shell" && command.last().startsWith("'rm' '-f'") -> {
++                    cleanupInterruption?.let { throw it }
++                    cleanupResult
++                }
++                else -> error("Unexpected command: $command")
++            }
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestLayoutParserTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestLayoutParserTest.kt
+new file mode 100644
+index 0000000..c404b82
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestLayoutParserTest.kt
+@@ -0,0 +1,131 @@
++package maestro.harmonyos.layout
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++
++class UitestLayoutParserTest {
++    private val parser = UitestLayoutParser()
++
++    @Test
++    fun `merged layout maps stable ids text bounds and state fields`() {
++        val json = checkNotNull(javaClass.getResource("/harmonyos/layout-merged.json")).readText()
++        val root = parser.parse(json)
++        val button = root.children.single().children.first()
++
++        assertThat(button.attributes["resource-id"]).isEqualTo("submit")
++        assertThat(button.attributes["text"]).isEqualTo("提交订单")
++        assertThat(button.attributes["bounds"]).isEqualTo("[24,120][400,200]")
++        assertThat(button.enabled).isTrue()
++        assertThat(button.clickable).isTrue()
++        assertThat(button.checked).isFalse()
++        assertThat(button.selected).isFalse()
++        assertThat(button.focused).isFalse()
++        assertThat(button.attributes["class"]).isEqualTo("Button")
++        assertThat(root.enabled).isNull()
++        assertThat(root.clickable).isNull()
++    }
++
++    @Test
++    fun `hint and accessibility text retain separate attributes`() {
++        val json = checkNotNull(javaClass.getResource("/harmonyos/layout-merged.json")).readText()
++        val root = parser.parse(json)
++        val input = root.children.single().children.last()
++
++        assertThat(input.attributes["hintText"]).isEqualTo("请输入姓名")
++        assertThat(input.attributes["accessibilityText"]).isEqualTo("收件人姓名")
++        assertThat(input.attributes["text"]).isEmpty()
++        assertThat(input.focused).isTrue()
++        assertThat(input.enabled).isNull()
++    }
++
++    @Test
++    fun `window array preserves order and adds no synthetic coordinates`() {
++        val root = parser.parse("""[
++            {"attributes":{"id":"window-a","bounds":"[0,0][100,200]"},"children":[]},
++            {"attributes":{"id":"window-b","bounds":"[10,20][90,150]"},"children":[]}
++        ]""")
++
++        assertThat(root.children.map { it.attributes["resource-id"] }).containsExactly("window-a", "window-b").inOrder()
++        assertThat(root.attributes).doesNotContainKey("bounds")
++        assertThat(parser.parse("[]").children).isEmpty()
++    }
++
++    @Test
++    fun `missing states and bounds stay unknown`() {
++        val node = parser.parse("""{"attributes":{"text":"无坐标","enabled":"","checked":null}}""")
++
++        assertThat(node.enabled).isNull()
++        assertThat(node.checked).isNull()
++        assertThat(node.clickable).isNull()
++        assertThat(node.attributes).doesNotContainKey("bounds")
++    }
++
++    @Test
++    fun `key can supply stable id but accessibility id cannot`() {
++        val keyed = parser.parse("""{"attributes":{"id":"","key":"save","accessibilityId":"42"}}""")
++        val unkeyed = parser.parse("""{"attributes":{"accessibilityId":"42"}}""")
++
++        assertThat(keyed.attributes["resource-id"]).isEqualTo("save")
++        assertThat(unkeyed.attributes).doesNotContainKey("resource-id")
++        assertThat(unkeyed.attributes["accessibilityId"]).isEqualTo("42")
++    }
++
++    @Test
++    fun `boolean states are accepted without treating arbitrary strings as false`() {
++        val node = parser.parse("""{"attributes":{"enabled":true,"checked":false}}""")
++        assertThat(node.enabled).isTrue()
++        assertThat(node.checked).isFalse()
++        listOf("\"unknown\"", "1", "[]").forEach { value ->
++            assertThrows(UitestLayoutException::class.java) {
++                parser.parse("""{"attributes":{"enabled":$value}}""")
++            }
++        }
++    }
++
++    @Test
++    fun `negative coordinates and spaces are normalized without clipping`() {
++        val node = parser.parse("""{"attributes":{"bounds":"[ -10, 20 ][ 90, 100 ]"}}""")
++        assertThat(node.attributes["bounds"]).isEqualTo("[-10,20][90,100]")
++    }
++
++    @Test
++    fun `hidden and zero area nodes do not expose tap coordinates`() {
++        val hidden = parser.parse("""{"attributes":{"visible":"false","bounds":"[1,2][10,20]"},
++            "children":[{"attributes":{"text":"child","visible":"true","bounds":"[2,3][8,9]"}}]}""")
++        assertThat(hidden.attributes).doesNotContainKey("bounds")
++        assertThat(hidden.children.single().attributes["bounds"]).isEqualTo("[2,3][8,9]")
++        val empty = parser.parse("""{"attributes":{"bounds":"[0,0][0,0]"}}""")
++        assertThat(empty.attributes).doesNotContainKey("bounds")
++    }
++
++    @Test
++    fun `invalid bounds fail with the node path`() {
++        listOf("[5,1][4,2]", "[0,5][1,4]", "[0,0,10,20]", "[0,0][2147483648,2]", "[-2147483648,0][1,2]").forEach { bounds ->
++            val error = assertThrows(UitestLayoutException::class.java) {
++                parser.parse("""{"attributes":{},"children":[{"attributes":{"bounds":"$bounds"}}]}""")
++            }
++            assertThat(error).hasMessageThat().contains("$.children[0].attributes.bounds")
++        }
++        assertThrows(UitestLayoutException::class.java) {
++            parser.parse("""{"attributes":{"bounds":[0,0,100,100]}}""")
++        }
++    }
++
++    @Test
++    fun `malformed JSON and node shapes fail rather than return an empty tree`() {
++        listOf("", "null", "{}", "true", "{", "{\"attributes\":[]}",
++            "{\"attributes\":{},\"children\":{}}", "{\"attributes\":{}} {\"attributes\":{}}",
++            "{\"attributes\":{\"text\":\"a\",\"text\":\"b\"}}", "[null]").forEach { json ->
++            assertThrows(UitestLayoutException::class.java) { parser.parse(json) }
++        }
++    }
++
++    @Test
++    fun `deep layout fails before recursive TreeNode consumers can overflow`() {
++        var json = """{"attributes":{}}"""
++        repeat(130) { json = """{"attributes":{},"children":[$json]}""" }
++        val error = assertThrows(UitestLayoutException::class.java) { parser.parse(json) }
++        assertThat(error).hasMessageThat().contains("nesting")
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestMaestroSelectorTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestMaestroSelectorTest.kt
+new file mode 100644
+index 0000000..a742f29
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestMaestroSelectorTest.kt
+@@ -0,0 +1,52 @@
++package maestro.harmonyos.layout
++
++import com.google.common.truth.Truth.assertThat
++import maestro.Filters
++import maestro.UiElement.Companion.toUiElementOrNull
++import org.junit.jupiter.api.Test
++
++/** Integration checks against the real Maestro selectors and coordinate conversion. */
++class UitestMaestroSelectorTest {
++    private val parser = UitestLayoutParser()
++
++    @Test
++    fun `converted layout works with Maestro id text and state selectors`() {
++        val json = checkNotNull(javaClass.getResource("/harmonyos/layout-merged.json")).readText()
++        val root = parser.parse(json)
++        val nodes = root.aggregate()
++        val button = root.children.single().children.first()
++
++        assertThat(Filters.idMatches("submit".toRegex())(nodes)).containsExactly(button)
++        assertThat(Filters.textMatches("提交订单".toRegex())(nodes)).containsExactly(button)
++        assertThat(Filters.enabled(true)(nodes)).contains(button)
++        assertThat(Filters.checked(false)(nodes)).containsExactly(button)
++        assertThat(button.toUiElementOrNull()?.bounds?.width).isEqualTo(376)
++        assertThat(button.toUiElementOrNull()?.bounds?.height).isEqualTo(80)
++    }
++
++    @Test
++    fun `hint and accessibility text remain searchable while unknown state stays unmatched`() {
++        val json = checkNotNull(javaClass.getResource("/harmonyos/layout-merged.json")).readText()
++        val root = parser.parse(json)
++        val input = root.children.single().children.last()
++
++        assertThat(Filters.textMatches("请输入姓名".toRegex())(root.aggregate())).containsExactly(input)
++        assertThat(Filters.textMatches("收件人姓名".toRegex())(root.aggregate())).containsExactly(input)
++        assertThat(Filters.enabled(false)(listOf(input))).isEmpty()
++        assertThat(Filters.enabled(true)(listOf(input))).isEmpty()
++    }
++
++    @Test
++    fun `coordinate conversion retains offsets and rejects nodes without tap bounds`() {
++        val node = parser.parse("""{"attributes":{"bounds":"[ -10, 20 ][ 90, 100 ]"}}""")
++        assertThat(node.toUiElementOrNull()?.bounds?.x).isEqualTo(-10)
++        assertThat(node.toUiElementOrNull()?.bounds?.y).isEqualTo(20)
++        assertThat(node.toUiElementOrNull()?.bounds?.width).isEqualTo(100)
++
++        listOf("{}", "{\"bounds\":\"[0,0][0,0]\"}",
++            "{\"bounds\":\"[0,0][10,10]\",\"visible\":\"false\"}").forEach { attributes ->
++            assertThat(parser.parse("""{"attributes":$attributes}""").toUiElementOrNull()).isNull()
++        }
++        assertThat(parser.parse("[]").toUiElementOrNull()).isNull()
++    }
++}
+diff --git a/maestro-client/src/test/resources/harmonyos/README.md b/maestro-client/src/test/resources/harmonyos/README.md
+new file mode 100644
+index 0000000..bf510dc
+--- /dev/null
++++ b/maestro-client/src/test/resources/harmonyos/README.md
+@@ -0,0 +1,36 @@
++# UITest layout fixtures
++
++`layout-merged.json` is synthetic test data, not a device capture. Its shape follows
++OpenHarmony UITest commit `f59296c77aac5037a9335c317af58de3a0c22ecb`, inspected on
++2026-10-28:
++
++- [ui_driver.cpp](https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/core/ui_driver.cpp): `DumpUiHierarchy` returns an `attributes`/`children` root by default, or an array of window roots with `listWindows_`.
++- [dump_handler.cpp](https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/core/dump_handler.cpp): nested nodes retain the same shape.
++- [ui_model.cpp](https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/core/ui_model.cpp): attributes are serialized as strings; bounds use `[left,top][right,bottom]`.
++- [element_node_iterator_impl.cpp](https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/server/element_node_iterator_impl.cpp): both `id` and `key` come from `GetInspectorKey`; `accessibilityId` is separate. State values are `true`/`false`; `hint` comes from `GetHint`.
++- [server_main.cpp](https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/server/server_main.cpp): `ParseDumpOption` reads `-p` as the output path for `uitest dumpLayout`.
++
++The parser maps `id` (or nonempty `key`) to Maestro `resource-id`, `hint` to
++`hintText`, and `type` to `class`. It keeps missing/empty states unknown. Missing,
++hidden, or zero-area bounds do not create a tap target. Malformed bounds fail
++parsing; negative screen coordinates are retained rather than silently clipped.
++Window arrays get a wrapper without coordinates. Unknown scalar attributes are
++retained; optional top-level metadata such as `extraAttrs` is not interpreted.
++
++`UitestLayoutParserTest` tests conversion using the parser and the upstream
++`TreeNode` type only. It is included in the device-free host test build.
++`UitestMaestroSelectorTest` separately checks real Maestro selectors and
++`UiElement` coordinate conversion. It requires the full upstream client build
++(`-FullUpstream`) and is excluded from the host test build. Run these integration
++tests separately; a host test pass does not imply they passed.
++
++`HierarchyReaderTest` uses a simulated HDC runner to check target binding,
++fresh-file transfer, parsing, failures and cleanup. It issues no device commands.
++The reader uses a unique file under `/data/local/tmp/` per call and checks the
++newly received local file instead of depending on a particular success sentence.
++If interrupted, it removes local files and includes the remaining remote path
++in the exception's suppressed diagnostics without starting another HDC command.
++
++These tests do not establish compatibility with a particular commercial HarmonyOS
++version or resolves overlapping windows. The driver must use the selected
++display and refresh the layout after screen changes.
+diff --git a/maestro-client/src/test/resources/harmonyos/layout-merged.json b/maestro-client/src/test/resources/harmonyos/layout-merged.json
+new file mode 100644
+index 0000000..d2de2c5
+--- /dev/null
++++ b/maestro-client/src/test/resources/harmonyos/layout-merged.json
+@@ -0,0 +1,53 @@
++{
++  "attributes": {
++    "id": "",
++    "text": "",
++    "bounds": "[0,0][1080,2400]",
++    "enabled": "",
++    "clickable": ""
++  },
++  "children": [
++    {
++      "attributes": {
++        "id": "main",
++        "key": "main",
++        "type": "Column",
++        "bounds": "[0,80][1080,2320]",
++        "enabled": "true",
++        "bundleName": "org.example.uitest",
++        "hostWindowId": "7"
++      },
++      "children": [
++        {
++          "attributes": {
++            "id": "submit",
++            "key": "submit",
++            "accessibilityId": "1001",
++            "type": "Button",
++            "text": "提交订单",
++            "bounds": "[24,120][400,200]",
++            "clickable": "true",
++            "enabled": "true",
++            "focused": "false",
++            "checked": "false",
++            "selected": "false",
++            "visible": "true"
++          },
++          "children": []
++        },
++        {
++          "attributes": {
++            "id": "name",
++            "type": "TextInput",
++            "text": "",
++            "hint": "请输入姓名",
++            "accessibilityText": "收件人姓名",
++            "bounds": "[24,220][600,300]",
++            "focused": "true"
++          },
++          "children": []
++        }
++      ]
++    }
++  ]
++}

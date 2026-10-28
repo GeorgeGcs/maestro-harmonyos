@@ -6,5 +6,5 @@
   "recordedOn": "2026-10-28",
   "checkoutPath": ".upstream/maestro",
   "strategy": "pinned-checkout-with-versioned-patches",
-  "validationStatus": "source-reference-only"
+  "validationStatus": "checkout-verified"
 }
