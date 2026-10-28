@@ -1,0 +1,10 @@
+# Design example only: requires the future HarmonyOS driver and a configured sample app.
+# Supply APP_ID, START_TEXT, BUTTON_ID and RESULT_TEXT for the agreed test sample.
+appId: ${APP_ID}
+---
+- launchApp
+- assertVisible: ${START_TEXT}
+- tapOn:
+    id: ${BUTTON_ID}
+- assertVisible: ${RESULT_TEXT}
+- takeScreenshot: artifacts/smoke

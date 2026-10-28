@@ -1,0 +1,10 @@
+{
+  "name": "Maestro",
+  "repository": "https://github.com/mobile-dev-inc/Maestro.git",
+  "commit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+  "sourceRef": "refs/heads/main",
+  "recordedOn": "2026-10-28",
+  "checkoutPath": ".upstream/maestro",
+  "strategy": "pinned-checkout-with-versioned-patches",
+  "validationStatus": "source-reference-only"
+}

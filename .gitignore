@@ -1,0 +1,36 @@
+# Local upstream checkout and generated outputs
+.upstream/
+.gradle/
+**/build/
+**/node_modules/
+**/dist/
+artifacts/
+test-results/
+*.vsix
+
+# Local tools and IDE files
+.idea/
+.vscode/
+local.properties
+*.log
+.DS_Store
+Thumbs.db
+
+# Credentials, signing material and device captures
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.pem
+*.key
+*.cer
+*.p7b
+*.mp4
+*.h264
+
+# Personal device/config files
+device.local.json
+config.local.*
