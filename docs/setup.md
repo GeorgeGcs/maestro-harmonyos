@@ -37,6 +37,21 @@ $maestroCli = Join-Path (Get-Location) '.upstream/maestro/maestro-cli/build/inst
 
 使用本次构建的分发包运行鸿蒙流程。首次构建遇到的资源下载问题可参考[启动记录](progress/2026-10-28.md)。
 
+## 运行脚本
+
+构建后也可用仓库提供的入口，它会加载 `config.local.ps1`，为每次运行创建独立产物目录：
+
+```powershell
+./scripts/run-harmonyos.ps1 `
+  -FlowPath ./examples/flows/input-smoke.yaml `
+  -BundleId org.example.sample -AbilityName EntryAbility -Module entry `
+  -Env @{ START_TEXT='输入演示'; INPUT_HINT='请输入姓名'; INPUT_TEXT='熊猫测试' }
+```
+
+`FlowPath` 可指向单个 YAML 或流程目录。多设备时加 `-DeviceId`；`-Artifacts` 指定输出根目录。脚本不会构建或安装应用，保留 CLI 的退出码，退出时恢复当前进程环境。`APP_ID` 由 `BundleId` 设置。默认关闭匿名统计。
+
+脚本直接启动 Java，避免 `.bat` 对引号再解析；已验证 PowerShell 7 和 Windows PowerShell 5.1。部分 Windows/JDK 17 的启动器会损坏系统编码以外的字符（如 emoji），脚本会在操作设备前拒绝这类参数。此类输入可直接写在 UTF-8 YAML 中。
+
 ## 选择设备与应用
 
 ```powershell
@@ -80,6 +95,39 @@ if ($LASTEXITCODE -ne 0) { throw '输入流程未通过，请查看运行报告�
 
 [smoke.yaml](../examples/flows/smoke.yaml) 保留了按控件 ID 点击的示例，需要 `APP_ID`、`START_TEXT`、`BUTTON_ID`、`RESULT_TEXT` 四个参数。选择测试页面上的本地操作按钮，确认点击后的页面含 `RESULT_TEXT`。
 
+[scroll-input.yaml](../examples/flows/scroll-input.yaml) 在输入前增加向上滑动，再按提示重新定位输入框。目标页面应可以滚动，且滚动后仍能找到该输入框。
+
+## 视频录屏
+
+[recording-smoke.yaml](../examples/flows/recording-smoke.yaml) 使用标准 `startRecording` 和 `stopRecording`。目前提供实验性的 Huawei 系统录屏后端，需要显式开启：
+
+```powershell
+$env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
+# 然后用 run-harmonyos.ps1 或 CLI 执行 recording-smoke.yaml。
+```
+
+不设置或设为 `off` 时，录屏命令明确报不支持。此后端依赖系统录屏服务、`mediatool` 和媒体状态查询，不是所有 OpenHarmony 设备都有的接口。
+
+录屏期间需独占设备录屏，不要手动开始、停止或切换系统录屏。系统只有启停切换命令，没有可指定的录制会话 ID；适配会拒绝已存在的录屏进程、检查本次 PID，并且不再次停止已生成完整文件的录制，但无法识别同一进程被手工接管的所有情况。
+
+默认最长录制 3 分钟，导出上限 512 MiB。达到时长上限会停止并报告失败。输出保留系统录屏的分辨率、帧率和音频设置，可能含音轨。驱动校验 MP4 容器和视频轨信息，不在每次执行时完整解码视频。
+
+单台真机的正常流程已通过录像全帧解码。故意断言失败的短流程能自动停录并导出，但发现过视频尾部 H.264 解码错误，原因尚未确定；因此暂不保证每段录像都可完整解码。正式留证前仍需逐段检查，详细复现结果见[进展记录](progress/2026-10-28.md)。
+
+视频写入运行目录中的 `startRecording/`。本地写入及刷新成功后才删除手机上的本次唯一视频；导出失败会保留该视频供恢复。普通失败和取消会尝试收尾，强制结束 Java 进程或设备断连时仍可能需要手动停止系统录屏。
+
+## 批量执行与报告
+
+同一设备可以顺序执行多个 Flow。使用已有参数配置后，向 CLI 传入多个 YAML 或流程目录，并选择 JUnit 报告：
+
+```powershell
+& $maestroCli --platform harmonyos test ./my-flows `
+  --format JUNIT --output ./artifacts/report.xml `
+  --test-output-dir ./artifacts/batch-run
+```
+
+`my-flows` 中应只放本次要运行的流程，并提供各流程需要的参数。任一流程失败时，CLI 返回非零退出码。单设备批量与多设备分片是两项能力，当前仍不支持分片。
+
 ## 已实现与限制
 
 | 范围 | 当前行为 |
@@ -88,12 +136,13 @@ if ($LASTEXITCODE -ne 0) { throw '输入流程未通过，请查看运行报告�
 | 页面操作 | 启动/停止应用、文本/ID/坐标定位、点击、长按、输入、返回、滑动、逐字符删除 |
 | 等待与截图 | 连续读取布局判断稳定；截图使用 UITest PNG，坐标按设备实际像素处理 |
 | 设备会话 | 本机 HDC、单设备、显式平台选择及会话关闭；无设备、多设备未指定目标、设备动作失败都会报错 |
-| 尚未支持 | HAP 安装、权限修改、`clearState`、录屏、`hideKeyboard`、深链接、媒体导入、位置/方向/代理等系统设置 |
+| 视频录屏 | 可选 Huawei 系统录屏后端；显式开启，按本次唯一文件导出和清理 |
+| 尚未支持 | HAP 安装、权限修改、`clearState`、`hideKeyboard`、深链接、媒体导入、位置/方向/代理等系统设置 |
 | 尚未接入 | Studio、MCP、VSCode 扩展、自动启动设备、多设备分片和云端运行 |
 
 `back` 是设备返回键，不能保证在所有应用中都等同于关闭键盘。UITest 的文本输入、布局可见范围和滑动行为可能因系统版本或控件而不同；滑动时长通过速度近似换算。主机模拟测试不能证明这些行为在手机上可用。
 
-按[验收清单](acceptance.md)记录真机型号与系统版本、运行命令、退出码、断言和产物，再安排重复执行。录屏和操作生成 YAML 另行验证，不计入当前完成范围。
+按[验收清单](acceptance.md)记录真机型号与系统版本、运行命令、退出码、断言和产物，再安排重复执行。视频录屏与操作生成 YAML 是不同能力，后者尚未实现。
 
 ## 资料
 

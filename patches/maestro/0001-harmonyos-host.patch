@@ -281,10 +281,10 @@ index 889a703..bc90232 100644
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..b3b1ac5
+index 0000000..5da4b88
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,133 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -352,6 +352,11 @@ index 0000000..b3b1ac5
 +        HarmonyOSDriverConfig(
 +            abilityName = environment["MAESTRO_HARMONYOS_ABILITY"]?.trim()?.takeIf { it.isNotEmpty() },
 +            moduleName = environment["MAESTRO_HARMONYOS_MODULE"]?.trim()?.takeIf { it.isNotEmpty() },
++            enableScreenRecording = when (val backend = environment["MAESTRO_HARMONYOS_RECORDING"]?.trim()) {
++                null, "", "off" -> false
++                "huawei-system" -> true
++                else -> throw CliError("Unknown HarmonyOS recording backend '$backend'; use huawei-system or off.")
++            },
 +        )
 +
 +    fun <T> withSession(
@@ -450,10 +455,10 @@ index cc05d69..714c609 100644
              )
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
 new file mode 100644
-index 0000000..b4caa55
+index 0000000..85a3f5f
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,191 @@
 +package maestro.cli.harmonyos
 +
 +import com.google.common.truth.Truth.assertThat
@@ -581,6 +586,16 @@ index 0000000..b4caa55
 +        assertThat(config.abilityName).isEqualTo("LaunchAbility")
 +        assertThat(config.moduleName).isEqualTo("feature")
 +        assertThat(HarmonyOsSessionSupport.driverConfig(mapOf("MAESTRO_HARMONYOS_ABILITY" to "  ")).abilityName).isNull()
++    }
++
++    @Test
++    fun `recording backend must be explicitly enabled and unknown values fail`() {
++        assertThat(HarmonyOsSessionSupport.driverConfig(emptyMap()).enableScreenRecording).isFalse()
++        assertThat(HarmonyOsSessionSupport.driverConfig(mapOf("MAESTRO_HARMONYOS_RECORDING" to "off")).enableScreenRecording).isFalse()
++        assertThat(HarmonyOsSessionSupport.driverConfig(mapOf("MAESTRO_HARMONYOS_RECORDING" to "huawei-system")).enableScreenRecording).isTrue()
++        assertThrows<CliError> {
++            HarmonyOsSessionSupport.driverConfig(mapOf("MAESTRO_HARMONYOS_RECORDING" to "true"))
++        }
 +    }
 +
 +    @Test
@@ -725,10 +740,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..ff1cf1f
+index 0000000..861d5bd
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,378 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -773,6 +788,7 @@ index 0000000..ff1cf1f
 +    ) : this(HdcHarmonyOSDevice(deviceId, hdc), config)
 +
 +    @Volatile private var opened = false
++    private var recording: ScreenRecording? = null
 +
 +    override fun name(): String = "HarmonyOS"
 +
@@ -789,6 +805,9 @@ index 0000000..ff1cf1f
 +    @Synchronized
 +    override fun close() {
 +        opened = false
++        val current = recording
++        recording = null
++        current?.close()
 +    }
 +
 +    override fun deviceInfo(): DeviceInfo {
@@ -981,7 +1000,27 @@ index 0000000..ff1cf1f
 +    override fun isKeyboardVisible(): Boolean = unsupported("keyboard visibility detection")
 +    override fun hideKeyboard(): Unit = unsupported("hideKeyboard; use an app control to dismiss the keyboard")
 +    override fun openLink(link: String, appId: String?, autoVerify: Boolean, browser: Boolean): Unit = unsupported("openLink")
-+    override fun startScreenRecording(out: Sink): ScreenRecording = unsupported("screen recording")
++    @Synchronized
++    override fun startScreenRecording(out: Sink): ScreenRecording {
++        requireOpen()
++        if (!config.enableScreenRecording) unsupported("screen recording without explicit enableScreenRecording configuration")
++        check(recording == null) { "This driver already owns a recording" }
++        val current = device.startScreenRecording(out, config)
++        val handle = object : ScreenRecording {
++            override val startedAt = current.startedAt
++            override fun close() {
++                synchronized(this@HarmonyOSDriver) {
++                    try {
++                        current.close()
++                    } finally {
++                        if (recording === this) recording = null
++                    }
++                }
++            }
++        }
++        recording = handle
++        return handle
++    }
 +    override fun setLocation(latitude: Double, longitude: Double): Unit = unsupported("setLocation")
 +    override fun setOrientation(orientation: DeviceOrientation): Unit = unsupported("setOrientation")
 +    override fun setProxy(host: String, port: Int): Unit = unsupported("setProxy")
@@ -1127,13 +1166,15 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..a5baddc
+index 0000000..c709222
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,17 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
++import maestro.ScreenRecording
++import okio.Sink
 +import java.time.Duration
 +
 +/** Device boundary; tests replace the transport while keeping the real Maestro driver. */
@@ -1143,13 +1184,15 @@ index 0000000..a5baddc
 +    fun hierarchy(timeout: Duration): TreeNode
 +    fun screenshot(timeout: Duration): ByteArray
 +    fun execute(arguments: List<String>, timeout: Duration): String
++    fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
++        throw UnsupportedOperationException("This HarmonyOS device backend does not support screen recording")
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..b116d1f
+index 0000000..f8e301b
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,39 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -1160,6 +1203,10 @@ index 0000000..b116d1f
 +    val commandTimeout: Duration = Duration.ofSeconds(15),
 +    val settleTimeout: Duration = Duration.ofSeconds(5),
 +    val pollInterval: Duration = Duration.ofMillis(100),
++    val enableScreenRecording: Boolean = false,
++    val recordingMaxDuration: Duration = Duration.ofMinutes(3),
++    val recordingStopTimeout: Duration = Duration.ofSeconds(30),
++    val recordingMaxBytes: Long = 512L * 1024 * 1024,
 +) {
 +    init {
 +        for (timeout in listOf(commandTimeout, settleTimeout, pollInterval)) {
@@ -1168,6 +1215,13 @@ index 0000000..b116d1f
 +            }
 +        }
 +        require(commandTimeout >= Duration.ofMillis(3)) { "Command timeout must allow capture, transfer and cleanup" }
++        require(recordingMaxDuration in Duration.ofSeconds(1)..Duration.ofMinutes(10)) {
++            "Recording duration must be between 1 second and 10 minutes"
++        }
++        require(recordingStopTimeout in Duration.ofMillis(100)..Duration.ofMinutes(2)) {
++            "Recording stop timeout must be between 100 ms and 2 minutes"
++        }
++        require(recordingMaxBytes in 1024..(1024L * 1024 * 1024)) { "Recording size limit must be between 1 KiB and 1 GiB" }
 +        abilityName?.let { requireIdentifier(it, "Ability name") }
 +        moduleName?.let { requireIdentifier(it, "Module name") }
 +    }
@@ -1178,16 +1232,415 @@ index 0000000..b116d1f
 +        "$name must be non-empty and cannot contain whitespace, NUL, or start with '-'"
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
+new file mode 100644
+index 0000000..d18f2f6
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
+@@ -0,0 +1,390 @@
++package maestro.harmonyos.driver
++
++import maestro.ScreenRecording
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.utils.TempFileHandler
++import okio.Buffer
++import okio.Sink
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.time.Duration
++import java.time.Instant
++import java.util.UUID
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.Executors
++import java.util.concurrent.ScheduledExecutorService
++import java.util.concurrent.ScheduledFuture
++import java.util.concurrent.TimeUnit
++
++/**
++ * Optional adapter for Huawei's system recorder. This is not an OpenHarmony shell API.
++ * Commands match DevEco Studio 6.1.1's OpenHarmonyDevice.screenRecord/recvScreenRecord.
++ * The recorder's toggle command requires exclusive use of screen recording on the device.
++ */
++class HarmonyOSSystemScreenRecorder(
++    private val deviceId: String,
++    private val device: HarmonyOSDevice,
++    private val receiveFile: (String, Path, Duration) -> Unit,
++    private val config: HarmonyOSDriverConfig,
++) {
++    fun start(out: Sink): ScreenRecording {
++        check(config.enableScreenRecording) { "System screen recording must be explicitly enabled" }
++        if (!leases.add(deviceId)) throw HdcException("Another Maestro recording owns this device")
++        val recording = Recording(out)
++        try {
++            recording.start()
++            return recording
++        } catch (error: Throwable) {
++            recording.abortStart(error)
++            throw error
++        }
++    }
++
++    private inner class Recording(private val out: Sink) : ScreenRecording {
++        private val fileName = "maestro-recording-${UUID.randomUUID().toString().replace("-", "")}.mp4"
++        private val remotePath = "/data/local/tmp/$fileName"
++        private val files = TempFileHandler()
++        private var localDirectory: Path? = null
++        private var localPath: Path? = null
++        private var ownerPid: Int? = null
++        private var startSent = false
++        private var startConfirmed = false
++        private var stopSent = false
++        private var closed = false
++        private var failure: Throwable? = null
++        private var timer: ScheduledExecutorService? = null
++        private var deadlineTask: ScheduledFuture<*>? = null
++        private var lastIncomplete: HdcException? = null
++        private var validatedSize: Long? = null
++        override lateinit var startedAt: Instant
++            private set
++
++        fun start() {
++            val budget = Budget(config.commandTimeout)
++            val bundle = command(listOf("bm", "dump", "-n", BUNDLE), budget)
++            if (!bundle.contains(ABILITY)) throw UnsupportedOperationException("Huawei system screen recorder is not available")
++            if (processes(budget).isNotEmpty() || captureInstances(budget).isNotEmpty()) {
++                throw HdcException("A screen recorder process or capture session already exists; leave it under its owner's control")
++            }
++            if (query(budget) != null) throw HdcException("The generated recording name already exists")
++            localDirectory = files.createTempDirectory("maestro-harmonyos-recording-").toPath()
++            localPath = localDirectory!!.resolve(fileName)
++            startSent = true
++            aa(listOf("--ps", "CustomizedFileName", fileName), budget)
++            startConfirmed = true
++            while (true) {
++                val pids = processes(budget)
++                val captures = captureInstances(budget)
++                if (pids.size > 1 || captures.size > 1) throw HdcException("Recording ownership is ambiguous")
++                val pid = pids.singleOrNull()
++                if (pid != null && captures == setOf(pid)) {
++                    ownerPid = pid
++                    startedAt = Instant.now()
++                    break
++                }
++                pause(budget)
++            }
++            val executor = Executors.newSingleThreadScheduledExecutor { task ->
++                Thread(task, "maestro-harmonyos-recording-limit").apply { isDaemon = true }
++            }
++            timer = executor
++            deadlineTask = executor.schedule({ expire() }, config.recordingMaxDuration.toMillis(), TimeUnit.MILLISECONDS)
++        }
++
++        private fun expire() {
++            synchronized(this) {
++                if (closed) return
++                val limit = HdcException("Recording reached its ${config.recordingMaxDuration.toSeconds()} second limit")
++                try {
++                    close()
++                    failure = limit
++                } catch (error: Throwable) {
++                    error.addSuppressed(limit)
++                }
++            }
++        }
++
++        @Synchronized
++        override fun close() {
++            if (closed) {
++                failure?.let { throw it }
++                return
++            }
++            closed = true
++            deadlineTask?.cancel(false)
++            timer?.shutdown()
++            timer = null
++            val interrupted = Thread.interrupted()
++            var primary: Throwable? = null
++            try {
++                finish(Budget(config.recordingStopTimeout))
++            } catch (error: Throwable) {
++                primary = error
++                if (error is HdcTimeoutException) lastIncomplete?.let(error::addSuppressed)
++                stopAfterFailure(error)
++            } finally {
++                primary = cleanup(primary)
++                leases.remove(deviceId)
++                if (interrupted || primary is InterruptedException) Thread.currentThread().interrupt()
++            }
++            failure = primary
++            primary?.let(::addRecoveryHint)
++            primary?.let { throw it }
++        }
++
++        fun abortStart(original: Throwable) {
++            val interrupted = Thread.interrupted()
++            closed = true
++            deadlineTask?.cancel(false)
++            timer?.shutdown()
++            try {
++                if (startConfirmed) {
++                    val budget = Budget(config.recordingStopTimeout)
++                    val pids = processes(budget)
++                    val captures = captureInstances(budget)
++                    val pid = pids.singleOrNull()
++                    if (pid != null && captures == setOf(pid)) {
++                        ownerPid = pid
++                        finish(budget)
++                    } else {
++                        original.addSuppressed(HdcException("Could not confirm ownership after recording start; check the device for $fileName"))
++                    }
++                } else if (startSent) {
++                    original.addSuppressed(HdcException("Recording start was not acknowledged; no stop toggle was sent. Check the device for $fileName"))
++                }
++            } catch (error: Throwable) {
++                if (error !== original) original.addSuppressed(error)
++                stopAfterFailure(original)
++            } finally {
++                cleanup(original)
++                if (startSent) addRecoveryHint(original)
++                leases.remove(deviceId)
++                if (interrupted || original is InterruptedException) Thread.currentThread().interrupt()
++            }
++        }
++
++        private fun finish(budget: Budget) {
++            var uri = query(budget)
++            var complete = uri?.let { exportIfComplete(it, budget) } ?: false
++            if (!complete) {
++                // The system publishes an asset while it is still recording. Only a
++                // finalized MP4, not URI presence alone, proves that it has finished.
++                stopIfOwned(budget)
++                while (!complete) {
++                    pause(budget)
++                    uri = query(budget)
++                    complete = uri?.let { exportIfComplete(it, budget) } ?: false
++                }
++            }
++            copyToSink(budget)
++            val ownedUri = checkNotNull(uri)
++            val deletion = command(listOf("mediatool", "delete", ownedUri), budget)
++            if (deletion.trim() != "[SUCCESS] delete success.") {
++                throw HdcException("The recording was exported but mediatool did not confirm deletion: $deletion")
++            }
++            if (query(budget) != null) throw HdcException("The recording was exported but its media asset was not deleted: $ownedUri")
++        }
++
++        private fun stopIfOwned(budget: Budget) {
++            val pid = ownerPid ?: throw HdcException("This session has no confirmed recording process")
++            val pids = processes(budget)
++            val captures = captureInstances(budget)
++            if ((pids.isNotEmpty() && pids != setOf(pid)) || (captures.isNotEmpty() && captures != setOf(pid))) {
++                throw HdcException("The recording process or capture session changed; refusing to toggle another recording")
++            }
++            if (pid in pids && captures == setOf(pid)) {
++                // Set this before sending: a lost reply cannot cause a second toggle.
++                check(!stopSent) { "A recording stop request has already been sent" }
++                stopSent = true
++                aa(emptyList(), budget)
++            }
++        }
++
++        private fun stopAfterFailure(original: Throwable) {
++            if (stopSent || ownerPid == null || validatedSize != null) return
++            val interrupted = Thread.interrupted()
++            try {
++                val budget = Budget(Duration.ofSeconds(2))
++                query(budget) // Reject malformed or ambiguous asset responses before a toggle.
++                stopIfOwned(budget)
++            } catch (error: Throwable) {
++                if (error !== original) original.addSuppressed(error)
++            } finally {
++                if (interrupted) Thread.currentThread().interrupt()
++            }
++        }
++
++        private fun exportIfComplete(uri: String, budget: Budget): Boolean {
++            val path = checkNotNull(localPath)
++            command(listOf("rm", "-f", remotePath), budget)
++            val output = try {
++                command(listOf("mediatool", "recv", uri, remotePath), budget)
++            } catch (error: HarmonyOSCommandException) {
++                if (error.remoteExitCode == 0 && error.stderr.isEmpty() &&
++                    error.stdout.trim().lines() == listOf("Table Name: Photos", "[FAIL] open source media file failed.")
++                ) {
++                    lastIncomplete = error
++                    return false
++                }
++                throw error
++            }
++            if (output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList() != listOf("Table Name: Photos", remotePath)) {
++                throw HdcException("mediatool did not confirm the requested recording export: $output")
++            }
++            val sizeOutput = command(listOf("stat", "-c", "%s", remotePath), budget).trim()
++            val size = sizeOutput.toLongOrNull() ?: throw HdcException("Invalid recording size returned by stat: $sizeOutput")
++            if (size > config.recordingMaxBytes || size < 0) throw HdcException("Recording exceeds the configured ${config.recordingMaxBytes} byte limit")
++            if (size == 0L) return false
++            Files.deleteIfExists(path)
++            receiveFile(remotePath, path, budget.remaining())
++            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) != size) {
++                throw HdcException("Recording transfer did not produce the expected file size")
++            }
++            return try {
++                Mp4RecordingValidator.validate(path, config.recordingMaxBytes)
++                validatedSize = size
++                true
++            } catch (error: InvalidMp4RecordingException) {
++                lastIncomplete = error
++                false
++            }
++        }
++
++        private fun addRecoveryHint(error: Throwable) {
++            error.addSuppressed(HdcException("Recording may remain on the device. Recover only this session's file with: mediatool query $fileName -u"))
++        }
++
++        private fun copyToSink(budget: Budget) {
++            val expected = checkNotNull(validatedSize)
++            var copied = 0L
++            Files.newInputStream(checkNotNull(localPath), LinkOption.NOFOLLOW_LINKS).use { input ->
++                val bytes = ByteArray(64 * 1024)
++                while (true) {
++                    budget.remaining()
++                    val count = input.read(bytes)
++                    if (count < 0) break
++                    copied += count
++                    if (copied > expected || copied > config.recordingMaxBytes) throw HdcException("Recording changed after validation")
++                    val buffer = Buffer().write(bytes, 0, count)
++                    out.write(buffer, count.toLong())
++                }
++            }
++            if (copied != expected || Files.size(checkNotNull(localPath)) != expected) throw HdcException("Recording changed after validation")
++            out.flush()
++        }
++
++        private fun query(budget: Budget): String? {
++            val output = try {
++                command(listOf("mediatool", "query", fileName, "-u"), budget)
++            } catch (error: HarmonyOSCommandException) {
++                // mediatool uses 255 for an exact no-match result on the supported device.
++                if (error.remoteExitCode == 255 && error.stdout.trim() == "find 0 result" && error.stderr.isEmpty()) {
++                    return null
++                }
++                throw error
++            }
++            val lines = output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
++            if (lines == listOf("find 0 result")) return null
++            if (lines.size != 3 || lines[0] != "find 1 result" || lines[1] != "uri") {
++                throw HdcException("Unexpected result while querying the recording's unique name: $output")
++            }
++            val value = lines[2]
++            if (!value.startsWith('"') || !value.endsWith('"')) throw HdcException("Recording URI was not quoted")
++            val uri = value.substring(1, value.length - 1)
++            val expected = Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/${Regex.escape(fileName)}")
++            if (!expected.matches(uri)) throw HdcException("Media query returned an unexpected recording URI")
++            return uri
++        }
++
++        private fun aa(extra: List<String>, budget: Budget) {
++            val output = command(listOf("aa", "start", "-b", BUNDLE, "-a", ABILITY) + extra, budget)
++            if (output.lineSequence().none { it.trim() == "start ability successfully." }) {
++                throw HdcException("System recorder ability did not confirm success: $output")
++            }
++        }
++
++        private fun cleanup(original: Throwable?): Throwable? {
++            var result = original
++            fun record(error: Throwable) {
++                if (result == null) result = error else if (result !== error) result!!.addSuppressed(error)
++            }
++            if (localPath != null) {
++                if (Thread.currentThread().isInterrupted) {
++                    record(HdcException("Recording scratch cleanup interrupted; temporary file may remain at $remotePath"))
++                } else {
++                    try {
++                        device.execute(listOf("rm", "-f", remotePath), Duration.ofSeconds(2))
++                    } catch (error: Throwable) {
++                        record(error)
++                    }
++                }
++            }
++            for (path in listOfNotNull(localPath, localDirectory)) {
++                try { Files.deleteIfExists(path) } catch (error: Exception) { record(error) }
++            }
++            try { files.close() } catch (error: Exception) { record(error) }
++            return result
++        }
++    }
++
++    private fun command(arguments: List<String>, budget: Budget): String = device.execute(arguments, budget.remaining())
++
++    private fun processes(budget: Budget): Set<Int> {
++        val output = command(listOf("ps", "-ef"), budget)
++        val lines = output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
++        val header = lines.firstOrNull()?.split(Regex("\\s+"))
++        if (header != listOf("UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD")) {
++            throw HdcException("Cannot recognize the device process listing; recording ownership cannot be checked")
++        }
++        return lines.drop(1).mapNotNull { line ->
++            val columns = line.split(Regex("\\s+"), limit = 8)
++            if (columns.size != 8) throw HdcException("Invalid device process row")
++            if (columns[7] == BUNDLE || columns[7].startsWith("$BUNDLE:")) {
++                columns[1].toIntOrNull()?.takeIf { it > 0 } ?: throw HdcException("Invalid system recorder PID")
++            } else null
++        }.toSet()
++    }
++
++    private fun captureInstances(budget: Budget): Set<Int> {
++        val output = command(listOf("hidumper", "-s", "3002", "-a", "-h"), budget)
++        val marker = "--ScreenCaptureServer--:"
++        if (!output.contains("PlayerDistributedService") || output.split(marker).size != 2) {
++            throw HdcException("Cannot recognize system capture status; recording ownership cannot be checked")
++        }
++        val tail = output.substringAfter(marker)
++        val nextSection = Regex("(?m)^-{2,}[A-Za-z]").find(tail)
++            ?: throw HdcException("System capture status is incomplete")
++        val entries = tail.substring(0, nextSection.range.first)
++        val pattern = Regex("-----#[0-9]+: pid = ([0-9]+)-----")
++        if (pattern.replace(entries, "").isNotBlank()) throw HdcException("Unexpected system capture instance format")
++        return pattern.findAll(entries).map { match ->
++            match.groupValues[1].toIntOrNull()?.takeIf { it > 0 } ?: throw HdcException("Invalid capture instance PID")
++        }.toSet()
++    }
++
++    private fun pause(budget: Budget) {
++        val nanos = minOf(config.pollInterval, budget.remaining()).toNanos()
++        try { Thread.sleep(nanos / 1_000_000, (nanos % 1_000_000).toInt()) } catch (error: InterruptedException) {
++            Thread.currentThread().interrupt()
++            throw error
++        }
++    }
++
++    private inner class Budget(private val duration: Duration) {
++        private val deadline = System.nanoTime() + duration.toNanos()
++        fun remaining(): Duration {
++            if (Thread.currentThread().isInterrupted) throw InterruptedException("Screen recording interrupted")
++            val left = deadline - System.nanoTime()
++            if (left <= 0) throw HdcTimeoutException(duration)
++            return minOf(config.commandTimeout, Duration.ofNanos(left))
++        }
++    }
++
++    private companion object {
++        const val BUNDLE = "com.huawei.hmos.screenrecorder"
++        const val ABILITY = "$BUNDLE.ServiceExtAbility"
++        val leases = ConcurrentHashMap.newKeySet<String>()
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..e18caf9
+index 0000000..262e1d9
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,187 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
++import maestro.ScreenRecording
++import okio.Sink
 +import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandException
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.layout.HierarchyReader
@@ -1203,7 +1656,8 @@ index 0000000..e18caf9
 +    val stdout: String,
 +    val stderr: String,
 +    val remoteExitCode: Int? = null,
-+) : HdcException("$message\n${stdout.trim()}\n${stderr.trim()}".trim())
++    cause: Throwable? = null,
++) : HdcException("$message\n${stdout.trim()}\n${stderr.trim()}".trim(), cause)
 +
 +/**
 + * UITest command reference:
@@ -1218,6 +1672,11 @@ index 0000000..e18caf9
 +    }
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
++
++    override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
++        HarmonyOSSystemScreenRecorder(deviceId, this, { remote, local, timeout ->
++            hdc.receiveFile(deviceId, remote, local, timeout)
++        }, config).start(out)
 +
 +    override fun hierarchy(timeout: Duration): TreeNode {
 +        return HierarchyReader(
@@ -1234,29 +1693,42 @@ index 0000000..e18caf9
 +        val marker = "MAESTRO_EXIT_${UUID.randomUUID().toString().replace("-", "")}="
 +        val script = arguments.joinToString(" ") { HdcClient.quoteShellArgument(it) } +
 +            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
-+        val result = hdc.shell(deviceId, listOf("sh", "-c", script), timeout)
++        var transportFailure: HdcCommandException? = null
++        val result = try {
++            hdc.shell(deviceId, listOf("sh", "-c", script), timeout)
++        } catch (error: HdcCommandException) {
++            // HDC's text heuristic can identify a remote tool's [FAIL] output as a
++            // transport error. Only this invocation's final status proves it ran.
++            if (error.result.exitCode != 0 || remoteStatus(error.result.stdout, marker) == null) throw error
++            transportFailure = error
++            error.result
++        }
 +        checkInterrupted()
 +        val lines = result.stdout.trimEnd().lines()
-+        val statusLine = lines.lastOrNull().orEmpty()
-+        val status = statusLine.takeIf { it.startsWith(marker) }?.removePrefix(marker)?.toIntOrNull()
++        val status = remoteStatus(result.stdout, marker)
 +            ?: throw HarmonyOSCommandException(
 +                "Device command did not return its exit status", result.stdout, result.stderr,
 +            )
 +        val output = lines.dropLast(1).joinToString("\n").trimEnd()
 +        if (status != 0) {
-+            throw HarmonyOSCommandException("Device command failed (exit $status)", output, result.stderr, status)
++            throw HarmonyOSCommandException("Device command failed (exit $status)", output, result.stderr, status, transportFailure)
 +        }
 +        if (DEVICE_FAILURE.containsMatchIn(output) || DEVICE_FAILURE.containsMatchIn(result.stderr)) {
-+            throw HarmonyOSCommandException("Device command reported a failure", output, result.stderr, status)
++            throw HarmonyOSCommandException("Device command reported a failure", output, result.stderr, status, transportFailure)
 +        }
 +        // ui_input.cpp returns EXIT_SUCCESS even for an ApiCallErr. Its successful message is
 +        // defined as "No Error" in uitest/core/frontend_error_defines.h at the revision above.
 +        if (arguments.take(2) == listOf("uitest", "uiInput") &&
 +            (output.trim() != "No Error" || result.stderr.isNotBlank())
 +        ) {
-+            throw HarmonyOSCommandException("UITest did not confirm input success", output, result.stderr, status)
++            throw HarmonyOSCommandException("UITest did not confirm input success", output, result.stderr, status, transportFailure)
 +        }
 +        return output
++    }
++
++    private fun remoteStatus(stdout: String, marker: String): Int? {
++        val lastLine = stdout.trimEnd().lineSequence().lastOrNull().orEmpty()
++        return lastLine.takeIf { it.startsWith(marker) }?.removePrefix(marker)?.toIntOrNull()
 +    }
 +
 +    override fun screenshot(timeout: Duration): ByteArray {
@@ -1346,8 +1818,221 @@ index 0000000..e18caf9
 +
 +    private companion object {
 +        const val MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
-+        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|error:|failed:)")
++        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
 +    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/Mp4RecordingValidator.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/Mp4RecordingValidator.kt
+new file mode 100644
+index 0000000..b7ea2b2
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/Mp4RecordingValidator.kt
+@@ -0,0 +1,207 @@
++package maestro.harmonyos.driver
++
++import maestro.harmonyos.hdc.HdcException
++import java.nio.ByteBuffer
++import java.nio.ByteOrder
++import java.nio.channels.FileChannel
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardOpenOption
++import java.nio.file.attribute.BasicFileAttributes
++
++class InvalidMp4RecordingException(message: String) : HdcException("Invalid MP4 recording: $message")
++
++/** Checks a finalized ISO BMFF recording's structure, not whether its compressed frames decode. */
++object Mp4RecordingValidator {
++    fun validate(path: Path, maxBytes: Long) {
++        require(maxBytes > 0) { "Recording size limit must be positive" }
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("MP4 validation interrupted")
++        val before = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
++        if (!before.isRegularFile || before.isSymbolicLink) invalid("a regular file without symlinks is required")
++        val size = before.size()
++        if (size <= 0 || size > maxBytes) invalid("file must contain between 1 and $maxBytes bytes")
++        FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
++            if (channel.size() != size) invalid("file changed before validation")
++            Reader(channel, size).validate()
++            if (channel.size() != size) invalid("file changed during validation")
++        }
++        val after = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
++        if (!after.isRegularFile || after.isSymbolicLink || after.size() != size ||
++            after.lastModifiedTime() != before.lastModifiedTime() ||
++            (before.fileKey() != null && after.fileKey() != before.fileKey())
++        ) {
++            invalid("file changed during validation")
++        }
++    }
++
++    private class Reader(private val channel: FileChannel, private val fileSize: Long) {
++        private var boxCount = 0
++        private var hasFileType = false
++        private var hasMovie = false
++        private var hasMediaData = false
++        private val tracks = mutableListOf<Track>()
++
++        fun validate() {
++            boxes(0, fileSize, "file", null, 0)
++            if (!hasFileType) invalid("missing ftyp box")
++            if (!hasMovie) invalid("missing moov box; recording may not be finalized")
++            if (!hasMediaData) invalid("missing non-empty mdat box")
++            if (tracks.none { it.handler == "vide" && it.positiveDuration == true && it.positiveDimensions == true }) {
++                invalid("no video track with positive duration, timescale and dimensions")
++            }
++        }
++
++        private fun boxes(start: Long, end: Long, parent: String, track: Track?, depth: Int) {
++            if (depth > MAX_DEPTH) invalid("box nesting exceeds $MAX_DEPTH levels")
++            var position = start
++            while (position < end) {
++                if (Thread.currentThread().isInterrupted) throw InterruptedException("MP4 validation interrupted")
++                if (++boxCount > MAX_BOXES) invalid("box count exceeds $MAX_BOXES")
++                val box = box(position, end, parent)
++                when (box.type) {
++                    "ftyp" -> {
++                        if (parent != "file" || hasFileType) invalid("misplaced or duplicate ftyp box")
++                        if (box.payloadSize < 8 || box.payloadSize % 4 != 0L) invalid("malformed ftyp payload")
++                        hasFileType = true
++                    }
++                    "moov" -> {
++                        if (parent != "file" || hasMovie) invalid("misplaced or duplicate moov box")
++                        hasMovie = true
++                        boxes(box.payload, box.end, box.type, null, depth + 1)
++                    }
++                    "mdat" -> {
++                        if (parent != "file") invalid("misplaced mdat box")
++                        hasMediaData = hasMediaData || box.payloadSize > 0
++                    }
++                    "trak" -> {
++                        if (parent != "moov") invalid("trak must be a direct child of moov")
++                        val current = Track()
++                        tracks += current
++                        boxes(box.payload, box.end, box.type, current, depth + 1)
++                    }
++                    "mdia" -> {
++                        if (parent != "trak" || track == null || track.hasMedia) invalid("misplaced or duplicate mdia box")
++                        track.hasMedia = true
++                        boxes(box.payload, box.end, box.type, track, depth + 1)
++                    }
++                    "tkhd" -> {
++                        if (parent != "trak" || track == null || track.positiveDimensions != null) {
++                            invalid("misplaced or duplicate tkhd box")
++                        }
++                        track.positiveDimensions = dimensions(box)
++                    }
++                    "mdhd" -> {
++                        if (parent != "mdia" || track == null || track.positiveDuration != null) {
++                            invalid("misplaced or duplicate mdhd box")
++                        }
++                        track.positiveDuration = duration(box)
++                    }
++                    "hdlr" -> {
++                        if (parent == "mdia") {
++                            if (track == null || track.handler != null) invalid("duplicate media handler")
++                            if (box.payloadSize < 24) invalid("truncated hdlr box")
++                            track.handler = typeAt(box.payload + 8)
++                        }
++                    }
++                    "meta" -> {
++                        if (box.payloadSize < 4) invalid("truncated meta full-box header")
++                        boxes(box.payload + 4, box.end, box.type, track, depth + 1)
++                    }
++                    in CONTAINERS -> boxes(box.payload, box.end, box.type, track, depth + 1)
++                }
++                position = box.end
++            }
++        }
++
++        private fun box(position: Long, parentEnd: Long, parent: String): Box {
++            if (parentEnd - position < 8) invalid("truncated box header at $position")
++            val header = read(position, 8)
++            val size32 = header.int.toLong() and UINT32_MAX
++            val typeBytes = ByteArray(4).also { header.get(it) }
++            val type = String(typeBytes, Charsets.ISO_8859_1)
++            var headerSize = 8L
++            val size = when (size32) {
++                0L -> {
++                    // The zero-size form extends to EOF, not to an arbitrary container boundary.
++                    if (parent != "file") invalid("zero-size nested box at $position")
++                    fileSize - position
++                }
++                1L -> {
++                    if (parentEnd - position < 16) invalid("truncated extended box header at $position")
++                    headerSize = 16
++                    read(position + 8, 8).long.also {
++                        if (it < 0) invalid("box size exceeds the signed file offset range")
++                    }
++                }
++                else -> size32
++            }
++            if (size < headerSize || size > parentEnd - position) invalid("box $type exceeds its parent or has an invalid size")
++            // The subtraction checks above make both additions safe from signed overflow.
++            return Box(type, position + headerSize, position + size)
++        }
++
++        private fun duration(box: Box): Boolean {
++            val version = version(box)
++            val required = if (version == 0) 24 else 36
++            if (box.payloadSize < required) invalid("truncated mdhd box")
++            val offset = box.payload + if (version == 0) 12 else 20
++            val timeScale = unsignedInt(offset)
++            val duration = if (version == 0) unsignedInt(offset + 4) else read(offset + 4, 8).long
++            // All-ones represents an unknown duration. A finalized recording needs a known duration.
++            val known = duration > 0 && !(version == 0 && duration == UINT32_MAX)
++            return timeScale > 0 && known
++        }
++
++        private fun dimensions(box: Box): Boolean {
++            val version = version(box)
++            val required = if (version == 0) 84 else 96
++            if (box.payloadSize < required) invalid("truncated tkhd box")
++            val offset = box.payload + if (version == 0) 76 else 88
++            // tkhd stores display width and height in unsigned 16.16 fixed point.
++            return unsignedInt(offset) >= 65536 && unsignedInt(offset + 4) >= 65536
++        }
++
++        private fun version(box: Box): Int {
++            if (box.payloadSize < 4) invalid("truncated ${box.type} full-box header")
++            val version = read(box.payload, 1).get().toInt() and 0xff
++            if (version !in 0..1) invalid("unsupported ${box.type} version $version")
++            return version
++        }
++
++        private fun unsignedInt(position: Long): Long = read(position, 4).int.toLong() and UINT32_MAX
++
++        private fun typeAt(position: Long): String = String(read(position, 4).array(), Charsets.ISO_8859_1)
++
++        private fun read(position: Long, count: Int): ByteBuffer {
++            if (position < 0 || count.toLong() > fileSize - position) invalid("truncated field at $position")
++            val buffer = ByteBuffer.allocate(count).order(ByteOrder.BIG_ENDIAN)
++            var offset = position
++            while (buffer.hasRemaining()) {
++                if (Thread.currentThread().isInterrupted) throw InterruptedException("MP4 validation interrupted")
++                val read = channel.read(buffer, offset)
++                if (read <= 0) invalid("truncated field at $offset")
++                offset += read
++            }
++            return buffer.flip()
++        }
++    }
++
++    private data class Box(val type: String, val payload: Long, val end: Long) {
++        val payloadSize: Long get() = end - payload
++    }
++
++    private class Track {
++        var hasMedia = false
++        var handler: String? = null
++        var positiveDuration: Boolean? = null
++        var positiveDimensions: Boolean? = null
++    }
++
++    private const val UINT32_MAX = 0xffff_ffffL
++    private const val MAX_DEPTH = 16
++    private const val MAX_BOXES = 100_000
++    private val CONTAINERS = setOf("minf", "stbl", "edts", "dinf", "udta", "mvex", "moof", "traf", "mfra", "tref", "sinf", "schi", "meco", "hnti", "hinf")
++
++    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
@@ -2013,15 +2698,16 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..17c19f6
+index 0000000..18fadc6
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,455 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
 +import maestro.KeyCode
 +import maestro.Point
++import maestro.ScreenRecording
 +import maestro.SwipeDirection
 +import maestro.TreeNode
 +import maestro.ViewHierarchy
@@ -2030,11 +2716,13 @@ index 0000000..17c19f6
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import okio.Buffer
++import okio.Sink
 +import org.junit.jupiter.api.Assertions.assertThrows
 +import org.junit.jupiter.api.Test
 +import java.awt.image.BufferedImage
 +import java.io.ByteArrayOutputStream
 +import java.time.Duration
++import java.time.Instant
 +import javax.imageio.ImageIO
 +
 +class HarmonyOSDriverTest {
@@ -2198,6 +2886,116 @@ index 0000000..17c19f6
 +    }
 +
 +    @Test
++    fun `recording requires explicit enablement even when backend can record`() {
++        val device = Device().apply { recordingFactory = { _, _ -> Recording() } }
++        val driver = driver(device)
++        driver.open()
++        assertThrows(UnsupportedOperationException::class.java) { driver.startScreenRecording(Buffer()) }
++        assertThat(device.recordingStarts).isEqualTo(0)
++        driver.close()
++    }
++
++    @Test
++    fun `enabled recording delegates sink and configuration to backend`() {
++        val backendRecording = Recording()
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val config = HarmonyOSDriverConfig(enableScreenRecording = true, recordingMaxDuration = Duration.ofSeconds(10))
++        val driver = HarmonyOSDriver(device, config)
++        val sink = Buffer()
++        driver.open()
++
++        val recording = driver.startScreenRecording(sink)
++
++        assertThat(device.recordingStarts).isEqualTo(1)
++        assertThat(device.recordingSink).isSameInstanceAs(sink)
++        assertThat(device.recordingConfig).isSameInstanceAs(config)
++        assertThat(recording.startedAt).isEqualTo(backendRecording.startedAt)
++        recording.close()
++        driver.close()
++    }
++
++    @Test
++    fun `duplicate recording start is rejected before calling backend`() {
++        val backendRecording = Recording()
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        driver.startScreenRecording(Buffer())
++
++        assertThrows(IllegalStateException::class.java) { driver.startScreenRecording(Buffer()) }
++        assertThat(device.recordingStarts).isEqualTo(1)
++        driver.close()
++        assertThat(backendRecording.closeCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `closing returned recording prevents driver close from stopping it again`() {
++        val backendRecording = Recording()
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        val recording = driver.startScreenRecording(Buffer())
++
++        recording.close()
++        driver.close()
++        driver.close()
++
++        assertThat(backendRecording.closeCalls).isEqualTo(1)
++        assertThat(driver.isShutdown()).isTrue()
++    }
++
++    @Test
++    fun `driver close stops an unfinished recording exactly once`() {
++        val backendRecording = Recording()
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        driver.startScreenRecording(Buffer())
++        assertThat(backendRecording.closeCalls).isEqualTo(0)
++
++        driver.close()
++        driver.close()
++
++        assertThat(backendRecording.closeCalls).isEqualTo(1)
++        assertThat(driver.isShutdown()).isTrue()
++        assertThrows(IllegalStateException::class.java) { driver.startScreenRecording(Buffer()) }
++    }
++
++    @Test
++    fun `recording close failure preserves original error and shuts down driver safely`() {
++        val error = HdcException("recording export failed")
++        val backendRecording = Recording(closeFailure = error)
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        driver.startScreenRecording(Buffer())
++
++        assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(error)
++        assertThat(driver.isShutdown()).isTrue()
++        driver.close()
++        assertThat(backendRecording.closeCalls).isEqualTo(1)
++        assertThrows(IllegalStateException::class.java) { driver.inputText("after close") }
++    }
++
++    @Test
++    fun `failed recording start preserves error and does not reserve driver session`() {
++        val error = HdcException("recording start failed")
++        val device = Device().apply { recordingFactory = { _, _ -> throw error } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        assertThat(assertThrows(HdcException::class.java) {
++            driver.startScreenRecording(Buffer())
++        }).isSameInstanceAs(error)
++
++        val backendRecording = Recording()
++        device.recordingFactory = { _, _ -> backendRecording }
++        driver.startScreenRecording(Buffer())
++        assertThat(device.recordingStarts).isEqualTo(2)
++        driver.close()
++        assertThat(backendRecording.closeCalls).isEqualTo(1)
++    }
++
++    @Test
 +    fun `settling requires two fresh matching hierarchies`() {
 +        val device = Device()
 +        val driver = driver(device)
@@ -2311,6 +3109,10 @@ index 0000000..17c19f6
 +        var output: String? = null
 +        var executeFailure: Throwable? = null
 +        var screenshotFailure: Throwable? = null
++        var recordingFactory: ((Sink, HarmonyOSDriverConfig) -> ScreenRecording)? = null
++        var recordingStarts = 0
++        var recordingSink: Sink? = null
++        var recordingConfig: HarmonyOSDriverConfig? = null
 +        val commands = mutableListOf<List<String>>()
 +        override fun connect() { connections++ }
 +        override fun isAvailable(): Boolean = true
@@ -2328,6 +3130,21 @@ index 0000000..17c19f6
 +                listOf("aa", "force-stop") -> "force stop process successfully."
 +                else -> ""
 +            }
++        }
++        override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording {
++            recordingStarts++
++            recordingSink = out
++            recordingConfig = config
++            return recordingFactory?.invoke(out, config) ?: super<HarmonyOSDevice>.startScreenRecording(out, config)
++        }
++    }
++
++    private class Recording(private val closeFailure: Throwable? = null) : ScreenRecording {
++        override val startedAt: Instant = Instant.parse("2026-01-01T00:00:00Z")
++        var closeCalls = 0
++        override fun close() {
++            closeCalls++
++            closeFailure?.let { throw it }
 +        }
 +    }
 +
@@ -2381,16 +3198,527 @@ index 0000000..db63669
 +        assertThat(DeviceService.isDeviceAvailableToLaunch("test-device", Platform.HARMONYOS)).isNull()
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
+new file mode 100644
+index 0000000..d567b46
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
+@@ -0,0 +1,504 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.TreeNode
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import okio.Buffer
++import okio.Sink
++import okio.Timeout
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.io.IOException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.time.Instant
++import java.util.UUID
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++
++class HarmonyOSSystemScreenRecorderTest {
++    @Test
++    fun `recording starts only after readiness and exports exactly its own file`() {
++        val device = Device()
++        val sink = RecordingSink()
++        val before = Instant.now()
++        val recording = recorder(device).start(sink)
++        assertThat(recording.startedAt).isAtLeast(before)
++        assertThat(device.starts).isEqualTo(1)
++        assertThat(sink.bytes.size).isEqualTo(0)
++        assertThat(device.fileName).matches("maestro-recording-[0-9a-f]{32}\\.mp4")
++
++        recording.close()
++        recording.close()
++
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.receives).isEqualTo(1)
++        assertThat(device.deletes).containsExactly(device.uri)
++        assertThat(sink.bytes.readByteArray()).isEqualTo(device.video)
++        assertThat(sink.closed).isFalse()
++        assertThat(sink.flushed).isTrue()
++        assertThat(device.localPath?.let { Files.exists(it) }).isFalse()
++        assertThat(device.commands.filter { it.first() == "rm" }.map { it.last() }.toSet())
++            .containsExactly("/data/local/tmp/${device.fileName}")
++        assertThat(device.commands.indexOfFirst { it.first() == "stat" })
++            .isLessThan(device.commands.indexOfFirst { it.first() == "mediatool" && it[1] == "delete" })
++    }
++
++    @Test
++    fun `existing recorder process or another capture prevents any start`() {
++        for (existingCapture in listOf(false, true)) {
++            val device = Device().apply {
++                if (existingCapture) capturePids = setOf(91) else recorderPids = setOf(91)
++            }
++            val error = assertThrows(HdcException::class.java) { recorder(device).start(Buffer()) }
++            assertThat(error.message).contains("already exists")
++            assertThat(device.starts).isEqualTo(0)
++            assertThat(device.stops).isEqualTo(0)
++            assertThat(device.deletes).isEmpty()
++        }
++    }
++
++    @Test
++    fun `unknown process or capture formats prevent starting`() {
++        for (prefix in listOf(listOf("ps"), listOf("hidumper"))) {
++            val device = Device().apply { response = { args -> if (args.take(prefix.size) == prefix) "unknown status" else null } }
++            assertThrows(HdcException::class.java) { recorder(device).start(Buffer()) }
++            assertThat(device.starts).isEqualTo(0)
++        }
++    }
++
++    @Test
++    fun `missing Huawei service reports unsupported before side effects`() {
++        val device = Device().apply { response = { args -> if (args.first() == "bm") "unavailable" else null } }
++        assertThrows(UnsupportedOperationException::class.java) { recorder(device).start(Buffer()) }
++        assertThat(device.starts).isEqualTo(0)
++    }
++
++    @Test
++    fun `a lost start acknowledgement is preserved and never blindly toggled`() {
++        val original = HdcException("start reply lost")
++        val device = Device().apply { response = { args -> if (args.first() == "aa") throw original else null } }
++        val error = assertThrows(HdcException::class.java) { recorder(device).start(Buffer()) }
++        assertThat(error).isSameInstanceAs(original)
++        assertThat(error.suppressed.map { it.message }.joinToString()).contains("no stop toggle")
++        assertThat(device.commands.count { it.first() == "aa" }).isEqualTo(1)
++    }
++
++    @Test
++    fun `only the exact empty query result permits exit 255`() {
++        val failures = listOf(
++            HarmonyOSCommandException("query failed", "permission denied", "", 255),
++            HarmonyOSCommandException("query failed", "find 0 result\nerror: denied", "", 255),
++            HarmonyOSCommandException("query failed", "find 0 result", "permission denied", 255),
++            HarmonyOSCommandException("query failed", "find 0 result", "\n", 255),
++            HarmonyOSCommandException("query failed", "find 0 result", "", 1),
++        )
++        for (original in failures) {
++            val device = Device().apply {
++                response = { args -> if (args.take(2) == listOf("mediatool", "query")) throw original else null }
++            }
++            val error = assertThrows(HarmonyOSCommandException::class.java) { recorder(device).start(Buffer()) }
++            assertThat(error).isSameInstanceAs(original)
++            assertThat(device.starts).isEqualTo(0)
++            assertThat(device.deletes).isEmpty()
++        }
++    }
++
++    @Test
++    fun `readiness failure followed by export failure still stops the confirmed recording`() {
++        val readiness = HdcException("readiness status unavailable")
++        val query = HdcException("query temporarily unavailable")
++        val device = Device()
++        var readinessFailed = false
++        var queryFailed = false
++        device.response = { args ->
++            if (device.starts > 0 && args.first() == "ps" && !readinessFailed) {
++                readinessFailed = true
++                throw readiness
++            }
++            if (device.starts > 0 && args.take(2) == listOf("mediatool", "query") && !queryFailed) {
++                queryFailed = true
++                throw query
++            }
++            null
++        }
++        val error = assertThrows(HdcException::class.java) { recorder(device).start(Buffer()) }
++        assertThat(error).isSameInstanceAs(readiness)
++        assertThat(error.suppressed).asList().contains(query)
++        assertThat(error.suppressed.any { it.message.orEmpty().contains(checkNotNull(device.fileName)) }).isTrue()
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `an already finalized file is exported without touching a replacement recorder`() {
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        device.finishExternally()
++        device.recorderPids = setOf(900)
++        device.capturePids = setOf(900)
++        recording.close()
++        assertThat(device.stops).isEqualTo(0)
++        assertThat(device.deletes).containsExactly(device.uri)
++        assertThat(device.recorderPids).containsExactly(900)
++    }
++
++    @Test
++    fun `changed process or capture ownership refuses a stop toggle`() {
++        for (changedCapture in listOf(false, true)) {
++            val device = Device()
++            val recording = recorder(device).start(Buffer())
++            if (changedCapture) device.capturePids = setOf(900) else device.recorderPids = setOf(900)
++            val error = assertThrows(HdcException::class.java) { recording.close() }
++            assertThat(error.message).contains("refusing to toggle")
++            assertThat(device.stops).isEqualTo(0)
++            assertThat(device.deletes).isEmpty()
++        }
++    }
++
++    @Test
++    fun `an active recording may publish its URI before the MP4 is finalized`() {
++        val device = Device().apply { video = "unfinished movie".toByteArray() }
++        val recording = recorder(device).start(Buffer())
++        device.finished = true // query already sees the active recording's unique URI.
++        device.response = { args ->
++            if (args.first() == "aa" && !args.contains("--ps")) {
++                device.video = Mp4RecordingValidatorTest.minimalVideoRecording()
++            }
++            null
++        }
++        recording.close()
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.receives).isEqualTo(2)
++        assertThat(device.deletes).containsExactly(device.uri)
++    }
++
++    @Test
++    fun `an active recording with an unreadable asset is stopped once before export`() {
++        val device = Device()
++        val sink = RecordingSink()
++        val recording = recorder(device).start(sink)
++        device.finished = true
++        val unreadable = HarmonyOSCommandException(
++            "media file is not ready", "Table Name: Photos\n[FAIL] open source media file failed.\n", "", 0,
++        )
++        device.response = { args ->
++            if (args.take(2) == listOf("mediatool", "recv") && device.stops == 0) throw unreadable
++            null
++        }
++
++        recording.close()
++
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.commands.count { it.take(2) == listOf("mediatool", "recv") }).isEqualTo(2)
++        assertThat(device.receives).isEqualTo(1)
++        assertThat(device.deletes).containsExactly(device.uri)
++        assertThat(sink.bytes.readByteArray()).isEqualTo(device.video)
++    }
++
++    @Test
++    fun `other media export errors preserve the original exception`() {
++        val unreadable = "Table Name: Photos\n[FAIL] open source media file failed."
++        val failures = listOf(
++            HarmonyOSCommandException("recv failed", "permission denied", "", 0),
++            HarmonyOSCommandException("recv failed", "$unreadable\npermission denied", "", 0),
++            HarmonyOSCommandException("recv failed", "Table Name: Photos\n\n[FAIL] open source media file failed.", "", 0),
++            HarmonyOSCommandException("recv failed", unreadable, "", 1),
++            HarmonyOSCommandException("recv failed", unreadable, "", 255),
++            HarmonyOSCommandException("recv failed", unreadable, "", null),
++            HarmonyOSCommandException("recv failed", unreadable, "permission denied", 0),
++            HarmonyOSCommandException("recv failed", unreadable, "\n", 0),
++        )
++        for (original in failures) {
++            val device = Device()
++            val recording = recorder(device).start(Buffer())
++            device.finished = true
++            device.response = { args ->
++                if (args.take(2) == listOf("mediatool", "recv")) throw original
++                null
++            }
++
++            val error = assertThrows(HarmonyOSCommandException::class.java) { recording.close() }
++
++            assertThat(error).isSameInstanceAs(original)
++            assertThat(device.receives).isEqualTo(0)
++            assertThat(device.deletes).isEmpty()
++        }
++    }
++
++    @Test
++    fun `a file that remains unreadable times out with the original device diagnostic`() {
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        device.finished = true
++        val original = HarmonyOSCommandException(
++            "media file is not ready", "Table Name: Photos\n[FAIL] open source media file failed.", "", 0,
++        )
++        device.response = { args ->
++            if (args.take(2) == listOf("mediatool", "recv")) throw original
++            null
++        }
++
++        val error = assertThrows(HdcTimeoutException::class.java) { recording.close() }
++
++        assertThat(error.suppressed).asList().contains(original)
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.receives).isEqualTo(0)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `a lingering process without a capture is not toggled`() {
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        device.capturePids = emptySet()
++        assertThrows(HdcTimeoutException::class.java) { recording.close() }
++        assertThat(device.stops).isEqualTo(0)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `lost stop reply is never retried and leaves the exact media asset recoverable`() {
++        val original = HdcException("stop reply lost")
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        device.response = { args -> if (args.first() == "aa") throw original else null }
++        val error = assertThrows(HdcException::class.java) { recording.close() }
++        assertThat(error).isSameInstanceAs(original)
++        assertThat(error.suppressed.any { it.message.orEmpty().contains(checkNotNull(device.fileName)) }).isTrue()
++        assertThat(assertThrows(HdcException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(device.commands.count { it.first() == "aa" }).isEqualTo(2)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `transient status failure still stops a confirmed owned capture once`() {
++        val original = HdcException("query temporarily unavailable")
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        var failed = false
++        device.response = { args ->
++            if (args.take(2) == listOf("mediatool", "query") && !failed) {
++                failed = true
++                throw original
++            }
++            null
++        }
++        assertThat(assertThrows(HdcException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `multiple or unrelated media matches are rejected without exporting or deleting`() {
++        for (reply in listOf("find 2 result\n", "find 1 result\nuri\n\"file://media/Photo/1/VID_1/another.mp4\"\n")) {
++            val device = Device()
++            val recording = recorder(device).start(Buffer())
++            device.response = { args -> if (args.take(2) == listOf("mediatool", "query")) reply else null }
++            assertThrows(HdcException::class.java) { recording.close() }
++            assertThat(device.stops).isEqualTo(0)
++            assertThat(device.receives).isEqualTo(0)
++            assertThat(device.deletes).isEmpty()
++        }
++    }
++
++    @Test
++    fun `size is checked before receiving and failed export retains its media asset`() {
++        val device = Device()
++        val recording = recorder(device, config().copy(recordingMaxBytes = 1024)).start(Buffer())
++        device.finished = true
++        device.response = { args -> if (args.first() == "stat") "1025\n" else null }
++        val error = assertThrows(HdcException::class.java) { recording.close() }
++        assertThat(error.message).contains("byte limit")
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.receives).isEqualTo(0)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `malformed MP4 never reaches the sink and timeout retains validation evidence`() {
++        val device = Device().apply { video = "not a movie".toByteArray() }
++        val sink = RecordingSink()
++        val recording = recorder(device).start(sink)
++        val error = assertThrows(HdcTimeoutException::class.java) { recording.close() }
++        assertThat(error.suppressed.any { it is InvalidMp4RecordingException }).isTrue()
++        assertThat(sink.bytes.size).isEqualTo(0)
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test
++    fun `transfer and cleanup failures keep their identities and never delete media`() {
++        val original = IOException("file transfer failed")
++        val cleanup = HdcException("scratch removal failed")
++        val device = Device().apply { receiveFailure = original }
++        val recording = recorder(device).start(Buffer())
++        device.response = { args -> if (args.first() == "rm" && device.receives > 0) throw cleanup else null }
++        val error = assertThrows(IOException::class.java) { recording.close() }
++        assertThat(error).isSameInstanceAs(original)
++        assertThat(error.suppressed).asList().contains(cleanup)
++        assertThat(device.deletes).isEmpty()
++        assertThat(device.localPath?.let { Files.exists(it) }).isFalse()
++    }
++
++    @Test
++    fun `sink failure keeps media and does not close caller sink`() {
++        val original = IOException("artifact disk full")
++        val device = Device()
++        val sink = RecordingSink().apply { writeFailure = original }
++        val recording = recorder(device).start(sink)
++        assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(device.deletes).isEmpty()
++        assertThat(sink.closed).isFalse()
++    }
++
++    @Test
++    fun `delete must explicitly confirm success after a valid export`() {
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        device.response = { args -> if (args.take(2) == listOf("mediatool", "delete")) "[ERROR] failed" else null }
++        assertThat(assertThrows(HdcException::class.java) { recording.close() }.message).contains("did not confirm deletion")
++        assertThat(device.receives).isEqualTo(1)
++        assertThat(device.stops).isEqualTo(1)
++    }
++
++    @Test
++    fun `same device cannot be recorded by two Maestro sessions`() {
++        val device = Device()
++        val id = UUID.randomUUID().toString()
++        val first = recorder(device, id = id).start(Buffer())
++        try {
++            assertThrows(HdcException::class.java) { recorder(device, id = id).start(Buffer()) }
++            assertThat(device.starts).isEqualTo(1)
++        } finally { first.close() }
++    }
++
++    @Test
++    fun `closing an interrupted flow still stops its recording and restores interruption`() {
++        val device = Device()
++        val recording = recorder(device).start(Buffer())
++        Thread.currentThread().interrupt()
++        try {
++            recording.close()
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(device.stops).isEqualTo(1)
++        } finally { Thread.interrupted() }
++    }
++
++    @Test
++    fun `duration limit stops recording and remains a failure when the owner closes`() {
++        val device = Device()
++        val recording = recorder(device, config().copy(recordingMaxDuration = Duration.ofSeconds(1), recordingStopTimeout = Duration.ofSeconds(2))).start(Buffer())
++        assertThat(device.deleted.await(4, TimeUnit.SECONDS)).isTrue()
++        val error = assertThrows(HdcException::class.java) { recording.close() }
++        assertThat(error.message).contains("1 second limit")
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).hasSize(1)
++    }
++
++    private fun recorder(device: Device, config: HarmonyOSDriverConfig = config(), id: String = UUID.randomUUID().toString()) =
++        HarmonyOSSystemScreenRecorder(id, device, device::receive, config)
++
++    private fun config() = HarmonyOSDriverConfig(
++        enableScreenRecording = true,
++        pollInterval = Duration.ofMillis(1),
++        recordingStopTimeout = Duration.ofMillis(200),
++    )
++
++    private class RecordingSink : Sink {
++        val bytes = Buffer()
++        var flushed = false
++        var closed = false
++        var writeFailure: Throwable? = null
++        override fun write(source: Buffer, byteCount: Long) { writeFailure?.let { throw it }; bytes.write(source, byteCount) }
++        override fun flush() { flushed = true }
++        override fun timeout() = Timeout.NONE
++        override fun close() { closed = true }
++    }
++
++    private class Device : HarmonyOSDevice {
++        var recorderPids: Set<Int> = emptySet()
++        var capturePids: Set<Int> = emptySet()
++        var fileName: String? = null
++        var finished = false
++        var wasDeleted = false
++        var starts = 0
++        var stops = 0
++        var receives = 0
++        var video = Mp4RecordingValidatorTest.minimalVideoRecording()
++        var localPath: Path? = null
++        var receiveFailure: Throwable? = null
++        var response: (List<String>) -> String? = { null }
++        val commands = mutableListOf<List<String>>()
++        val deletes = mutableListOf<String>()
++        val deleted = CountDownLatch(1)
++        val uri get() = "file://media/Photo/123/VID_123_456/$fileName"
++
++        override fun connect() = Unit
++        override fun isAvailable() = true
++        override fun hierarchy(timeout: Duration): TreeNode = error("unused")
++        override fun screenshot(timeout: Duration): ByteArray = error("unused")
++
++        @Synchronized
++        override fun execute(arguments: List<String>, timeout: Duration): String {
++            assertThat(timeout.isNegative || timeout.isZero).isFalse()
++            commands += arguments
++            response(arguments)?.let { return it }
++            return when (arguments.first()) {
++                "bm" -> "com.huawei.hmos.screenrecorder.ServiceExtAbility"
++                "ps" -> "UID PID PPID C STIME TTY TIME CMD\n" + recorderPids.joinToString("\n") {
++                    "20020154 $it 575 0 02:41:36 ? 00:00:00 com.huawei.hmos.screenrecorder"
++                }
++                "hidumper" -> "PlayerDistributedService\n--RecorderServer--:--ScreenCaptureServer--:" +
++                    capturePids.mapIndexed { index, pid -> "-----#$index: pid = $pid-----" }.joinToString("\n") +
++                    "\n------------------XCollieDfx------------------\n"
++                "aa" -> {
++                    if (arguments.contains("--ps")) {
++                        starts++
++                        fileName = arguments.last()
++                        recorderPids = setOf(51)
++                        capturePids = setOf(51)
++                    } else {
++                        stops++
++                        finishExternally()
++                    }
++                    "start ability successfully.\n"
++                }
++                "mediatool" -> when (arguments[1]) {
++                    "help" -> "query <display-name> [-p] [-u]\nrecv <src-media> <dest-path>\ndelete <media-uri>\n"
++                    "query" -> if (finished && !wasDeleted) "find 1 result\nuri\n\"$uri\"\n" else {
++                        throw HarmonyOSCommandException("Device command failed (exit 255)", "find 0 result\n", "", 255)
++                    }
++                    "recv" -> {
++                        assertThat(arguments[2]).isEqualTo(uri)
++                        assertThat(arguments[3]).isEqualTo("/data/local/tmp/$fileName")
++                        "Table Name: Photos\n${arguments[3]}\n"
++                    }
++                    "delete" -> {
++                        deletes += arguments[2]
++                        wasDeleted = true
++                        deleted.countDown()
++                        "[SUCCESS] delete success.\n"
++                    }
++                    else -> error("Unexpected mediatool command: $arguments")
++                }
++                "rm" -> ""
++                "stat" -> "${video.size}\n"
++                else -> error("Unexpected command: $arguments")
++            }
++        }
++
++        fun receive(remote: String, path: Path, timeout: Duration) {
++            assertThat(remote).isEqualTo("/data/local/tmp/$fileName")
++            assertThat(timeout.isNegative || timeout.isZero).isFalse()
++            receives++
++            localPath = path
++            receiveFailure?.let { throw it }
++            Files.write(path, video)
++        }
++
++        fun finishExternally() { finished = true }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
 new file mode 100644
-index 0000000..5085e79
+index 0000000..a984a85
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,223 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
 +import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandException
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
 +import maestro.harmonyos.hdc.HdcException
@@ -2436,6 +3764,70 @@ index 0000000..5085e79
 +            device.execute(listOf("uitest", "screenCap", "-p", "/data/local/tmp/example.png"), TIMEOUT)
 +        }
 +        assertThat(error.message).contains("permission denied")
++    }
++
++    @Test
++    fun `remote media failure is normalized through the real HDC text heuristic`() {
++        val output = "Table Name: Photos\n[FAIL] open source media file failed."
++        val device = device { command, _ -> HdcCommandResult(0, "$output\n\n${marker(command)}0\n", "") }
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            device.execute(listOf("mediatool", "recv", "file://media/Photo/1/VID_1/example.mp4", "/data/local/tmp/example.mp4"), TIMEOUT)
++        }
++        assertThat(error.remoteExitCode).isEqualTo(0)
++        assertThat(error.stdout).isEqualTo(output)
++        assertThat(error.stderr).isEmpty()
++        assertThat(error.cause).isInstanceOf(HdcCommandException::class.java)
++        assertThat((error.cause as HdcCommandException).result.exitCode).isEqualTo(0)
++    }
++
++    @Test
++    fun `normalized failure retains the remote exit and stderr diagnostics`() {
++        val device = device { command, _ -> HdcCommandResult(0, "[FAIL] export denied\n${marker(command)}37\n", "permission detail") }
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            device.execute(listOf("mediatool", "recv", "source", "/data/local/tmp/example.mp4"), TIMEOUT)
++        }
++        assertThat(error.remoteExitCode).isEqualTo(37)
++        assertThat(error.stdout).isEqualTo("[FAIL] export denied")
++        assertThat(error.stderr).isEqualTo("permission detail")
++        assertThat(error.cause).isInstanceOf(HdcCommandException::class.java)
++    }
++
++    @Test
++    fun `host failure or unconfirmed invocation retains the HDC exception`() {
++        val cases = listOf(
++            1 to "[FAIL] host disconnected\n%s0\n",
++            0 to "[FAIL] disconnected\n",
++            0 to "[FAIL] disconnected\nMAESTRO_EXIT_deadbeef=0\n",
++            0 to "[FAIL] disconnected\n%sinvalid\n",
++            0 to "[FAIL] disconnected\n%s0\nunexpected trailing output",
++        )
++        for ((hostExit, output) in cases) {
++            var result: HdcCommandResult? = null
++            val device = device { command, _ ->
++                HdcCommandResult(hostExit, output.replace("%s", marker(command)), "").also { result = it }
++            }
++            val error = assertThrows(HdcCommandException::class.java) {
++                device.execute(listOf("mediatool", "recv", "source", "/data/local/tmp/example.mp4"), TIMEOUT)
++            }
++            assertThat(error.result).isSameInstanceAs(result)
++        }
++    }
++
++    @Test
++    fun `normalizing HDC diagnostics never turns failure text into success`() {
++        for (output in listOf("[FAIL] error", "[ error ] error", "error: rejected", "failed: rejected")) {
++            val device = device { command, _ -> HdcCommandResult(0, "$output\n${marker(command)}0\n", "") }
++            val error = assertThrows(HarmonyOSCommandException::class.java) {
++                device.execute(listOf("mediatool", "recv", "source", "/data/local/tmp/example.mp4"), TIMEOUT)
++            }
++            assertThat(error.stdout).isEqualTo(output)
++            assertThat(error.remoteExitCode).isEqualTo(0)
++        }
++        val device = device { command, _ -> HdcCommandResult(0, "${marker(command)}0\n", "[FAIL] stderr diagnostic") }
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            device.execute(listOf("mediatool", "recv", "source", "/data/local/tmp/example.mp4"), TIMEOUT)
++        }
++        assertThat(error.stderr).isEqualTo("[FAIL] stderr diagnostic")
 +    }
 +
 +    @Test
@@ -2543,6 +3935,226 @@ index 0000000..5085e79
 +        private val TIMEOUT = Duration.ofSeconds(3)
 +        private fun marker(command: List<String>): String = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(command.last())!!.value
 +        private fun device(runner: HdcCommandRunner) = HdcHarmonyOSDevice("TEST-DEVICE", HdcClient("hdc", runner))
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/Mp4RecordingValidatorTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/Mp4RecordingValidatorTest.kt
+new file mode 100644
+index 0000000..93af213
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/Mp4RecordingValidatorTest.kt
+@@ -0,0 +1,214 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.condition.EnabledOnOs
++import org.junit.jupiter.api.condition.OS
++import java.nio.ByteBuffer
++import java.nio.ByteOrder
++import java.nio.file.Files
++import java.nio.file.NoSuchFileException
++import java.nio.file.Path
++
++class Mp4RecordingValidatorTest {
++    @Test
++    fun `accepts finalized video metadata with media before or after movie`() {
++        validate(minimalVideoRecording())
++        validate(ftyp() + mdat() + box("moov", track()))
++    }
++
++    @Test
++    fun `accepts extended box sizes and version one media headers`() {
++        validate(box("ftyp", "isom".toByteArray() + int(0), extended = true) +
++            box("moov", track(version = 1), extended = true) + box("mdat", byteArrayOf(1), extended = true))
++    }
++
++    @Test
++    fun `accepts top level media data extending to end of file`() {
++        validate(ftyp() + box("moov", track()) + int(0) + "mdat".toByteArray() + byteArrayOf(1))
++    }
++
++    @Test
++    fun `video metadata must belong to the same track`() {
++        invalid(ftyp() + box("moov", track(handler = "soun") + track(duration = 0)) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd()) + box("trak", media())) + mdat())
++    }
++
++    @Test
++    fun `rejects audio only recording and video without dimensions`() {
++        invalid(ftyp() + box("moov", track(handler = "soun")) + mdat())
++        invalid(ftyp() + box("moov", track(width = 0)) + mdat())
++        invalid(ftyp() + box("moov", track(height = 0)) + mdat())
++    }
++
++    @Test
++    fun `rejects missing or empty required boxes`() {
++        invalid(box("moov", track()) + mdat())
++        invalid(ftyp() + mdat())
++        invalid(ftyp() + box("moov", track()))
++        invalid(ftyp() + box("moov", track()) + box("mdat", byteArrayOf()))
++        invalid(ftyp() + box("moov", byteArrayOf()) + mdat())
++    }
++
++    @Test
++    fun `rejects zero and unknown duration and invalid timescale`() {
++        invalid(ftyp() + box("moov", track(duration = 0)) + mdat())
++        invalid(ftyp() + box("moov", track(duration = 0xffff_ffffL)) + mdat())
++        invalid(ftyp() + box("moov", track(timeScale = 0)) + mdat())
++        invalid(ftyp() + box("moov", track(version = 1, duration = -1)) + mdat())
++    }
++
++    @Test
++    fun `rejects unsupported metadata versions and truncated fixed fields`() {
++        invalid(ftyp() + box("moov", track(version = 2)) + mdat())
++        invalid(ftyp() + box("moov", box("trak", box("tkhd", ByteArray(80)) + media())) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + box("mdia", box("mdhd", ByteArray(20)) + hdlr("vide")))) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + box("mdia", mdhd() + box("hdlr", ByteArray(12))))) + mdat())
++    }
++
++    @Test
++    fun `rejects partial headers payload truncation and boxes escaping their parent`() {
++        invalid(minimalVideoRecording() + byteArrayOf(0, 0, 0))
++        invalid(minimalVideoRecording().dropLast(1).toByteArray())
++        invalid(ftyp() + int(7) + "moov".toByteArray() + mdat())
++        invalid(ftyp() + box("moov", int(1000) + "trak".toByteArray()) + mdat())
++        invalid(ftyp() + int(1) + "moov".toByteArray() + byteArrayOf(0, 0, 0))
++        invalid(ftyp() + int(1) + "moov".toByteArray() + long(15) + mdat())
++        invalid(ftyp() + int(1) + "moov".toByteArray() + long(Long.MAX_VALUE) + mdat())
++        invalid(ftyp() + int(1) + "moov".toByteArray() + long(Long.MIN_VALUE) + mdat())
++    }
++
++    @Test
++    fun `rejects duplicate critical boxes and malformed hierarchy`() {
++        invalid(ftyp() + ftyp() + box("moov", track()) + mdat())
++        invalid(ftyp() + box("moov", track()) + box("moov", track()) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + tkhd() + media())) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + media() + media())) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + box("mdia", mdhd() + mdhd() + hdlr("vide")))) + mdat())
++        invalid(ftyp() + box("moov", box("trak", tkhd() + box("mdia", mdhd() + hdlr("vide") + hdlr("soun")))) + mdat())
++        invalid(ftyp() + track() + mdat())
++        invalid(ftyp() + box("moov", box("mdia", mdhd() + hdlr("vide"))) + mdat())
++        invalid(ftyp() + box("moov", int(0) + "trak".toByteArray()) + mdat())
++    }
++
++    @Test
++    fun `rejects excessive container nesting without unbounded recursion`() {
++        var nested = box("free", byteArrayOf())
++        repeat(30) { nested = box("udta", nested) }
++        invalid(ftyp() + box("moov", track() + nested) + mdat())
++    }
++
++    @Test
++    fun `skips bounded unknown boxes and inspects a later video track`() {
++        validate(ftyp() + box("free", ByteArray(100)) +
++            box("moov", track(handler = "soun", width = 0, height = 0) + track()) + mdat())
++    }
++
++    @Test
++    fun `rejects file size limit and nonregular file`() {
++        withFile(minimalVideoRecording()) { path ->
++            assertThrows(InvalidMp4RecordingException::class.java) {
++                Mp4RecordingValidator.validate(path, Files.size(path) - 1)
++            }
++            assertThrows(IllegalArgumentException::class.java) { Mp4RecordingValidator.validate(path, 0) }
++        }
++        TempFileHandler().use { files ->
++            val directory = files.createTempDirectory("maestro-mp4-test-").toPath()
++            assertThrows(InvalidMp4RecordingException::class.java) { Mp4RecordingValidator.validate(directory, LIMIT) }
++        }
++    }
++
++    @Test
++    fun `filesystem errors retain their original type`() {
++        TempFileHandler().use { files ->
++            val path = files.createTempDirectory("maestro-mp4-test-").toPath().resolve("missing.mp4")
++            assertThrows(NoSuchFileException::class.java) { Mp4RecordingValidator.validate(path, LIMIT) }
++        }
++    }
++
++    @Test
++    @EnabledOnOs(OS.LINUX, OS.MAC)
++    fun `rejects symlinks even when their target is a valid recording`() {
++        TempFileHandler().use { files ->
++            val directory = files.createTempDirectory("maestro-mp4-test-").toPath()
++            val target = directory.resolve("target.mp4")
++            Files.write(target, minimalVideoRecording())
++            val link = Files.createSymbolicLink(directory.resolve("linked.mp4"), target)
++            assertThrows(InvalidMp4RecordingException::class.java) { Mp4RecordingValidator.validate(link, LIMIT) }
++        }
++    }
++
++    @Test
++    fun `interruption prevents metadata reads and remains cancellation`() {
++        withFile(minimalVideoRecording()) { path ->
++            try {
++                Thread.currentThread().interrupt()
++                assertThrows(InterruptedException::class.java) { Mp4RecordingValidator.validate(path, LIMIT) }
++                assertThat(Thread.currentThread().isInterrupted).isTrue()
++            } finally {
++                Thread.interrupted()
++            }
++        }
++    }
++
++    private fun validate(bytes: ByteArray) = withFile(bytes) { Mp4RecordingValidator.validate(it, LIMIT) }
++
++    private fun invalid(bytes: ByteArray) = withFile(bytes) { path ->
++        assertThrows(InvalidMp4RecordingException::class.java) { Mp4RecordingValidator.validate(path, LIMIT) }
++        Unit
++    }
++
++    private fun withFile(bytes: ByteArray, action: (Path) -> Unit) {
++        TempFileHandler().use { files ->
++            val path = files.createTempFile("maestro-mp4-test-", ".mp4").toPath()
++            Files.write(path, bytes)
++            action(path)
++        }
++    }
++
++    companion object {
++        private const val LIMIT = 1024 * 1024L
++
++        /** Minimal structurally valid metadata; the one-byte sample is deliberately not decodable video. */
++        internal fun minimalVideoRecording(): ByteArray = ftyp() + box("moov", track()) + mdat()
++
++        private fun ftyp() = box("ftyp", "isom".toByteArray() + int(0) + "mp42".toByteArray())
++        private fun mdat() = box("mdat", byteArrayOf(1))
++        private fun track(
++            version: Int = 0,
++            duration: Long = 1000,
++            timeScale: Int = 1000,
++            width: Int = 80,
++            height: Int = 120,
++            handler: String = "vide",
++        ): ByteArray = box("trak", tkhd(version, width, height) + media(version, duration, timeScale, handler))
++
++        private fun media(version: Int = 0, duration: Long = 1000, timeScale: Int = 1000, handler: String = "vide") =
++            box("mdia", mdhd(version, duration, timeScale) + hdlr(handler))
++
++        private fun tkhd(version: Int = 0, width: Int = 80, height: Int = 120): ByteArray {
++            val payload = ByteBuffer.allocate(if (version == 0) 84 else 96).order(ByteOrder.BIG_ENDIAN)
++            payload.put(0, version.toByte())
++            payload.putInt(if (version == 0) 76 else 88, width shl 16)
++            payload.putInt(if (version == 0) 80 else 92, height shl 16)
++            return box("tkhd", payload.array())
++        }
++
++        private fun mdhd(version: Int = 0, duration: Long = 1000, timeScale: Int = 1000): ByteArray {
++            val payload = ByteBuffer.allocate(if (version == 0) 24 else 36).order(ByteOrder.BIG_ENDIAN)
++            payload.put(0, version.toByte())
++            payload.putInt(if (version == 0) 12 else 20, timeScale)
++            if (version == 0) payload.putInt(16, duration.toInt()) else payload.putLong(24, duration)
++            return box("mdhd", payload.array())
++        }
++
++        private fun hdlr(handler: String): ByteArray = box("hdlr", ByteArray(8) + handler.toByteArray() + ByteArray(12))
++        private fun int(value: Int): ByteArray = ByteBuffer.allocate(4).putInt(value).array()
++        private fun long(value: Long): ByteArray = ByteBuffer.allocate(8).putLong(value).array()
++        private fun box(type: String, bytes: ByteArray, extended: Boolean = false): ByteArray =
++            if (extended) int(1) + type.toByteArray() + long(bytes.size + 16L) + bytes
++            else int(bytes.size + 8) + type.toByteArray() + bytes
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
@@ -3440,7 +5052,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..2f9d73a 100644
+index c388689..f421508 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -36,6 +36,7 @@ import maestro.Maestro
@@ -3451,7 +5063,105 @@ index c388689..2f9d73a 100644
  import maestro.Point
  import maestro.ScreenRecording
  import maestro.UiElement
-@@ -1337,9 +1338,12 @@ class Orchestra(
+@@ -256,38 +257,43 @@ class Orchestra(
+                     commands = filteredCommands,
+                     config = config,
+                     shouldReinitJsEngine = false,
+-                ).also {
+-                    // close existing screen recording, if left open.
+-                    screenRecording?.close()
+-                }
++                )
+             }
+         } catch (e: CancellationException) {
++            exception = e
+             throw e
+         } catch (e: Throwable) {
+             exception = e
+         } finally {
+-            val onCompleteSuccess = if (currentCoroutineContext().isActive) {
+-                config?.onFlowComplete?.commands?.let {
+-                    try {
+-                        executeCommands(
+-                            commands = it,
+-                            config = config,
+-                            shouldReinitJsEngine = false,
+-                        )
+-                    } catch (e: CancellationException) {
+-                        // The whole run is being killed (timeout/cancel), not a hook failure — propagate.
+-                        throw e
+-                    } catch (e: Throwable) {
+-                        // Must not escape this `finally`: that skips onFlowEnd, where device logs are
+-                        // collected and manifest.json written, so a failed run would ship no logs.
+-                        // Still rethrown below (Case 109), unless the flow body already failed — that wins.
+-                        logger.warn("onFlowComplete hook failed: ${e.message}")
+-                        if (exception == null) exception = e
+-                        false
+-                    }
+-                } ?: true
+-            } else {
+-                true
++            // Finish the body recording before hooks, including when a command threw.
++            exception = closeFlowRecording(exception)
++            val onCompleteSuccess = try {
++                if (exception !is CancellationException && currentCoroutineContext().isActive) {
++                    config?.onFlowComplete?.commands?.let {
++                        try {
++                            executeCommands(
++                                commands = it,
++                                config = config,
++                                shouldReinitJsEngine = false,
++                            )
++                        } catch (e: CancellationException) {
++                            // Cancellation takes precedence over flow and cleanup failures.
++                            exception?.takeIf { it !== e }?.let(e::addSuppressed)
++                            exception = e
++                            throw e
++                        } catch (e: Throwable) {
++                            // Keep collecting flow-end artifacts after a hook fails.
++                            logger.warn("onFlowComplete hook failed: ${e.message}")
++                            if (exception == null) exception = e
++                            false
++                        }
++                    } ?: true
++                } else {
++                    true
++                }
++            } finally {
++                // A completion hook can start its own recording.
++                exception = closeFlowRecording(exception)
+             }
+ 
+             jsEngine.close()
+@@ -297,6 +303,8 @@ class Orchestra(
+ 
+             dispatch("onFlowEnd") { it.onFlowEnd() }
+ 
++            exception?.let { if (it is CancellationException) throw it }
++
+             // A failed flow whose app crashed failed because of the crash. This is the one place the
+             // crash is raised; the failing command's own error rides along.
+             val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
+@@ -314,6 +322,18 @@ class Orchestra(
+         }
+     }
+ 
++    private fun closeFlowRecording(failure: Throwable?): Throwable? {
++        val recording = screenRecording ?: return failure
++        screenRecording = null
++        try {
++            recording.close()
++        } catch (closeError: Throwable) {
++            if (failure == null) return closeError
++            if (failure !== closeError) failure.addSuppressed(closeError)
++        }
++        return failure
++    }
++
+     private suspend fun executeCommands(
+         commands: List<MaestroCommand>,
+         config: MaestroConfig? = null,
+@@ -1337,9 +1357,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -3479,12 +5189,352 @@ index d02ae86..7cca459 100644
          }
      }
  }
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
+index 70bcfdb..59dd568 100644
+--- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
+@@ -2,6 +2,7 @@ package maestro.orchestra.debug
+ 
+ import maestro.Maestro
+ import maestro.ScreenRecording
++import okio.ForwardingSink
+ import okio.Sink
+ import java.io.File
+ 
+@@ -11,16 +12,56 @@ import java.io.File
+  * When no recording starts, [sink] is closed and [file] deleted, so no empty recording is left
+  * on disk or reported as an artifact. That covers both outcomes: a recording already in
+  * progress (returns null) and a driver that failed to start (the failure is rethrown).
++ * A started recording owns this output sink until its handle is closed.
+  */
+ internal suspend fun Maestro.startScreenRecordingInto(sink: Sink, file: File): ScreenRecording? {
++    val output = RecordingOutputSink(sink)
+     val recording = try {
+-        startScreenRecording(sink)
++        startScreenRecording(output)
+     } catch (e: Exception) {
+-        discardRecordingOutput(sink, file)
++        discardRecordingOutput(output, file)
+         throw e
+     }
+-    if (recording == null) discardRecordingOutput(sink, file)
+-    return recording
++    if (recording == null) {
++        discardRecordingOutput(output, file)
++        return null
++    }
++    return object : ScreenRecording {
++        override val startedAt = recording.startedAt
++        private var closed = false
++
++        @Synchronized
++        override fun close() {
++            if (closed) return
++            closed = true
++            var failure: Throwable? = null
++            try {
++                recording.close()
++            } catch (error: Throwable) {
++                failure = error
++                throw error
++            } finally {
++                try {
++                    output.close()
++                } catch (closeError: Throwable) {
++                    val original = failure
++                    if (original == null) throw closeError
++                    if (original !== closeError) original.addSuppressed(closeError)
++                }
++            }
++        }
++    }
++}
++
++private class RecordingOutputSink(delegate: Sink) : ForwardingSink(delegate) {
++    private var closed = false
++
++    @Synchronized
++    override fun close() {
++        if (closed) return
++        closed = true
++        super.close()
++    }
+ }
+ 
+ private fun discardRecordingOutput(sink: Sink, file: File) {
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenshotUtils.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenshotUtils.kt
+index e3ad6f0..021d6ef 100644
+--- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenshotUtils.kt
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenshotUtils.kt
+@@ -21,7 +21,9 @@ object ScreenshotUtils {
+             ?: File.createTempFile("screenshot-${System.currentTimeMillis()}", ".png")
+                 .also { it.deleteOnExit() }
+         return kotlin.runCatching {
+-            runBlocking { maestro.takeScreenshot(out.sink(), false) }
++            out.sink().use { sink ->
++                runBlocking { maestro.takeScreenshot(sink, false) }
++            }
+             out
+         }.getOrElse {
+             out.delete() // don't leak a zero-byte file if capture threw mid-write
+diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ArtifactsGeneratorTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ArtifactsGeneratorTest.kt
+index fa610d7..9aa9b59 100644
+--- a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ArtifactsGeneratorTest.kt
++++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ArtifactsGeneratorTest.kt
+@@ -426,11 +426,15 @@ class ArtifactsGeneratorTest {
+         val cmd = MaestroCommand(scrollCommand = ScrollCommand())
+ 
+         gen.onFlowStart()
+-        gen.onCommandStart(cmd, sequenceNumber = 0)
++        try {
++            gen.onCommandStart(cmd, sequenceNumber = 0)
+ 
+-        // Reported at command start — before the command runs.
+-        assertThat(tempDir.resolve("screenshots/step-001-scroll.png").exists()).isTrue()
+-        assertThat(captured).containsExactly(0 to "screenshots/step-001-scroll.png")
++            // Reported at command start — before the command runs.
++            assertThat(tempDir.resolve("screenshots/step-001-scroll.png").exists()).isTrue()
++            assertThat(captured).containsExactly(0 to "screenshots/step-001-scroll.png")
++        } finally {
++            gen.onFlowEnd()
++        }
+     }
+ 
+     @Test
+@@ -564,10 +568,14 @@ class ArtifactsGeneratorTest {
+         val cmd = MaestroCommand(tapOnElement = null)
+ 
+         gen.onFlowStart()
+-        gen.onCommandStart(cmd, sequenceNumber = 0)
++        try {
++            gen.onCommandStart(cmd, sequenceNumber = 0)
+ 
+-        // Flag off: no pre-command shot.
+-        assertThat(tempDir.resolve("screenshots/step-0.png").exists()).isFalse()
++            // Flag off: no pre-command shot.
++            assertThat(tempDir.resolve("screenshots/step-0.png").exists()).isFalse()
++        } finally {
++            gen.onFlowEnd()
++        }
+     }
+ 
+     @Test
+@@ -1155,13 +1163,17 @@ class ArtifactsGeneratorTest {
+         val cmd = MaestroCommand(scrollCommand = ScrollCommand())
+ 
+         gen.onFlowStart()
+-        val thrown = runCatching {
+-            gen.onCommandStart(cmd, sequenceNumber = 0)
+-        }.exceptionOrNull()
+-
+-        assertThat(thrown).isInstanceOf(RuntimeException::class.java)
+-        assertThat(thrown!!.message).isEqualTo("consumer boom")
+-        assertThat(tempDir.resolve("screenshots/step-001-scroll.png").exists()).isTrue()
++        try {
++            val thrown = runCatching {
++                gen.onCommandStart(cmd, sequenceNumber = 0)
++            }.exceptionOrNull()
++
++            assertThat(thrown).isInstanceOf(RuntimeException::class.java)
++            assertThat(thrown!!.message).isEqualTo("consumer boom")
++            assertThat(tempDir.resolve("screenshots/step-001-scroll.png").exists()).isTrue()
++        } finally {
++            gen.onFlowEnd()
++        }
+     }
+ 
+     @Test
+@@ -1310,4 +1322,4 @@ class ArtifactsGeneratorTest {
+         assertThat(crashEntry.metadata["message"]).isEqualTo("App crashed (SIGABRT)")
+         assertThat(tempDir.resolve(crashEntry.relativePath).toFile().readText()).isEqualTo("crash content")
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
+new file mode 100644
+index 0000000..7a5c15a
+--- /dev/null
++++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
+@@ -0,0 +1,172 @@
++package maestro.orchestra.debug
++
++import com.google.common.truth.Truth.assertThat
++import io.mockk.every
++import io.mockk.mockk
++import io.mockk.verify
++import kotlinx.coroutines.runBlocking
++import maestro.Driver
++import maestro.Maestro
++import maestro.ScreenRecording
++import maestro.utils.TempFileHandler
++import okio.Buffer
++import okio.ForwardingSink
++import okio.Sink
++import okio.buffer
++import okio.sink
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.io.File
++import java.io.IOException
++import java.time.Instant
++
++class ScreenRecordingOutputTest {
++    @Test
++    fun `successful close flushes and releases the output exactly once`() = withOutput { file, sink ->
++        val fixture = RecordingFixture { out -> out.write(Buffer().writeUtf8("recording"), 9) }
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++
++        assertThat(recording.startedAt).isEqualTo(fixture.startedAt)
++        assertThat(sink.closeCalls).isEqualTo(0)
++        recording.close()
++        recording.close()
++
++        assertThat(fixture.stopCalls).isEqualTo(1)
++        assertThat(sink.closeCalls).isEqualTo(1)
++        assertThat(file.readText()).isEqualTo("recording")
++    }
++
++    @Test
++    fun `stop failure still closes the output and preserves the original error`() = withOutput { file, sink ->
++        val failure = IOException("stop failed")
++        val fixture = RecordingFixture { throw failure }
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++
++        assertThat(assertThrows<IOException> { recording.close() }).isSameInstanceAs(failure)
++        recording.close()
++
++        assertThat(fixture.stopCalls).isEqualTo(1)
++        assertThat(sink.closeCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `output close failure is suppressed on the original stop error`() = withOutput { file, sink ->
++        val stopFailure = IOException("stop failed")
++        val closeFailure = IOException("output close failed")
++        sink.closeFailure = closeFailure
++        val fixture = RecordingFixture { throw stopFailure }
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++
++        val error = assertThrows<IOException> { recording.close() }
++
++        assertThat(error).isSameInstanceAs(stopFailure)
++        assertThat(error.suppressed).asList().containsExactly(closeFailure)
++        assertThat(sink.closeCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `output close failure is reported when stopping succeeded`() = withOutput { file, sink ->
++        val failure = IOException("output close failed")
++        sink.closeFailure = failure
++        val fixture = RecordingFixture()
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++
++        assertThat(assertThrows<IOException> { recording.close() }).isSameInstanceAs(failure)
++        recording.close()
++
++        assertThat(fixture.stopCalls).isEqualTo(1)
++        assertThat(sink.closeCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `a backend can close its sink without closing the underlying output twice`() = withOutput { file, sink ->
++        val fixture = RecordingFixture { out ->
++            out.write(Buffer().writeUtf8("recording"), 9)
++            out.close()
++        }
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++
++        recording.close()
++        recording.close()
++
++        assertThat(sink.closeCalls).isEqualTo(1)
++        assertThat(file.readText()).isEqualTo("recording")
++    }
++
++    @Test
++    fun `start failure closes and removes the output without replacing the start error`() = withOutput { file, sink ->
++        val failure = IOException("start failed")
++        sink.closeFailure = IOException("output close failed")
++        val driver = mockk<Driver>()
++        every { driver.startScreenRecording(any()) } throws failure
++
++        val error = assertThrows<IOException> {
++            runBlocking { Maestro(driver).startScreenRecordingInto(sink, file) }
++        }
++
++        // Coroutines may copy IOException while recovering its stack; the original
++        // start failure must remain in the cause chain rather than a close failure.
++        assertThat(generateSequence<Throwable>(error) { it.cause }.toList()).contains(failure)
++        assertThat(sink.closeCalls).isEqualTo(1)
++        assertThat(file.exists()).isFalse()
++    }
++
++    @Test
++    fun `duplicate start removes only the unused output and keeps the first recording open`() = withOutput { file, sink ->
++        val fixture = RecordingFixture()
++        val recording = runBlocking { fixture.maestro.startScreenRecordingInto(sink, file) }!!
++        try {
++            withOutput { unusedFile, unusedSink ->
++                assertThat(runBlocking { fixture.maestro.startScreenRecordingInto(unusedSink, unusedFile) }).isNull()
++                assertThat(unusedSink.closeCalls).isEqualTo(1)
++                assertThat(unusedFile.exists()).isFalse()
++            }
++            assertThat(sink.closeCalls).isEqualTo(0)
++            assertThat(fixture.stopCalls).isEqualTo(0)
++            verify(exactly = 1) { fixture.driver.startScreenRecording(any()) }
++        } finally {
++            recording.close()
++        }
++        assertThat(sink.closeCalls).isEqualTo(1)
++    }
++
++    private fun withOutput(block: (File, OutputSink) -> Unit) = TempFileHandler().use { files ->
++        val file = files.createTempFile("recording-output-", ".mp4")
++        val sink = OutputSink(file.sink().buffer())
++        try {
++            block(file, sink)
++        } finally {
++            if (sink.closeCalls == 0) sink.close()
++        }
++    }
++
++    private class OutputSink(delegate: Sink) : ForwardingSink(delegate) {
++        var closeCalls = 0
++        var closeFailure: IOException? = null
++        override fun close() {
++            closeCalls++
++            super.close()
++            closeFailure?.let { throw it }
++        }
++    }
++
++    private class RecordingFixture(stop: (Sink) -> Unit = {}) {
++        val driver = mockk<Driver>()
++        val maestro = Maestro(driver)
++        val startedAt: Instant = Instant.ofEpochMilli(1_700_000_000_000)
++        var stopCalls = 0
++
++        init {
++            every { driver.startScreenRecording(any()) } answers {
++                val sink = firstArg<Sink>()
++                object : ScreenRecording {
++                    override val startedAt = this@RecordingFixture.startedAt
++                    override fun close() {
++                        stopCalls++
++                        stop(sink)
++                    }
++                }
++            }
++        }
++    }
++}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
 new file mode 100644
-index 0000000..cacb1e9
+index 0000000..225a604
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,226 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -3492,6 +5542,7 @@ index 0000000..cacb1e9
 +import kotlinx.coroutines.runBlocking
 +import maestro.Maestro
 +import maestro.MaestroException
++import maestro.Point
 +import maestro.drivers.HarmonyOSDriver
 +import maestro.harmonyos.driver.HarmonyOSCommandException
 +import maestro.harmonyos.driver.HarmonyOSDriverConfig
@@ -3543,6 +5594,61 @@ index 0000000..cacb1e9
 +                paths.filter { Files.isRegularFile(it) }.map { it.fileName.toString() }.toList()
 +            }
 +            assertThat(workspaceFiles).containsExactlyElementsIn(RESOURCES)
++        }
++    }
++
++    @Test
++    fun `scrollUntilVisible waits for full visibility and taps the refreshed input bounds`() {
++        withFlow("scroll-flow.yaml") { flow ->
++            val result = runBlocking { flow.orchestra.runFlow(flow.commands) }
++
++            assertThat(result.success).isTrue()
++            assertThat(flow.device.observedScrollPositions).containsExactly(0, 1, 2)
++            assertThat(flow.device.swipes).hasSize(2)
++            flow.device.swipes.forEach { swipe ->
++                assertThat(swipe.start.y).isGreaterThan(swipe.end.y)
++            }
++            assertThat(flow.device.tapPoints).containsExactly(Point(200, 480), Point(200, 280)).inOrder()
++            assertThat(flow.device.inputTargets).containsExactly("scroll-name-input")
++            assertThat(flow.device.inputValues).containsExactly(INPUT_TEXT)
++            assertThat(flow.device.state).isEqualTo(SimulatedHarmonyOSDevice.State.SCROLL_FORM)
++            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `scrollUntilVisible failure prevents later taps and text input`() {
++        withFlow("scroll-not-found.yaml") { flow ->
++            val failure = assertThrows<MaestroException.ElementNotFound> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++
++            assertThat(failure.message).contains("missing-scroll-target")
++            assertThat(flow.device.swipes).isNotEmpty()
++            assertThat(flow.device.tapPoints).containsExactly(Point(200, 480))
++            assertThat(flow.device.inputValues).isEmpty()
++            assertThat(flow.device.inputTargets).isEmpty()
++            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `sequential YAML subflows relaunch the app and keep input in the intended form`() {
++        withFlow("sequential-flows.yaml") { flow ->
++            val result = runBlocking { flow.orchestra.runFlow(flow.commands) }
++
++            assertThat(result.success).isTrue()
++            assertThat(flow.device.launchedApps).containsExactly(APP_ID, APP_ID)
++            assertThat(flow.device.stoppedApps).containsExactly(APP_ID, APP_ID)
++            assertThat(flow.device.inputTargets).containsExactly("name-input", "scroll-name-input").inOrder()
++            assertThat(flow.device.inputValues).containsExactly(INPUT_TEXT, INPUT_TEXT)
++            assertThat(flow.device.tapCount).isEqualTo(5)
++            assertThat(flow.device.swipes).hasSize(2)
++            val screenshots = Files.walk(flow.artifacts).use { paths ->
++                paths.filter { it.fileName.toString().endsWith(".png") }.map { it.fileName.toString() }.toList()
++            }
++            assertThat(screenshots).containsExactly("flow-complete.png", "scroll-complete.png")
++            assertThat(flow.device.remoteFiles).isEmpty()
 +        }
 +    }
 +
@@ -3649,18 +5755,189 @@ index 0000000..cacb1e9
 +    private companion object {
 +        const val APP_ID = "org.example.harmonyos.flowfixture"
 +        const val INPUT_TEXT = "熊猫 O'Reilly \"测试\""
-+        val RESOURCES = listOf("flow.yaml", "enter-name.yaml", "assertion-failure.yaml", "remote-failure.yaml", "unsupported.yaml")
++        val RESOURCES = listOf(
++            "flow.yaml", "enter-name.yaml", "assertion-failure.yaml", "remote-failure.yaml", "unsupported.yaml",
++            "scroll-flow.yaml", "enter-scroll-name.yaml", "scroll-not-found.yaml", "sequential-flows.yaml",
++        )
 +    }
++}
+diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
+new file mode 100644
+index 0000000..44eb499
+--- /dev/null
++++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
+@@ -0,0 +1,161 @@
++package maestro.harmonyos
++
++import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.runBlocking
++import maestro.Maestro
++import maestro.MaestroException
++import maestro.ScreenRecording
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSDevice
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import maestro.harmonyos.hdc.HdcClient
++import maestro.orchestra.AssertConditionCommand
++import maestro.orchestra.MaestroCommand
++import maestro.orchestra.Orchestra
++import maestro.orchestra.yaml.YamlCommandReader
++import maestro.utils.FileAccessScope
++import maestro.utils.TempFileHandler
++import okio.Buffer
++import okio.Sink
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.io.IOException
++import java.nio.file.Files
++import java.time.Duration
++import java.time.Instant
++
++class HarmonyOSRecordingCleanupTest {
++    @Test
++    fun `failed assertion closes the recording and its artifact sink before returning`() {
++        withFlow { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++
++            assertThat(failure).isSameInstanceAs(flow.commandFailures.single())
++            assertThat(flow.device.stopCalls).isEqualTo(1)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `recording cleanup failure is suppressed on the original assertion`() {
++        val cleanupFailure = IOException("recording stop failed")
++        withFlow(stopFailure = cleanupFailure) { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++
++            assertThat(failure).isSameInstanceAs(flow.commandFailures.single())
++            assertThat(failure.suppressed).asList().contains(cleanupFailure)
++            assertThat(flow.device.stopCalls).isEqualTo(1)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `cancellation closes the recording and retains cancellation when cleanup fails`() {
++        val cancelled = CancellationException("flow cancelled")
++        val cleanupFailure = IOException("recording stop failed")
++        withFlow(stopFailure = cleanupFailure, cancellation = cancelled) { flow ->
++            val failure = assertThrows<CancellationException> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++
++            assertThat(failure).isSameInstanceAs(cancelled)
++            assertThat(failure.suppressed).asList().contains(cleanupFailure)
++            assertThat(flow.device.stopCalls).isEqualTo(1)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    private fun assertOutputClosed(output: Sink) {
++        assertThrows<IllegalStateException> {
++            output.write(Buffer().writeUtf8("x"), 1)
++        }
++    }
++
++    private fun withFlow(
++        stopFailure: IOException? = null,
++        cancellation: CancellationException? = null,
++        block: (FlowFixture) -> Unit,
++    ) = TempFileHandler().use { temporary ->
++        val root = temporary.createTempDirectory("harmonyos-recording-cleanup-").toPath()
++        val workspace = Files.createDirectory(root.resolve("workspace"))
++        val artifacts = Files.createDirectory(root.resolve("artifacts"))
++        val flowFile = workspace.resolve("recording-failure.yaml")
++        Files.writeString(flowFile, """
++            appId: org.example.harmonyos.flowfixture
++            ---
++            - startRecording: before-failure
++            - assertVisible: never-present
++        """.trimIndent())
++
++        val transport = SimulatedHarmonyOSDevice()
++        val device = RecordingDevice(
++            HdcHarmonyOSDevice(
++                SimulatedHarmonyOSDevice.DEVICE_ID,
++                HdcClient(executablePath = "simulated-hdc", runner = transport),
++            ),
++            stopFailure,
++        )
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(
++            abilityName = "EntryAbility",
++            enableScreenRecording = true,
++            commandTimeout = Duration.ofSeconds(2),
++            settleTimeout = Duration.ofMillis(250),
++            pollInterval = Duration.ofMillis(1),
++        ))
++        driver.open()
++        Maestro(driver).use { maestro ->
++            val scope = FileAccessScope.under(workspace)
++            val commands = YamlCommandReader.readCommands(flowFile, scope)
++            val commandFailures = mutableListOf<Throwable>()
++            val orchestra = Orchestra(
++                maestro = maestro,
++                artifactsDir = artifacts,
++                lookupTimeoutMs = 0,
++                optionalLookupTimeoutMs = 0,
++                scope = scope,
++                onCommandStart = { _, command ->
++                    if (cancellation != null && command.asCommand() is AssertConditionCommand) throw cancellation
++                },
++                onCommandFailed = { _, _, failure ->
++                    commandFailures += failure
++                    throw failure
++                },
++            )
++            block(FlowFixture(device, orchestra, commands, commandFailures))
++        }
++        assertThat(device.stopCalls).isEqualTo(1)
++        assertThat(transport.remoteFiles).isEmpty()
++    }
++
++    private class RecordingDevice(
++        delegate: HarmonyOSDevice,
++        private val stopFailure: IOException?,
++    ) : HarmonyOSDevice by delegate {
++        lateinit var output: Sink
++        var stopCalls = 0
++
++        override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording {
++            output = out
++            return object : ScreenRecording {
++                override val startedAt: Instant = Instant.now()
++                override fun close() {
++                    stopCalls++
++                    stopFailure?.let { throw it }
++                }
++            }
++        }
++    }
++
++    private data class FlowFixture(
++        val device: RecordingDevice,
++        val orchestra: Orchestra,
++        val commands: List<MaestroCommand>,
++        val commandFailures: List<Throwable>,
++    )
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..d58af5f
+index 0000000..234a60f
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,264 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.Point
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
 +import java.awt.Color
@@ -3676,19 +5953,26 @@ index 0000000..d58af5f
 +    private val rejectTap: Boolean = false,
 +    private val tapFailureOutput: String? = null,
 +) : HdcCommandRunner {
-+    enum class State { HOME, FORM, RESULT }
++    enum class State { HOME, FORM, SCROLL_FORM, RESULT }
++
++    data class Swipe(val start: Point, val end: Point, val velocity: Int)
 +
 +    var state = State.HOME
 +        private set
 +    var tapCount = 0
 +        private set
 +    val inputValues = mutableListOf<String>()
++    val inputTargets = mutableListOf<String>()
++    val tapPoints = mutableListOf<Point>()
++    val swipes = mutableListOf<Swipe>()
++    val observedScrollPositions = mutableSetOf<Int>()
 +    val launchedApps = mutableListOf<String>()
 +    val stoppedApps = mutableListOf<String>()
 +    val remoteFiles = mutableMapOf<String, ByteArray>()
 +
 +    private var inputFocused = false
 +    private var enteredName = ""
++    private var scrollPosition = 0
 +    private val mapper = ObjectMapper()
 +
 +    @Synchronized
@@ -3732,6 +6016,7 @@ index 0000000..d58af5f
 +            state = State.HOME
 +            inputFocused = false
 +            enteredName = ""
++            scrollPosition = 0
 +            hostSuccess("force stop process successfully.\n")
 +        }
 +        arguments.take(2) == listOf("aa", "start") -> {
@@ -3739,6 +6024,9 @@ index 0000000..d58af5f
 +            check(arguments[5] == "EntryAbility")
 +            launchedApps += arguments[3]
 +            state = State.HOME
++            inputFocused = false
++            enteredName = ""
++            scrollPosition = 0
 +            hostSuccess("start ability successfully.\n")
 +        }
 +        arguments.take(3) == listOf("uitest", "dumpLayout", "-p") -> {
@@ -3756,11 +6044,23 @@ index 0000000..d58af5f
 +            tap(arguments[3].toInt(), arguments[4].toInt())
 +        }
 +        arguments.take(3) == listOf("uitest", "uiInput", "text") -> {
-+            check(arguments.size == 4 && state == State.FORM && inputFocused) {
++            check(arguments.size == 4 && state in listOf(State.FORM, State.SCROLL_FORM) && inputFocused) {
 +                "Text input requires the form's input field to be focused"
 +            }
 +            inputValues += arguments[3]
++            inputTargets += if (state == State.SCROLL_FORM) "scroll-name-input" else "name-input"
 +            enteredName += arguments[3]
++            hostSuccess("No Error")
++        }
++        arguments.take(3) == listOf("uitest", "uiInput", "swipe") -> {
++            check(arguments.size == 8 && state == State.SCROLL_FORM)
++            val start = Point(arguments[3].toInt(), arguments[4].toInt())
++            val end = Point(arguments[5].toInt(), arguments[6].toInt())
++            val velocity = arguments[7].toInt()
++            check(start.x == end.x && start.y != end.y && velocity in 200..40000)
++            swipes += Swipe(start, end, velocity)
++            scrollPosition = (scrollPosition + if (start.y > end.y) 1 else -1).coerceIn(0, 2)
++            inputFocused = false
 +            hostSuccess("No Error")
 +        }
 +        arguments.take(2) == listOf("rm", "-f") -> {
@@ -3773,11 +6073,14 @@ index 0000000..d58af5f
 +
 +    private fun tap(x: Int, y: Int): HdcCommandResult {
 +        tapCount++
++        tapPoints += Point(x, y)
 +        if (rejectTap) return HdcCommandResult(37, "tap rejected by simulated device", "")
 +        tapFailureOutput?.let { return hostSuccess(it) }
 +        when {
 +            state == State.HOME && x in 40..359 && y in 120..199 -> state = State.FORM
++            state == State.HOME && x in 40..359 && y in 440..519 -> state = State.SCROLL_FORM
 +            state == State.FORM && x in 40..359 && y in 120..199 -> inputFocused = true
++            state == State.SCROLL_FORM && scrollPosition == 2 && x in 40..359 && y in 240..319 -> inputFocused = true
 +            state == State.FORM && x in 40..359 && y in 300..379 -> {
 +                check(enteredName.isNotEmpty())
 +                state = State.RESULT
@@ -3792,6 +6095,7 @@ index 0000000..d58af5f
 +            State.HOME -> listOf(
 +                node(text = "欢迎", bounds = "[40,40][360,100]"),
 +                node(id = "open-form", text = "填写表单", bounds = "[40,120][360,200]", clickable = true),
++                node(id = "open-scroll-form", text = "打开滚动表单", bounds = "[40,440][360,520]", clickable = true),
 +            )
 +            State.FORM -> listOf(
 +                node(text = "姓名", bounds = "[40,40][360,100]"),
@@ -3802,6 +6106,24 @@ index 0000000..d58af5f
 +                node(text = "已提交", bounds = "[40,40][360,100]"),
 +                node(text = enteredName, bounds = "[40,120][360,200]"),
 +            )
++            State.SCROLL_FORM -> {
++                observedScrollPositions += scrollPosition
++                // The id stays the same while scrolling changes its bounds. At position 1
++                // only half the field is on screen, so visibilityPercentage: 100 must continue.
++                val inputTop = when (scrollPosition) {
++                    0 -> 920
++                    1 -> 760
++                    else -> 240
++                }
++                listOf(
++                    node(text = "滚动表单", bounds = "[40,40][360,100]"),
++                    node(
++                        id = "scroll-name-input", text = enteredName,
++                        bounds = "[40,$inputTop][360,${inputTop + 80}]",
++                        clickable = true, focused = inputFocused,
++                    ),
++                )
++            }
 +        }
 +        return node(bounds = "[0,0][$WIDTH,$HEIGHT]", children = children)
 +    }
@@ -3834,6 +6156,7 @@ index 0000000..d58af5f
 +            graphics.color = when (state) {
 +                State.HOME -> Color.WHITE
 +                State.FORM -> if (inputFocused) Color.LIGHT_GRAY else Color.GRAY
++                State.SCROLL_FORM -> Color(60, 80 + scrollPosition * 50, if (inputFocused) 220 else 160)
 +                State.RESULT -> Color.GREEN
 +            }
 +            graphics.fillRect(0, 0, WIDTH, HEIGHT)
@@ -3877,10 +6200,10 @@ index 0000000..d58af5f
 +}
 diff --git a/maestro-test/src/test/resources/harmonyos/README.md b/maestro-test/src/test/resources/harmonyos/README.md
 new file mode 100644
-index 0000000..f5fcc88
+index 0000000..7def744
 --- /dev/null
 +++ b/maestro-test/src/test/resources/harmonyos/README.md
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,25 @@
 +# HarmonyOS Flow integration fixtures
 +
 +These are synthetic scenarios for the host test suite. `HarmonyOSFlowIntegrationTest`
@@ -3895,6 +6218,17 @@ index 0000000..f5fcc88
 +
 +These results do not demonstrate device permissions, native input behavior,
 +screenshots or application compatibility on a physical HarmonyOS device.
++
++`scroll-flow.yaml` opens a simulated scrollable form. The input keeps its id while
++its bounds move from outside the screen, to half visible, to fully visible. The
++standard `scrollUntilVisible` command must continue until 100% visibility, then a
++conditional sub-flow taps the current bounds and enters text. `scroll-not-found.yaml`
++checks that a failed search stops later taps and input.
++
++`flow.yaml` and `scroll-flow.yaml` can run independently with `APP_ID` and
++`INPUT_TEXT`. `sequential-flows.yaml` runs both as sub-flows in one session and
++checks that a fresh launch resets the page and input focus. This exercises
++sequential orchestration, not the CLI's workspace batch scheduler.
 diff --git a/maestro-test/src/test/resources/harmonyos/assertion-failure.yaml b/maestro-test/src/test/resources/harmonyos/assertion-failure.yaml
 new file mode 100644
 index 0000000..e0ca3b9
@@ -3917,6 +6251,19 @@ index 0000000..b5050e8
 +---
 +- tapOn:
 +    id: name-input
++    retryTapIfNoChange: false
++- inputText: ${NAME}
++- assertVisible: ${NAME}
+diff --git a/maestro-test/src/test/resources/harmonyos/enter-scroll-name.yaml b/maestro-test/src/test/resources/harmonyos/enter-scroll-name.yaml
+new file mode 100644
+index 0000000..f7bdf41
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/enter-scroll-name.yaml
+@@ -0,0 +1,7 @@
++appId: ${APP_ID}
++---
++- tapOn:
++    id: scroll-name-input
 +    retryTapIfNoChange: false
 +- inputText: ${NAME}
 +- assertVisible: ${NAME}
@@ -3965,6 +6312,76 @@ index 0000000..b8790d2
 +    id: open-form
 +    retryTapIfNoChange: false
 +- inputText: must-not-run
+diff --git a/maestro-test/src/test/resources/harmonyos/scroll-flow.yaml b/maestro-test/src/test/resources/harmonyos/scroll-flow.yaml
+new file mode 100644
+index 0000000..b939974
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/scroll-flow.yaml
+@@ -0,0 +1,31 @@
++# Synthetic scrolling page: the same input id moves after each swipe.
++appId: ${APP_ID}
++---
++- launchApp
++- tapOn:
++    id: open-scroll-form
++    retryTapIfNoChange: false
++- assertVisible: 滚动表单
++- scrollUntilVisible:
++    element:
++      id: scroll-name-input
++    direction: DOWN
++    visibilityPercentage: 100
++    centerElement: false
++    timeout: 5000
++    speed: 80
++- runFlow:
++    when:
++      platform: harmonyos
++      visible:
++        id: scroll-name-input
++    file: enter-scroll-name.yaml
++    env:
++      NAME: ${INPUT_TEXT}
++- runFlow:
++    when:
++      notVisible: ${INPUT_TEXT}
++    commands:
++      - inputText: should-not-run
++- assertVisible: ${INPUT_TEXT}
++- takeScreenshot: scroll-complete
+diff --git a/maestro-test/src/test/resources/harmonyos/scroll-not-found.yaml b/maestro-test/src/test/resources/harmonyos/scroll-not-found.yaml
+new file mode 100644
+index 0000000..6e22881
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/scroll-not-found.yaml
+@@ -0,0 +1,16 @@
++appId: ${APP_ID}
++---
++- launchApp
++- tapOn:
++    id: open-scroll-form
++    retryTapIfNoChange: false
++- scrollUntilVisible:
++    element:
++      id: missing-scroll-target
++    direction: DOWN
++    timeout: 50
++    speed: 80
++- tapOn:
++    id: scroll-name-input
++    retryTapIfNoChange: false
++- inputText: must-not-run
+diff --git a/maestro-test/src/test/resources/harmonyos/sequential-flows.yaml b/maestro-test/src/test/resources/harmonyos/sequential-flows.yaml
+new file mode 100644
+index 0000000..c7b0ef2
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/sequential-flows.yaml
+@@ -0,0 +1,5 @@
++# Sequential sub-flows in one session; CLI workspace batching is tested separately.
++appId: ${APP_ID}
++---
++- runFlow: flow.yaml
++- runFlow: scroll-flow.yaml
 diff --git a/maestro-test/src/test/resources/harmonyos/unsupported.yaml b/maestro-test/src/test/resources/harmonyos/unsupported.yaml
 new file mode 100644
 index 0000000..60d3752

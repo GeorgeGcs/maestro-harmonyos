@@ -39,9 +39,12 @@ if ($LASTEXITCODE -ne 0) { throw 'CLI 会话测试失败。' }
 ## 测试覆盖
 
 - HDC/布局：设备选择、参数转义、超时与中断、布局解析、文件传输和临时文件清理。
-- 完整客户端：真实驱动和选择器、启动与停止、输入动作、截图尺寸、等待、错误状态及未支持操作。
-- YAML 集成：真实 `YamlCommandReader → Orchestra → Maestro → HarmonyOSDriver → HdcClient`，仅替换 `HdcCommandRunner`。有状态模拟设备提供布局和 PNG，验证参数、条件子流程、ID/文本点击、中文及引号输入、断言、截图产物与失败中断。
-- CLI 会话：参数约束、设备选择、环境配置和设备占用锁。
+- 完整客户端：真实驱动和选择器、启动与停止、输入动作、截图尺寸、等待、错误状态及未支持操作；系统录屏的占用检查、超时、文件校验、导出和清理。
+- YAML 集成：真实 `YamlCommandReader → Orchestra → Maestro → HarmonyOSDriver → HdcClient`，仅替换 `HdcCommandRunner`。有状态模拟设备提供布局和 PNG，验证参数、条件子流程、ID/文本点击、中文及引号输入、断言、滚动后重新定位、连续子流程、截图产物与失败中断。
+- 录屏收尾：通过真实 Orchestra 和 HarmonyOSDriver 验证断言失败、取消和停止失败；此组使用模拟录屏句柄，不调用系统录屏服务。
+- CLI 会话：参数约束、设备选择、环境配置、显式录屏开关和设备占用锁。
+
+运行脚本的参数与退出码回归使用 `./scripts/tests/test-run-harmonyos.ps1`，需要 JDK 17。脚本测试不操作手机。公共输出文件的生命周期回归位于上游 `maestro-orchestra` 的 `ScreenRecordingOutputTest` 和 `ArtifactsGeneratorTest`，可分别用 `:maestro-orchestra:test --tests '*ScreenRecordingOutputTest' --tests '*ArtifactsGeneratorTest'` 执行。
 
 这些检查不验证真实手机的授权、键盘、文本输入或系统兼容性，也不等同于 CLI 分发包已构建。CLI 构建与真机命令见[使用说明](../docs/setup.md)，实际结果分别记录在 `docs/progress/`。
 

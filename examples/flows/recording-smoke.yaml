@@ -1,0 +1,15 @@
+# 使用实验性系统录屏后端：MAESTRO_HARMONYOS_RECORDING=huawei-system，限制见 docs/setup.md。
+# 传入 APP_ID、START_TEXT、INPUT_HINT、INPUT_TEXT；不点击提交按钮。
+appId: ${APP_ID}
+---
+- launchApp
+- startRecording: input-recording
+- assertVisible: ${START_TEXT}
+- tapOn:
+    text: ${INPUT_HINT}
+    retryTapIfNoChange: false
+- inputText: ${INPUT_TEXT}
+- assertVisible: ${INPUT_TEXT}
+- back
+- takeScreenshot: recorded-input
+- stopRecording

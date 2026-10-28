@@ -2,7 +2,9 @@
 
 为 Maestro 增加 HarmonyOS 原生 UI 自动化测试能力，参与「课题 11：YAML 声明式 UI 测试框架 Maestro 支持鸿蒙」。
 
-**当前进度：已接入 `HarmonyOSDriver` 和 CLI 会话，支持通过 `--platform harmonyos` 执行标准 YAML Flow。已实现启动、布局定位、点击、输入、返回、滑动和截图；真机验证结果单独记录，录屏和 VSCode 扩展尚未实现。**
+**当前进度：M3 部分完成。** 标准 YAML 已在一台真机上通过启动、定位、中文输入、滑动后重新定位、断言和截图，单设备批量执行 2/2 通过。
+
+实验性的 Huawei 系统录屏后端已通过正常流程实测，默认关闭。失败流程也能自动停止、导出视频；短视频出现过尾部解码错误，原样复跑通过，偶发原因尚未查明。VSCode 扩展、20 轮稳定性和跨设备兼容测试尚未完成。
 
 ## 目标
 
@@ -50,9 +52,13 @@ if (Test-Path ./config.local.ps1) { . ./config.local.ps1 }
 
 测试入口会检查并应用补丁，首次运行需要下载 Gradle 和依赖。默认测试不操作手机；完整驱动、YAML 集成和 CLI 会话的测试命令见[主机测试说明](host-tests/README.md)。
 
-构建 CLI 后，可运行 [input-smoke.yaml](examples/flows/input-smoke.yaml)：启动示例应用，按提示文字找到输入框，输入并断言，返回后截图。需提供应用包名、启动 Ability 和页面文字，具体命令见[环境与使用说明](docs/setup.md)。另保留 [smoke.yaml](examples/flows/smoke.yaml)，用于按控件 ID 点击并检查结果。
+构建 CLI 后，可用 [run-harmonyos.ps1](scripts/run-harmonyos.ps1) 运行单个 YAML 或流程目录。脚本加载本地配置，为每次运行创建产物目录，并保留 CLI 退出码；PowerShell 7 和 Windows PowerShell 5.1 的中文、引号参数回归已通过。参数和编码限制见[环境与使用说明](docs/setup.md)。
 
-当前仅支持连接到本机 HDC 的单台设备。HAP 安装、权限修改、清除应用数据、录屏、Studio/MCP 和多设备分片尚未支持。主机测试中的布局与设备响应为模拟数据，不能替代不同系统版本上的真机验证。
+示例包括 [input-smoke.yaml](examples/flows/input-smoke.yaml)（输入与截图）、[scroll-input.yaml](examples/flows/scroll-input.yaml)（滑动后重新定位输入框）、[recording-smoke.yaml](examples/flows/recording-smoke.yaml)（视频录屏）和 [smoke.yaml](examples/flows/smoke.yaml)（按控件 ID 点击）。需按测试应用提供包名、启动 Ability 和页面文字。
+
+视频录屏需要显式设置 `MAESTRO_HARMONYOS_RECORDING=huawei-system`。该后端依赖 Huawei 系统录屏服务和 `mediatool`，不是通用 OpenHarmony 接口；测试期间需独占系统录屏，不要手工切换。默认最长 3 分钟、导出上限 512 MiB，详细限制见[录屏说明](docs/setup.md#视频录屏)，正常与失败视频的实测结果见[验收记录](docs/acceptance.md)。
+
+当前仅支持连接到本机 HDC 的单台设备，可以在该设备上批量运行 Flow。HAP 安装、权限修改、清除应用数据、Studio/MCP 和多设备分片尚未支持。已通过的流程使用本地演示应用，不代替活动约定的官方示例、20 轮统计或跨设备兼容验证。
 
 ## 活动交付
 

@@ -1,0 +1,17 @@
+# 选择可向上滑动且滑动后仍能找到输入框的测试页面。
+# 传入 APP_ID、START_TEXT、INPUT_HINT、INPUT_TEXT。
+appId: ${APP_ID}
+---
+- launchApp
+- assertVisible: ${START_TEXT}
+- takeScreenshot: before-scroll
+- swipe:
+    direction: UP
+    duration: 600
+- tapOn:
+    text: ${INPUT_HINT}
+    retryTapIfNoChange: false
+- inputText: ${INPUT_TEXT}
+- assertVisible: ${INPUT_TEXT}
+- back
+- takeScreenshot: after-scroll-input
