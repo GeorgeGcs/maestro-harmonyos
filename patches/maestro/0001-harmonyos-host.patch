@@ -1,3 +1,1088 @@
+diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
+index 8df1b2f..faf7813 100644
+--- a/maestro-cli/src/main/java/maestro/cli/App.kt
++++ b/maestro-cli/src/main/java/maestro/cli/App.kt
+@@ -88,7 +88,7 @@ class App {
+     @Option(names = ["-v", "--version"], versionHelp = true, description = ["Display CLI version"])
+     var requestedVersion: Boolean? = false
+ 
+-    @Option(names = ["-p", "--platform"], description = ["(Optional) Select a platform to run on"])
++    @Option(names = ["-p", "--platform"], description = ["(Optional) Select android, ios, web or harmonyos"])
+     var platform: String? = null
+ 
+     @Option(names = ["--host"], hidden = true)
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
+index b752de4..82513d1 100644
+--- a/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
++++ b/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
+@@ -4,6 +4,7 @@ import maestro.cli.App
+ import maestro.cli.CliError
+ import maestro.cli.ShowHelpMixin
+ import maestro.cli.report.TestDebugReporter
++import maestro.cli.session.HarmonyOsSessionSupport
+ import maestro.cli.util.PrintUtils
+ import maestro.cli.view.bold
+ import maestro.cli.view.cyan
+@@ -11,6 +12,8 @@ import maestro.cli.view.faint
+ import maestro.device.Device
+ import maestro.device.DeviceService
+ import maestro.device.Platform
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcException
+ import picocli.CommandLine
+ import java.util.concurrent.Callable
+ 
+@@ -28,17 +31,33 @@ class ListDevicesCommand : Callable<Int> {
+ 
+     @CommandLine.Option(
+         names = ["--platform"],
+-        description = ["Filter by platform: android, ios, web"],
++        description = ["Filter by platform: android, ios, web, harmonyos"],
+     )
+     private var platform: String? = null
+ 
+     override fun call(): Int {
+         TestDebugReporter.install(null, printToConsole = parent?.verbose == true)
+ 
+-        val platformFilter = platform?.let { input ->
++        val platformFilter = (platform ?: parent?.platform)?.let { input ->
+             Platform.fromString(input)
+         }
+ 
++        if (platformFilter == Platform.HARMONYOS) {
++            HarmonyOsSessionSupport.validateOptions(
++                host = parent?.host,
++                port = parent?.port,
++                driverHostPort = parent?.driverHostPort,
++            )
++            val targets = try {
++                HdcClient().listDevices()
++            } catch (error: HdcException) {
++                throw CliError(error.message ?: "Unable to list HarmonyOS devices.").also { it.initCause(error) }
++            }
++            println("HarmonyOS (HDC)".bold())
++            if (targets.isEmpty()) println("No HDC devices found") else targets.forEach { println(row(it)) }
++            return 0
++        }
++
+         println("Showing local devices. Use 'maestro list-cloud-devices' to list devices available on Maestro Cloud.".faint())
+         println()
+ 
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/PrintHierarchyCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/PrintHierarchyCommand.kt
+index 04e371a..ba565a4 100644
+--- a/maestro-cli/src/main/java/maestro/cli/command/PrintHierarchyCommand.kt
++++ b/maestro-cli/src/main/java/maestro/cli/command/PrintHierarchyCommand.kt
+@@ -108,9 +108,14 @@ class PrintHierarchyCommand : Runnable {
+         val startTime = System.currentTimeMillis()
+         Analytics.trackEvent(PrintHierarchyStartedEvent(platform = platform))
+ 
++        val isHarmonyOs = parent?.platform?.let { Platform.fromString(it) } == Platform.HARMONYOS
++        if (isHarmonyOs && androidWebViewHierarchy != null) {
++            throw CliError("--android-webview-hierarchy is not supported for HarmonyOS.")
++        }
+         val effectiveDeviceId: String? = when {
+             parent?.deviceId != null -> parent.deviceId
+             deviceIndex != null -> null
++            isHarmonyOs -> null
+             else -> {
+                 val platformFilter = parent?.platform?.let { Platform.fromString(it) }
+                 val connectedDevices = DeviceService.listConnectedDevices().withPlatform(platformFilter)
+@@ -119,7 +124,7 @@ class PrintHierarchyCommand : Runnable {
+                     1 -> connectedDevices[0].instanceId
+                     else -> {
+                         val hint = if (platformFilter == null) {
+-                            " You can also narrow by platform using --platform <android|ios>."
++                            " You can also narrow by platform using --platform <android|ios|harmonyos>."
+                         } else ""
+                         throw CliError("Multiple devices connected. Please specify a device using --device <id>.$hint")
+                     }
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/StartDeviceCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/StartDeviceCommand.kt
+index 15c5b42..b80acec 100644
+--- a/maestro-cli/src/main/java/maestro/cli/command/StartDeviceCommand.kt
++++ b/maestro-cli/src/main/java/maestro/cli/command/StartDeviceCommand.kt
+@@ -117,6 +117,7 @@ class StartDeviceCommand : Callable<Int> {
+                 locale = deviceLocale?.let { WebLocale.fromString(it) } ?: default.locale,
+             )
+         }
++        Platform.HARMONYOS -> throw CliError("start-device does not create HarmonyOS devices. Connect and authorize a device through HDC.")
+     }
+ 
+     override fun call(): Int {
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
+index 064ff51..ce7388f 100644
+--- a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
++++ b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
+@@ -47,6 +47,7 @@ import maestro.cli.runner.TestSuiteInteractor
+ import maestro.cli.runner.resultview.AnsiResultView
+ import maestro.cli.runner.resultview.PlainTextResultView
+ import maestro.cli.session.MaestroSessionManager
++import maestro.cli.session.HarmonyOsSessionSupport
+ import maestro.cli.util.CiUtils
+ import maestro.cli.util.isPortAvailable
+ import maestro.cli.util.EnvUtils
+@@ -80,7 +81,7 @@ import maestro.device.Platform
+ 
+ @CommandLine.Command(
+     name = "test",
+-    description = ["Test a Flow or set of Flows on a local iOS Simulator or Android Emulator"],
++    description = ["Test a Flow or set of Flows on a local device or browser (Android, iOS, HarmonyOS, web)"],
+ )
+ class TestCommand : Callable<Int> {
+ 
+@@ -219,7 +220,7 @@ class TestCommand : Callable<Int> {
+     )
+     private var appleTeamId: String? = null
+ 
+-    @Option(names = ["-p", "--platform"], description = ["Select a platform to run on"])
++    @Option(names = ["-p", "--platform"], description = ["Select a platform: android, ios, web, harmonyos"])
+     var platform: String? = null
+ 
+     @Option(
+@@ -331,6 +332,7 @@ class TestCommand : Callable<Int> {
+      * Get the list of device IDs that will be used for test execution
+      */
+     private fun getDeviceIds(plan: ExecutionPlan): List<String> {
++        if (isHarmonyOs()) return getHarmonyOsDeviceIds(plan)
+         val includeWeb = executionPlanIncludesWebFlow(plan)
+         val connectedDevices = DeviceService.listConnectedDevices(
+             includeWeb = includeWeb,
+@@ -344,6 +346,25 @@ class TestCommand : Callable<Int> {
+             .toList()
+     }
+ 
++    private fun isHarmonyOs(): Boolean =
++        (platform ?: parent?.platform)?.let { Platform.fromString(it) } == Platform.HARMONYOS
++
++    private fun getHarmonyOsDeviceIds(plan: ExecutionPlan): List<String> {
++        HarmonyOsSessionSupport.validateOptions(
++            host = parent?.host,
++            port = parent?.port,
++            driverHostPort = driverHostPort ?: parent?.driverHostPort,
++            teamId = appleTeamId,
++            isHeadless = headless,
++            screenSize = screenSize,
++        )
++        return HarmonyOsSessionSupport.selectTestDeviceIds(
++            requestedIds = getPassedOptionsDeviceIds(plan),
++            shards = shardSplit ?: shardAll ?: 1,
++            includesWeb = executionPlanIncludesWebFlow(plan),
++        )
++    }
++
+     private fun resolveTestOutputDir(plan: ExecutionPlan): Path? {
+         // Command line flag takes precedence
+         testOutputDir?.let { return File(it).toPath() }
+@@ -368,27 +389,31 @@ class TestCommand : Callable<Int> {
+           PrintUtils.warn("Web support is in Beta. We would appreciate your feedback!\n")
+         }
+ 
+-        val connectedDevices = DeviceService.listConnectedDevices(
+-            includeWeb = includeWeb,
+-            host = parent?.host,
+-            port = parent?.port,
+-        )
+-        val availableDevicesIds = connectedDevices.map { it.instanceId }.toSet()
+-        val deviceIds = getPassedOptionsDeviceIds(plan)
+-            .filter { device ->
+-                if (device !in availableDevicesIds) {
+-                    throw CliError("Device $device was requested, but it is not connected.")
+-                } else {
+-                    true
++        val deviceIds = if (isHarmonyOs()) {
++            getHarmonyOsDeviceIds(plan)
++        } else {
++            val connectedDevices = DeviceService.listConnectedDevices(
++                includeWeb = includeWeb,
++                host = parent?.host,
++                port = parent?.port,
++            )
++            val availableDevicesIds = connectedDevices.map { it.instanceId }.toSet()
++            getPassedOptionsDeviceIds(plan)
++                .filter { device ->
++                    if (device !in availableDevicesIds) {
++                        throw CliError("Device $device was requested, but it is not connected.")
++                    } else {
++                        true
++                    }
+                 }
+-            }
+-            .ifEmpty {
+-                val platform = platform ?: parent?.platform
+-                connectedDevices
+-                    .filter { platform == null || it.platform == Platform.fromString(platform) }
+-                    .map { it.instanceId }.toSet()
+-            }
+-            .toList()
++                .ifEmpty {
++                    val platform = platform ?: parent?.platform
++                    connectedDevices
++                        .filter { platform == null || it.platform == Platform.fromString(platform) }
++                        .map { it.instanceId }.toSet()
++                }
++                .toList()
++        }
+ 
+         val missingDevices = requestedShards - deviceIds.size
+         if (missingDevices > 0) {
+@@ -468,7 +493,7 @@ class TestCommand : Callable<Int> {
+         chunkPlans: List<ExecutionPlan>,
+         debugOutputPath: Path,
+     ): Triple<Int?, Int?, TestExecutionSummary?> {
+-        val driverHostPort = selectPort(effectiveShards)
++        val driverHostPort = if (isHarmonyOs()) null else selectPort(effectiveShards)
+         val deviceId = deviceIds[shardIndex]
+         val executionPlan = chunkPlans[shardIndex]
+ 
+diff --git a/maestro-cli/src/main/java/maestro/cli/device/PickDeviceInteractor.kt b/maestro-cli/src/main/java/maestro/cli/device/PickDeviceInteractor.kt
+index 7f91a53..9465900 100644
+--- a/maestro-cli/src/main/java/maestro/cli/device/PickDeviceInteractor.kt
++++ b/maestro-cli/src/main/java/maestro/cli/device/PickDeviceInteractor.kt
+@@ -16,6 +16,9 @@ object PickDeviceInteractor {
+         platform: Platform? = null,
+         deviceIndex: Int? = null,
+     ): Device.Connected {
++        if (platform == Platform.HARMONYOS) {
++            throw CliError("Use --platform harmonyos with the HDC session; Android/iOS device selection does not support HarmonyOS.")
++        }
+         if (deviceId != null) {
+             return DeviceService.listConnectedDevices()
+                 .find {
+@@ -32,6 +35,7 @@ object PickDeviceInteractor {
+                         Platform.ANDROID -> PrintUtils.message("Launching Android emulator...")
+                         Platform.IOS -> PrintUtils.message("Launching iOS simulator...")
+                         Platform.WEB -> PrintUtils.message("Launching ${result.description}")
++                        Platform.HARMONYOS -> throw CliError("Connect and authorize a HarmonyOS device through HDC; automatic device launch is not supported.")
+                     }
+ 
+                     // Snapshot already-connected devices so the freshly launched one can be told
+diff --git a/maestro-cli/src/main/java/maestro/cli/device/PickDeviceView.kt b/maestro-cli/src/main/java/maestro/cli/device/PickDeviceView.kt
+index f2f7bae..a13e0e6 100644
+--- a/maestro-cli/src/main/java/maestro/cli/device/PickDeviceView.kt
++++ b/maestro-cli/src/main/java/maestro/cli/device/PickDeviceView.kt
+@@ -33,6 +33,7 @@ object PickDeviceView {
+             Platform.ANDROID -> DeviceSpec.Android.DEFAULT
+             Platform.IOS -> DeviceSpec.Ios.DEFAULT
+             Platform.WEB -> DeviceSpec.Web.DEFAULT
++            Platform.HARMONYOS -> throw CliError("HarmonyOS requires an already connected HDC device.")
+         }
+     }
+ 
+diff --git a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt b/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
+index 889a703..bc90232 100644
+--- a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
++++ b/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
+@@ -74,6 +74,7 @@ internal class McpMaestroSessionManager : AutoCloseable {
+             Platform.ANDROID -> createAndroidSession(device, streamDeviceType)
+             Platform.IOS -> createIosSession(device, streamDeviceType)
+             Platform.WEB -> createWebSession()
++            Platform.HARMONYOS -> throw CliError("HarmonyOS sessions are not supported by the MCP server yet; use maestro --platform harmonyos test.")
+         }
+     }
+ 
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
+new file mode 100644
+index 0000000..b3b1ac5
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
+@@ -0,0 +1,128 @@
++package maestro.cli.session
++
++import maestro.Maestro
++import maestro.cli.CliError
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcException
++import java.nio.channels.FileChannel
++import java.nio.channels.OverlappingFileLockException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardOpenOption
++import java.security.MessageDigest
++import java.util.concurrent.atomic.AtomicBoolean
++
++internal object HarmonyOsSessionSupport {
++    fun validateOptions(
++        host: String? = null,
++        port: Int? = null,
++        driverHostPort: Int? = null,
++        teamId: String? = null,
++        deviceIndex: Int? = null,
++        isStudio: Boolean = false,
++        isHeadless: Boolean = false,
++        screenSize: String? = null,
++    ) {
++        if (host != null || port != null || driverHostPort != null) {
++            throw CliError("HarmonyOS uses the local HDC connection; --host, --port and --driver-host-port are not supported.")
++        }
++        if (teamId != null) throw CliError("--apple-team-id is not supported for HarmonyOS.")
++        if (deviceIndex != null) throw CliError("Use --device <HDC target> instead of --device-index for HarmonyOS.")
++        if (isStudio || isHeadless || screenSize != null) {
++            throw CliError("Studio, headless browser mode and screen-size overrides are not supported for HarmonyOS.")
++        }
++    }
++
++    fun selectDevice(deviceId: String?, hdc: HdcClient = HdcClient()): String {
++        if (deviceId?.contains(',') == true) {
++            throw CliError("Select one HarmonyOS device with --device <HDC target>.")
++        }
++        return try {
++            hdc.selectDevice(deviceId)
++        } catch (error: HdcException) {
++            throw CliError(error.message ?: "Unable to select a HarmonyOS device.").also { it.initCause(error) }
++        } catch (error: IllegalArgumentException) {
++            throw CliError(error.message ?: "Invalid HDC device identifier.").also { it.initCause(error) }
++        }
++    }
++
++    fun selectTestDeviceIds(
++        requestedIds: List<String>,
++        shards: Int = 1,
++        includesWeb: Boolean = false,
++        hdc: HdcClient = HdcClient(),
++    ): List<String> {
++        if (shards != 1 || requestedIds.size > 1) {
++            throw CliError("HarmonyOS currently runs one selected device per invocation; sharding is not supported.")
++        }
++        if (includesWeb) throw CliError("Web flows cannot run with --platform harmonyos.")
++        return listOf(selectDevice(requestedIds.singleOrNull(), hdc))
++    }
++
++    fun driverConfig(environment: Map<String, String> = System.getenv()): HarmonyOSDriverConfig =
++        HarmonyOSDriverConfig(
++            abilityName = environment["MAESTRO_HARMONYOS_ABILITY"]?.trim()?.takeIf { it.isNotEmpty() },
++            moduleName = environment["MAESTRO_HARMONYOS_MODULE"]?.trim()?.takeIf { it.isNotEmpty() },
++        )
++
++    fun <T> withSession(
++        deviceId: String,
++        hdc: HdcClient = HdcClient(),
++        config: HarmonyOSDriverConfig = driverConfig(),
++        lockDirectory: Path = defaultLockDirectory(),
++        block: (MaestroSessionManager.MaestroSession) -> T,
++    ): T =
++        withDeviceLock(deviceId, lockDirectory) {
++            val driver = HarmonyOSDriver(deviceId, hdc = hdc, config = config)
++            val session = MaestroSessionManager.MaestroSession(Maestro(driver))
++            val closed = AtomicBoolean(false)
++            fun closeOnce() {
++                if (closed.compareAndSet(false, true)) session.close()
++            }
++            val shutdownHook = Thread({ runCatching { closeOnce() } }, "maestro-harmonyos-close")
++            var registered = false
++            var failure: Throwable? = null
++            try {
++                Runtime.getRuntime().addShutdownHook(shutdownHook)
++                registered = true
++                driver.open()
++                block(session)
++            } catch (error: Throwable) {
++                failure = error
++                throw error
++            } finally {
++                if (registered) runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
++                try {
++                    closeOnce()
++                } catch (closeError: Throwable) {
++                    val original = failure
++                    if (original != null) original.addSuppressed(closeError) else throw closeError
++                }
++            }
++        }
++
++    internal fun <T> withDeviceLock(
++        deviceId: String,
++        directory: Path = defaultLockDirectory(),
++        block: () -> T,
++    ): T {
++        Files.createDirectories(directory)
++        val name = MessageDigest.getInstance("SHA-256").digest(deviceId.toByteArray(Charsets.UTF_8))
++            .joinToString("") { "%02x".format(it) }
++        // Keep an empty lock file rather than deleting it: unlinking a locked file can let a
++        // second process create another inode and acquire a second lock for the same device.
++        FileChannel.open(directory.resolve("$name.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
++            val lock = try {
++                channel.tryLock()
++            } catch (_: OverlappingFileLockException) {
++                null
++            } ?: throw CliError("The selected HarmonyOS device is already in use by another Maestro session.")
++            lock.use { return block() }
++        }
++    }
++
++    private fun defaultLockDirectory(): Path =
++        Path.of(System.getProperty("user.home"), ".maestro", "harmonyos-sessions")
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt b/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt
+index cc05d69..714c609 100644
+--- a/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt
++++ b/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt
+@@ -76,13 +76,21 @@ object MaestroSessionManager {
+         executionPlan: WorkspaceExecutionPlanner.ExecutionPlan? = null,
+         block: (MaestroSession) -> T,
+     ): T {
++        val selectedPlatform = platform?.takeIf { it.isNotEmpty() }?.let { Platform.fromString(it) }
++        if (selectedPlatform == Platform.HARMONYOS) {
++            HarmonyOsSessionSupport.validateOptions(
++                host, port, driverHostPort, teamId, deviceIndex, isStudio, isHeadless, screenSize,
++            )
++            val target = HarmonyOsSessionSupport.selectDevice(deviceId)
++            return HarmonyOsSessionSupport.withSession(target, block = block)
++        }
+         val selectedDevice = selectDevice(
+             host = host,
+             port = port,
+             driverHostPort = driverHostPort,
+             deviceId = deviceId,
+             teamId = teamId,
+-            platform = if(!platform.isNullOrEmpty()) Platform.fromString(platform) else null,
++            platform = selectedPlatform,
+             deviceIndex = deviceIndex,
+         )
+         val sessionId = UUID.randomUUID().toString()
+@@ -225,6 +233,7 @@ object MaestroSessionManager {
+                     )
+ 
+                     Platform.WEB -> pickWebDevice(isStudio, isHeadless, screenSize)
++                    Platform.HARMONYOS -> throw CliError("Select HarmonyOS using --platform harmonyos.")
+                 },
+                 device = selectedDevice.device,
+             )
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
+new file mode 100644
+index 0000000..b4caa55
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
+@@ -0,0 +1,181 @@
++package maestro.cli.harmonyos
++
++import com.google.common.truth.Truth.assertThat
++import maestro.cli.CliError
++import maestro.cli.command.StartDeviceCommand
++import maestro.cli.device.PickDeviceInteractor
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.cli.session.MaestroSessionManager
++import maestro.device.Platform
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcException
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++
++class HarmonyOsSessionSupportTest {
++    @Test
++    fun `selects an explicit HDC target without requiring it to be the first device`() {
++        val commands = mutableListOf<List<String>>()
++        val hdc = listing("device-a\ndevice-b\n", commands)
++
++        assertThat(HarmonyOsSessionSupport.selectDevice("device-b", hdc)).isEqualTo("device-b")
++        assertThat(commands).containsExactly(listOf("test-hdc", "list", "targets"))
++    }
++
++    @Test
++    fun `a single HDC target is selected automatically`() {
++        assertThat(HarmonyOsSessionSupport.selectDevice(null, listing("device-a\n"))).isEqualTo("device-a")
++    }
++
++    @Test
++    fun `empty ambiguous and missing targets fail without choosing a different device`() {
++        assertThat(assertThrows<CliError> {
++            HarmonyOsSessionSupport.selectDevice(null, listing("[Empty]\n"))
++        }).hasMessageThat().contains("No HDC device")
++        assertThat(assertThrows<CliError> {
++            HarmonyOsSessionSupport.selectDevice(null, listing("device-a\ndevice-b\n"))
++        }).hasMessageThat().contains("Multiple HDC devices")
++        assertThat(assertThrows<CliError> {
++            HarmonyOsSessionSupport.selectDevice("device-c", listing("device-a\n"))
++        }).hasMessageThat().contains("not available")
++    }
++
++    @Test
++    fun `target identifiers are case sensitive`() {
++        assertThrows<CliError> {
++            HarmonyOsSessionSupport.selectDevice("DEVICE-A", listing("device-a\n"))
++        }
++    }
++
++    @Test
++    fun `rejects multiple identifiers before contacting HDC`() {
++        val commands = mutableListOf<List<String>>()
++        assertThrows<CliError> {
++            HarmonyOsSessionSupport.selectDevice("device-a,device-b", listing("device-a\n", commands))
++        }
++        assertThat(commands).isEmpty()
++    }
++
++    @Test
++    fun `HDC failure is reported without falling back to another platform`() {
++        val hdc = HdcClient("test-hdc", HdcCommandRunner { _, _ ->
++            HdcCommandResult(1, "", "transport unavailable")
++        })
++        val error = assertThrows<CliError> { HarmonyOsSessionSupport.selectDevice(null, hdc) }
++        assertThat(error).hasMessageThat().contains("transport unavailable")
++        assertThat(error.cause).isInstanceOf(HdcException::class.java)
++    }
++
++    @Test
++    fun `single device execution rejects sharding multi device lists and web flows before discovery`() {
++        val commands = mutableListOf<List<String>>()
++        val hdc = listing("device-a\n", commands)
++        assertThrows<CliError> { HarmonyOsSessionSupport.selectTestDeviceIds(emptyList(), shards = 2, hdc = hdc) }
++        assertThrows<CliError> { HarmonyOsSessionSupport.selectTestDeviceIds(listOf("device-a", "device-b"), hdc = hdc) }
++        assertThrows<CliError> { HarmonyOsSessionSupport.selectTestDeviceIds(emptyList(), includesWeb = true, hdc = hdc) }
++        assertThat(commands).isEmpty()
++        assertThat(HarmonyOsSessionSupport.selectTestDeviceIds(emptyList(), hdc = hdc)).containsExactly("device-a")
++    }
++
++    @Test
++    fun `public session entry rejects remote hosts for either platform spelling before discovery`() {
++        for (platform in listOf("harmonyos", "HarmonyOS")) {
++            val error = assertThrows<CliError> {
++                MaestroSessionManager.newSession(
++                    host = "localhost", port = null, driverHostPort = null,
++                    deviceId = "device-a", platform = platform,
++                ) { error("The session block must not run") }
++            }
++            assertThat(error).hasMessageThat().contains("local HDC connection")
++        }
++    }
++
++    @Test
++    fun `generic mobile picker refuses HarmonyOS before looking up a matching Android identifier`() {
++        assertThat(assertThrows<CliError> {
++            PickDeviceInteractor.pickDevice(deviceId = "device-a", platform = Platform.HARMONYOS)
++        }).hasMessageThat().contains("HDC session")
++    }
++
++    @Test
++    fun `unsupported options cannot silently configure an Android or iOS session`() {
++        val invalidOptions: List<() -> Unit> = listOf(
++            { HarmonyOsSessionSupport.validateOptions(port = 7001) },
++            { HarmonyOsSessionSupport.validateOptions(driverHostPort = 7001) },
++            { HarmonyOsSessionSupport.validateOptions(teamId = "apple-team") },
++            { HarmonyOsSessionSupport.validateOptions(deviceIndex = 0) },
++            { HarmonyOsSessionSupport.validateOptions(isStudio = true) },
++            { HarmonyOsSessionSupport.validateOptions(isHeadless = true) },
++            { HarmonyOsSessionSupport.validateOptions(screenSize = "800x600") },
++        )
++        invalidOptions.forEach { options -> assertThrows<CliError> { options() } }
++    }
++
++    @Test
++    fun `ability and module come from explicit environment configuration`() {
++        assertThat(HarmonyOsSessionSupport.driverConfig(emptyMap()).abilityName).isNull()
++        val config = HarmonyOsSessionSupport.driverConfig(mapOf(
++            "MAESTRO_HARMONYOS_ABILITY" to " LaunchAbility ",
++            "MAESTRO_HARMONYOS_MODULE" to " feature ",
++        ))
++        assertThat(config.abilityName).isEqualTo("LaunchAbility")
++        assertThat(config.moduleName).isEqualTo("feature")
++        assertThat(HarmonyOsSessionSupport.driverConfig(mapOf("MAESTRO_HARMONYOS_ABILITY" to "  ")).abilityName).isNull()
++    }
++
++    @Test
++    fun `same device cannot be used concurrently but other devices remain available`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("harmonyos-lock-test").toPath()
++        HarmonyOsSessionSupport.withDeviceLock("device-a", directory) {
++            assertThrows<CliError> { HarmonyOsSessionSupport.withDeviceLock("device-a", directory) {} }
++            assertThat(HarmonyOsSessionSupport.withDeviceLock("device-b", directory) { "available" }).isEqualTo("available")
++        }
++        assertThat(HarmonyOsSessionSupport.withDeviceLock("device-a", directory) { "released" }).isEqualTo("released")
++    }
++
++    @Test
++    fun `flow failure releases the device for another invocation`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("harmonyos-lock-test").toPath()
++        val failure = IllegalStateException("flow failed")
++        assertThat(assertThrows<IllegalStateException> {
++            HarmonyOsSessionSupport.withDeviceLock("device-a", directory) { throw failure }
++        }).isSameInstanceAs(failure)
++        assertThat(HarmonyOsSessionSupport.withDeviceLock("device-a", directory) { "released" }).isEqualTo("released")
++    }
++
++    @Test
++    fun `failed driver open releases the device before another attempt`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("harmonyos-open-test").toPath()
++        var attempts = 0
++        val failure = HdcException("transport unavailable")
++        val hdc = HdcClient("test-hdc", HdcCommandRunner { _, _ ->
++            attempts++
++            throw failure
++        })
++        repeat(2) {
++            assertThat(assertThrows<HdcException> {
++                HarmonyOsSessionSupport.withSession(
++                    "device-a", hdc = hdc, config = HarmonyOSDriverConfig(), lockDirectory = directory,
++                ) { error("The session block must not run") }
++            }).isSameInstanceAs(failure)
++        }
++        assertThat(attempts).isEqualTo(2)
++    }
++
++    @Test
++    fun `start-device rejects HarmonyOS instead of creating an Android emulator`() {
++        assertThat(assertThrows<CliError> {
++            StartDeviceCommand().buildDeviceSpec(Platform.HARMONYOS)
++        }).hasMessageThat().contains("does not create HarmonyOS devices")
++    }
++
++    private fun listing(output: String, commands: MutableList<List<String>> = mutableListOf()): HdcClient =
++        HdcClient("test-hdc", HdcCommandRunner { command, _ ->
++            commands += command
++            HdcCommandResult(0, output, "")
++        })
++}
+diff --git a/maestro-client/src/main/java/maestro/device/DeviceService.kt b/maestro-client/src/main/java/maestro/device/DeviceService.kt
+index 0845ff4..5bccac4 100644
+--- a/maestro-client/src/main/java/maestro/device/DeviceService.kt
++++ b/maestro-client/src/main/java/maestro/device/DeviceService.kt
+@@ -175,6 +175,8 @@ object DeviceService {
+                 }
+             }
+ 
++            Platform.HARMONYOS -> throw DeviceError("Launching HarmonyOS emulators is not supported. Connect a device using HDC.")
++
+             Platform.WEB -> {
+                 PrintUtils.message("Launching Web...")
+                 CdpWebDriver(isStudio = false, isHeadless = false, screenSize = null).open()
+@@ -486,6 +488,8 @@ object DeviceService {
+      */
+     fun isDeviceConnected(deviceName: String, platform: Platform): Device.Connected? {
+         return when (platform) {
++            // This API looks up managed emulators, not HDC devices.
++            Platform.HARMONYOS -> null
+             Platform.IOS -> listIOSDevices()
+                 .filterIsInstance<Device.Connected>()
+                 .find { it.description.contains(deviceName, ignoreCase = true) }
+@@ -515,6 +519,7 @@ object DeviceService {
+      * @return true if ios simulator or android emulator is available to launch
+      */
+     fun isDeviceAvailableToLaunch(deviceName: String, platform: Platform): Device.AvailableForLaunch? {
++        if (platform == Platform.HARMONYOS) return null
+         return if (platform == Platform.IOS) {
+             listIOSDevices()
+                 .filterIsInstance<Device.AvailableForLaunch>()
+diff --git a/maestro-client/src/main/java/maestro/device/Platform.kt b/maestro-client/src/main/java/maestro/device/Platform.kt
+index 61c5d52..60bf56d 100644
+--- a/maestro-client/src/main/java/maestro/device/Platform.kt
++++ b/maestro-client/src/main/java/maestro/device/Platform.kt
+@@ -3,7 +3,8 @@ package maestro.device
+ enum class Platform(val description: String) {
+     ANDROID("Android"),
+     IOS("iOS"),
+-    WEB("Web");
++    WEB("Web"),
++    HARMONYOS("HarmonyOS");
+ 
+     companion object {
+         fun fromString(p: String): Platform {
+diff --git a/maestro-client/src/main/java/maestro/device/locale/DeviceLocale.kt b/maestro-client/src/main/java/maestro/device/locale/DeviceLocale.kt
+index b2465ec..be6ffe2 100644
+--- a/maestro-client/src/main/java/maestro/device/locale/DeviceLocale.kt
++++ b/maestro-client/src/main/java/maestro/device/locale/DeviceLocale.kt
+@@ -36,6 +36,7 @@ sealed interface DeviceLocale {
+         Platform.ANDROID -> AndroidLocale.fromString(localeString)
+         Platform.IOS -> IosLocale.fromString(localeString)
+         Platform.WEB -> WebLocale.fromString(localeString)
++        Platform.HARMONYOS -> throw LocaleValidationException("Changing the HarmonyOS device locale is not supported")
+       }
+     }
+ 
+@@ -59,6 +60,7 @@ sealed interface DeviceLocale {
+         Platform.ANDROID -> AndroidLocale.all
+         Platform.IOS -> IosLocale.entries
+         Platform.WEB -> WebLocale.entries
++        Platform.HARMONYOS -> emptyList()
+       }
+     }
+ 
+@@ -70,6 +72,7 @@ sealed interface DeviceLocale {
+         Platform.ANDROID -> AndroidLocale.allCodes
+         Platform.IOS -> IosLocale.allCodes
+         Platform.WEB -> WebLocale.allCodes
++        Platform.HARMONYOS -> emptySet()
+       }
+     }
+ 
+@@ -82,6 +85,7 @@ sealed interface DeviceLocale {
+         Platform.ANDROID -> AndroidLocale.find(languageCode, countryCode)
+         Platform.IOS -> IosLocale.find(languageCode, countryCode)
+         Platform.WEB -> WebLocale.find(languageCode, countryCode)
++        Platform.HARMONYOS -> null
+       }
+     }
+ 
+@@ -91,6 +95,7 @@ sealed interface DeviceLocale {
+         Platform.ANDROID -> AndroidLocale.fromString("en_US")
+         Platform.IOS -> IosLocale.fromString("en_US")
+         Platform.WEB -> WebLocale.fromString("en_US")
++        Platform.HARMONYOS -> throw LocaleValidationException("HarmonyOS uses the connected device's current locale")
+       }
+     }
+ 
+diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
+new file mode 100644
+index 0000000..ff1cf1f
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
+@@ -0,0 +1,354 @@
++package maestro.drivers
++
++import maestro.Capability
++import maestro.DeviceInfo
++import maestro.Driver
++import maestro.KeyCode
++import maestro.Point
++import maestro.ScreenRecording
++import maestro.SwipeDirection
++import maestro.TreeNode
++import maestro.ViewHierarchy
++import maestro.device.DeviceOrientation
++import maestro.device.Platform
++import maestro.harmonyos.driver.HarmonyOSCommandException
++import maestro.harmonyos.driver.HarmonyOSDevice
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import maestro.harmonyos.driver.requireIdentifier
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import okio.Buffer
++import okio.Sink
++import java.awt.image.BufferedImage
++import java.io.ByteArrayInputStream
++import java.io.File
++import java.time.Duration
++import javax.imageio.ImageIO
++import javax.imageio.stream.MemoryCacheImageInputStream
++import kotlin.math.hypot
++import kotlin.math.roundToInt
++
++/** Host driver for devices exposing the OpenHarmony UITest shell commands. */
++class HarmonyOSDriver(
++    private val device: HarmonyOSDevice,
++    private val config: HarmonyOSDriverConfig = HarmonyOSDriverConfig(),
++) : Driver {
++    constructor(
++        deviceId: String,
++        hdc: HdcClient = HdcClient(),
++        config: HarmonyOSDriverConfig = HarmonyOSDriverConfig(),
++    ) : this(HdcHarmonyOSDevice(deviceId, hdc), config)
++
++    @Volatile private var opened = false
++
++    override fun name(): String = "HarmonyOS"
++
++    @Synchronized
++    override fun open() {
++        if (opened) return
++        checkInterrupted()
++        device.connect()
++        decodeScreenshot(device.screenshot(config.commandTimeout))
++        device.hierarchy(config.commandTimeout)
++        opened = true
++    }
++
++    @Synchronized
++    override fun close() {
++        opened = false
++    }
++
++    override fun deviceInfo(): DeviceInfo {
++        requireOpen()
++        val image = capture(config.commandTimeout).image
++        // UITest coordinates and bounds are physical pixels, including system bars.
++        return DeviceInfo(Platform.HARMONYOS, image.width, image.height, image.width, image.height)
++    }
++
++    override fun launchApp(appId: String, launchArguments: Map<String, Any>) {
++        requireOpen()
++        requireIdentifier(appId, "Bundle name")
++        val ability = config.abilityName ?: throw IllegalStateException(
++            "Set MAESTRO_HARMONYOS_ABILITY (or HarmonyOSDriverConfig.abilityName) to the app's launch ability",
++        )
++        // https://github.com/openharmony/docs/blob/master/en/application-dev/tools/aa-tool.md
++        val arguments = mutableListOf("aa", "start", "-b", appId, "-a", ability)
++        config.moduleName?.let { arguments += listOf("-m", it) }
++        launchArguments.forEach { (key, value) ->
++            requireIdentifier(key, "Launch argument name")
++            arguments += when (value) {
++                is String -> {
++                    require('\u0000' !in value && !value.startsWith('-')) {
++                        "aa string launch arguments cannot contain NUL or start with '-'"
++                    }
++                    if (value.isEmpty()) listOf("--psn", key) else listOf("--ps", key, value)
++                }
++                is Boolean -> listOf("--pb", key, value.toString())
++                is Byte, is Short, is Int, is Long -> {
++                    val number = (value as Number).toLong()
++                    require(number in 0..Int.MAX_VALUE.toLong()) { "aa integer launch arguments must be between 0 and ${Int.MAX_VALUE}" }
++                    listOf("--pi", key, number.toString())
++                }
++                else -> unsupported("launch arguments of type ${value.javaClass.simpleName}")
++            }
++        }
++        aa(arguments, "start ability successfully.")
++    }
++
++    override fun stopApp(appId: String) {
++        requireOpen()
++        requireIdentifier(appId, "Bundle name")
++        aa(listOf("aa", "force-stop", appId), "force stop process successfully.")
++    }
++
++    override fun killApp(appId: String) = stopApp(appId)
++
++    override fun tap(point: Point) {
++        validatePoint(point, deviceInfo())
++        input("click", point.x.toString(), point.y.toString())
++    }
++
++    override fun longPress(point: Point) {
++        validatePoint(point, deviceInfo())
++        input("longClick", point.x.toString(), point.y.toString())
++    }
++
++    override fun pressKey(code: KeyCode) {
++        val key = when (code) {
++            KeyCode.BACK -> "Back"
++            KeyCode.HOME -> "Home"
++            KeyCode.POWER -> "Power"
++            // https://github.com/openharmony/docs/blob/master/en/application-dev/reference/apis-input-kit/js-apis-keycode.md
++            KeyCode.ENTER -> "2054"
++            KeyCode.BACKSPACE -> "2055"
++            KeyCode.TAB -> "2049"
++            KeyCode.ESCAPE -> "2070"
++            KeyCode.VOLUME_UP -> "16"
++            KeyCode.VOLUME_DOWN -> "17"
++            else -> unsupported("pressKey ${code.description}")
++        }
++        input("keyEvent", key)
++    }
++
++    override fun contentDescriptor(excludeKeyboardElements: Boolean): TreeNode {
++        requireOpen()
++        if (excludeKeyboardElements) unsupported("excluding keyboard elements from the hierarchy")
++        return device.hierarchy(config.commandTimeout)
++    }
++
++    override fun scrollVertical() = swipe(SwipeDirection.UP, 400)
++
++    override fun swipe(start: Point, end: Point, durationMs: Long) {
++        val info = deviceInfo()
++        validatePoint(start, info)
++        validatePoint(end, info)
++        require(durationMs > 0) { "Swipe duration must be positive" }
++        require(start != end) { "Swipe endpoints must differ" }
++        // UITest accepts velocity, not duration; requested duration is approximate at its limits.
++        val velocity = (hypot((end.x - start.x).toDouble(), (end.y - start.y).toDouble()) * 1000 / durationMs)
++            .roundToInt().coerceIn(200, 40000)
++        input("swipe", start.x.toString(), start.y.toString(), end.x.toString(), end.y.toString(), velocity.toString())
++    }
++
++    override fun swipe(swipeDirection: SwipeDirection, durationMs: Long) {
++        val info = deviceInfo()
++        val center = Point(info.widthGrid / 2, info.heightGrid / 2)
++        val (start, end) = when (swipeDirection) {
++            SwipeDirection.UP -> Point(center.x, info.heightGrid * 4 / 5) to Point(center.x, info.heightGrid / 5)
++            SwipeDirection.DOWN -> Point(center.x, info.heightGrid / 5) to Point(center.x, info.heightGrid * 4 / 5)
++            SwipeDirection.LEFT -> Point(info.widthGrid * 4 / 5, center.y) to Point(info.widthGrid / 5, center.y)
++            SwipeDirection.RIGHT -> Point(info.widthGrid / 5, center.y) to Point(info.widthGrid * 4 / 5, center.y)
++        }
++        swipe(start, end, durationMs)
++    }
++
++    override fun swipe(elementPoint: Point, direction: SwipeDirection, durationMs: Long) {
++        val info = deviceInfo()
++        val end = when (direction) {
++            SwipeDirection.UP -> Point(elementPoint.x, maxOf(1, elementPoint.y - info.heightGrid * 3 / 5))
++            SwipeDirection.DOWN -> Point(elementPoint.x, minOf(info.heightGrid - 1, elementPoint.y + info.heightGrid * 3 / 5))
++            SwipeDirection.LEFT -> Point(maxOf(1, elementPoint.x - info.widthGrid * 3 / 5), elementPoint.y)
++            SwipeDirection.RIGHT -> Point(minOf(info.widthGrid - 1, elementPoint.x + info.widthGrid * 3 / 5), elementPoint.y)
++        }
++        swipe(elementPoint, end, durationMs)
++    }
++
++    override fun backPress() = pressKey(KeyCode.BACK)
++
++    override fun inputText(text: String) {
++        requireOpen()
++        require('\u0000' !in text) { "Input text cannot contain NUL" }
++        if (text.isNotEmpty()) input("text", text)
++    }
++
++    override fun eraseText(charactersToErase: Int) {
++        requireOpen()
++        require(charactersToErase in 0..10000) { "eraseText requires a count between 0 and 10000" }
++        repeat(charactersToErase) { pressKey(KeyCode.BACKSPACE) }
++    }
++
++    override fun takeScreenshot(out: Sink, compressed: Boolean) {
++        requireOpen()
++        val bytes = capture(config.commandTimeout).bytes
++        val buffer = Buffer().write(bytes)
++        out.write(buffer, bytes.size.toLong())
++        out.flush()
++    }
++
++    override fun isShutdown(): Boolean = !opened || !device.isAvailable()
++
++    override fun waitUntilScreenIsStatic(timeoutMs: Long): Boolean {
++        requireOpen()
++        val deadline = deadline(timeoutMs)
++        var previous: BufferedImage? = null
++        while (true) {
++            val budget = remaining(deadline) ?: return false
++            val current = try {
++                capture(budget).image
++            } catch (error: HdcTimeoutException) {
++                if (budget < config.commandTimeout && error.suppressed.isEmpty()) return false
++                throw error
++            }
++            if (System.nanoTime() >= deadline) return false
++            if (previous != null && imagesEqual(previous, current)) return true
++            previous = current
++            if (!pause(deadline)) return false
++        }
++    }
++
++    override fun waitForAppToSettle(initialHierarchy: ViewHierarchy?, appId: String?, timeoutMs: Int?): ViewHierarchy? {
++        requireOpen()
++        val deadline = deadline(timeoutMs?.toLong() ?: config.settleTimeout.toMillis())
++        var previous: TreeNode? = null
++        // Require two fresh samples. A caller's snapshot can predate the last input event.
++        while (true) {
++            val budget = remaining(deadline) ?: return null
++            val current = try {
++                device.hierarchy(budget)
++            } catch (error: HdcTimeoutException) {
++                if (budget < config.commandTimeout && error.suppressed.isEmpty()) return null
++                throw error
++            }
++            if (System.nanoTime() >= deadline) return null
++            if (previous == current) return ViewHierarchy(current)
++            previous = current
++            if (!pause(deadline)) return null
++        }
++    }
++
++    override fun capabilities(): List<Capability> = emptyList()
++
++    override fun setPermissions(appId: String, permissions: Map<String, String>) {
++        requireOpen()
++        if (permissions.isNotEmpty()) unsupported("setting app permissions")
++    }
++
++    override fun clearAppState(appId: String): Unit = unsupported("clearState")
++    override fun clearKeychain(): Unit = unsupported("clearKeychain")
++    override fun isKeyboardVisible(): Boolean = unsupported("keyboard visibility detection")
++    override fun hideKeyboard(): Unit = unsupported("hideKeyboard; use an app control to dismiss the keyboard")
++    override fun openLink(link: String, appId: String?, autoVerify: Boolean, browser: Boolean): Unit = unsupported("openLink")
++    override fun startScreenRecording(out: Sink): ScreenRecording = unsupported("screen recording")
++    override fun setLocation(latitude: Double, longitude: Double): Unit = unsupported("setLocation")
++    override fun setOrientation(orientation: DeviceOrientation): Unit = unsupported("setOrientation")
++    override fun setProxy(host: String, port: Int): Unit = unsupported("setProxy")
++    override fun resetProxy(): Unit = unsupported("resetProxy")
++    override fun addMedia(mediaFiles: List<File>): Unit = unsupported("addMedia")
++    override fun isAirplaneModeEnabled(): Boolean = unsupported("airplane mode detection")
++    override fun setAirplaneMode(enabled: Boolean): Unit = unsupported("setAirplaneMode")
++    override fun isDarkModeEnabled(): Boolean = unsupported("dark mode detection")
++    override fun setDarkMode(enabled: Boolean): Unit = unsupported("setDarkMode")
++
++    private fun input(vararg arguments: String) {
++        requireOpen()
++        device.execute(listOf("uitest", "uiInput") + arguments, config.commandTimeout)
++    }
++
++    private fun aa(arguments: List<String>, expectedSuccess: String) {
++        val output = device.execute(arguments, config.commandTimeout)
++        if (output.lineSequence().none { it.trim() == expectedSuccess }) {
++            throw HarmonyOSCommandException("aa did not confirm success", output, "")
++        }
++    }
++
++    private data class Screenshot(val bytes: ByteArray, val image: BufferedImage)
++
++    private fun capture(timeout: Duration): Screenshot {
++        val bytes = device.screenshot(timeout)
++        return Screenshot(bytes, decodeScreenshot(bytes))
++    }
++
++    private fun decodeScreenshot(bytes: ByteArray): BufferedImage {
++        if (bytes.size > 32 * 1024 * 1024) throw HdcException("Screenshot exceeds 32 MiB")
++        MemoryCacheImageInputStream(ByteArrayInputStream(bytes)).use { input ->
++            val readers = ImageIO.getImageReaders(input)
++            if (!readers.hasNext()) throw HdcException("UITest screenshot is not a readable PNG")
++            val reader = readers.next()
++            try {
++                if (!reader.formatName.equals("png", ignoreCase = true)) throw HdcException("UITest screenshot is not PNG")
++                reader.input = input
++                val width = reader.getWidth(0)
++                val height = reader.getHeight(0)
++                if (width <= 0 || height <= 0 || width.toLong() * height > 16_000_000) {
++                    throw HdcException("Screenshot dimensions exceed the supported pixel limit")
++                }
++                return reader.read(0) ?: throw HdcException("UITest screenshot could not be decoded")
++            } finally {
++                reader.dispose()
++            }
++        }
++    }
++
++    private fun imagesEqual(first: BufferedImage, second: BufferedImage): Boolean {
++        if (first.width != second.width || first.height != second.height) return false
++        val width = first.width
++        val height = first.height
++        return first.getRGB(0, 0, width, height, null, 0, width)
++            .contentEquals(second.getRGB(0, 0, width, height, null, 0, width))
++    }
++
++    private fun validatePoint(point: Point, info: DeviceInfo) {
++        // UITest GetPoint/GetPoints reject zero as well as negative coordinates.
++        require(point.x in 1 until info.widthGrid && point.y in 1 until info.heightGrid) {
++            "UITest point (${point.x}, ${point.y}) must be positive and inside ${info.widthGrid} x ${info.heightGrid} screen"
++        }
++    }
++
++    private fun deadline(timeoutMs: Long): Long {
++        require(timeoutMs in 0..Duration.ofMinutes(5).toMillis()) { "Wait timeout must be between 0 and 5 minutes" }
++        return System.nanoTime() + Duration.ofMillis(timeoutMs).toNanos()
++    }
++
++    private fun remaining(deadline: Long): Duration? {
++        checkInterrupted()
++        val nanos = deadline - System.nanoTime()
++        if (nanos < Duration.ofMillis(3).toNanos()) return null
++        return minOf(config.commandTimeout, Duration.ofNanos(nanos))
++    }
++
++    private fun pause(deadline: Long): Boolean {
++        val nanos = minOf(config.pollInterval.toNanos(), deadline - System.nanoTime())
++        if (nanos <= 0) return false
++        try {
++            Thread.sleep(nanos / 1_000_000, (nanos % 1_000_000).toInt())
++        } catch (error: InterruptedException) {
++            Thread.currentThread().interrupt()
++            throw error
++        }
++        return true
++    }
++
++    private fun requireOpen() {
++        check(opened) { "HarmonyOS driver is not open" }
++        checkInterrupted()
++    }
++
++    private fun checkInterrupted() {
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("HarmonyOS operation interrupted")
++    }
++
++    private fun unsupported(operation: String): Nothing =
++        throw UnsupportedOperationException("HarmonyOS driver does not support $operation yet")
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/HarmonyOsHostCli.kt b/maestro-client/src/main/java/maestro/harmonyos/HarmonyOsHostCli.kt
 new file mode 100644
 index 0000000..d740aef
@@ -38,6 +1123,230 @@ index 0000000..d740aef
 +            error("Device discovery failed: ${failure.message ?: failure.javaClass.simpleName}")
 +            1
 +        }
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
+new file mode 100644
+index 0000000..a5baddc
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
+@@ -0,0 +1,13 @@
++package maestro.harmonyos.driver
++
++import maestro.TreeNode
++import java.time.Duration
++
++/** Device boundary; tests replace the transport while keeping the real Maestro driver. */
++interface HarmonyOSDevice {
++    fun connect()
++    fun isAvailable(): Boolean
++    fun hierarchy(timeout: Duration): TreeNode
++    fun screenshot(timeout: Duration): ByteArray
++    fun execute(arguments: List<String>, timeout: Duration): String
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
+new file mode 100644
+index 0000000..b116d1f
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
+@@ -0,0 +1,28 @@
++package maestro.harmonyos.driver
++
++import java.time.Duration
++
++data class HarmonyOSDriverConfig(
++    val abilityName: String? = null,
++    val moduleName: String? = null,
++    val commandTimeout: Duration = Duration.ofSeconds(15),
++    val settleTimeout: Duration = Duration.ofSeconds(5),
++    val pollInterval: Duration = Duration.ofMillis(100),
++) {
++    init {
++        for (timeout in listOf(commandTimeout, settleTimeout, pollInterval)) {
++            require(timeout >= Duration.ofMillis(1) && timeout <= Duration.ofMinutes(5)) {
++                "HarmonyOS timeouts must be between 1 ms and 5 minutes"
++            }
++        }
++        require(commandTimeout >= Duration.ofMillis(3)) { "Command timeout must allow capture, transfer and cleanup" }
++        abilityName?.let { requireIdentifier(it, "Ability name") }
++        moduleName?.let { requireIdentifier(it, "Module name") }
++    }
++}
++
++internal fun requireIdentifier(value: String, name: String) {
++    require(value.isNotBlank() && !value.startsWith('-') && value.none { it.isWhitespace() || it == '\u0000' }) {
++        "$name must be non-empty and cannot contain whitespace, NUL, or start with '-'"
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
+new file mode 100644
+index 0000000..e18caf9
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
+@@ -0,0 +1,165 @@
++package maestro.harmonyos.driver
++
++import maestro.TreeNode
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.layout.HierarchyReader
++import maestro.utils.TempFileHandler
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++
++class HarmonyOSCommandException(
++    message: String,
++    val stdout: String,
++    val stderr: String,
++    val remoteExitCode: Int? = null,
++) : HdcException("$message\n${stdout.trim()}\n${stderr.trim()}".trim())
++
++/**
++ * UITest command reference:
++ * https://github.com/openharmony/testfwk_arkxtest/blob/f59296c77aac5037a9335c317af58de3a0c22ecb/uitest/server/server_main.cpp
++ */
++class HdcHarmonyOSDevice(
++    private val deviceId: String,
++    private val hdc: HdcClient = HdcClient(),
++) : HarmonyOSDevice {
++    override fun connect() {
++        hdc.selectDevice(deviceId)
++    }
++
++    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
++
++    override fun hierarchy(timeout: Duration): TreeNode {
++        return HierarchyReader(
++            hdc, deviceId,
++            commandTimeout = timeout,
++            cleanupTimeout = Duration.ofSeconds(2),
++            totalTimeout = timeout,
++        ).read()
++    }
++
++    override fun execute(arguments: List<String>, timeout: Duration): String {
++        checkInterrupted()
++        require(arguments.isNotEmpty()) { "A device command is required" }
++        val marker = "MAESTRO_EXIT_${UUID.randomUUID().toString().replace("-", "")}="
++        val script = arguments.joinToString(" ") { HdcClient.quoteShellArgument(it) } +
++            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
++        val result = hdc.shell(deviceId, listOf("sh", "-c", script), timeout)
++        checkInterrupted()
++        val lines = result.stdout.trimEnd().lines()
++        val statusLine = lines.lastOrNull().orEmpty()
++        val status = statusLine.takeIf { it.startsWith(marker) }?.removePrefix(marker)?.toIntOrNull()
++            ?: throw HarmonyOSCommandException(
++                "Device command did not return its exit status", result.stdout, result.stderr,
++            )
++        val output = lines.dropLast(1).joinToString("\n").trimEnd()
++        if (status != 0) {
++            throw HarmonyOSCommandException("Device command failed (exit $status)", output, result.stderr, status)
++        }
++        if (DEVICE_FAILURE.containsMatchIn(output) || DEVICE_FAILURE.containsMatchIn(result.stderr)) {
++            throw HarmonyOSCommandException("Device command reported a failure", output, result.stderr, status)
++        }
++        // ui_input.cpp returns EXIT_SUCCESS even for an ApiCallErr. Its successful message is
++        // defined as "No Error" in uitest/core/frontend_error_defines.h at the revision above.
++        if (arguments.take(2) == listOf("uitest", "uiInput") &&
++            (output.trim() != "No Error" || result.stderr.isNotBlank())
++        ) {
++            throw HarmonyOSCommandException("UITest did not confirm input success", output, result.stderr, status)
++        }
++        return output
++    }
++
++    override fun screenshot(timeout: Duration): ByteArray {
++        checkInterrupted()
++        require(!timeout.isZero && !timeout.isNegative) { "Screenshot timeout must be positive" }
++        val deadline = System.nanoTime() + timeout.toNanos()
++        val remotePath = "/data/local/tmp/maestro-screen-${UUID.randomUUID()}.png"
++        val files = TempFileHandler()
++        var localDirectory: Path? = null
++        var localPath: Path? = null
++        var captureAttempted = false
++        var failure: Throwable? = null
++        try {
++            localDirectory = files.createTempDirectory("maestro-harmonyos-screen-").toPath()
++            localPath = localDirectory.resolve("screen.png")
++            captureAttempted = true
++            execute(listOf("uitest", "screenCap", "-p", remotePath), remainingBudget(deadline, timeout))
++            hdc.receiveFile(deviceId, remotePath, localPath, remainingBudget(deadline, timeout))
++            checkInterrupted()
++            if (!Files.isRegularFile(localPath, LinkOption.NOFOLLOW_LINKS)) {
++                throw HdcException("HDC did not create the requested screenshot file")
++            }
++            val size = Files.size(localPath)
++            if (size !in 1..MAX_SCREENSHOT_BYTES.toLong()) throw HdcException("Screenshot file exceeds its size limit or is empty")
++            val bytes = Files.newInputStream(localPath).use { it.readNBytes(MAX_SCREENSHOT_BYTES + 1) }
++            if (bytes.size.toLong() != size || Files.size(localPath) != size) {
++                throw HdcException("Screenshot file changed while it was being read")
++            }
++            remainingBudget(deadline, timeout)
++            return bytes
++        } catch (error: Throwable) {
++            failure = error
++            if (error is InterruptedException) Thread.currentThread().interrupt()
++            throw error
++        } finally {
++            val errors = mutableListOf<Throwable>()
++            if (captureAttempted) {
++                if (Thread.currentThread().isInterrupted) {
++                    errors += HdcException("Device cleanup skipped after interruption; temporary screenshot may remain at $remotePath")
++                } else {
++                    try {
++                        // Cleanup has its own small allowance even when the capture budget expired.
++                        execute(listOf("rm", "-f", remotePath), Duration.ofSeconds(2))
++                    } catch (error: Throwable) {
++                        if (error is InterruptedException) {
++                            Thread.currentThread().interrupt()
++                            error.addSuppressed(HdcException("Temporary screenshot may remain at $remotePath"))
++                            errors += error
++                        } else {
++                            errors += HdcException("Could not remove temporary screenshot $remotePath: ${error.message}", error)
++                        }
++                    }
++                }
++            }
++            for (path in listOfNotNull(localPath, localDirectory)) {
++                try {
++                    Files.deleteIfExists(path)
++                } catch (error: Exception) {
++                    errors += error
++                }
++            }
++            files.close()
++            if (errors.isNotEmpty()) {
++                val original = failure
++                if (original != null) {
++                    errors.forEach(original::addSuppressed)
++                } else {
++                    val cleanupFailure = errors.firstOrNull { it is InterruptedException }
++                        ?: HdcException("Could not clean up temporary screenshot $remotePath")
++                    errors.filter { it !== cleanupFailure }.forEach(cleanupFailure::addSuppressed)
++                    throw cleanupFailure
++                }
++            }
++        }
++    }
++
++    private fun remainingBudget(deadline: Long, timeout: Duration): Duration {
++        checkInterrupted()
++        val remaining = deadline - System.nanoTime()
++        if (remaining <= 0) throw HdcTimeoutException(timeout)
++        return Duration.ofNanos(remaining)
++    }
++
++    private fun checkInterrupted() {
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("HarmonyOS operation interrupted")
++    }
++
++    private companion object {
++        const val MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
++        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|error:|failed:)")
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
@@ -340,15 +1649,16 @@ index 0000000..5b3e7ec
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
 new file mode 100644
-index 0000000..9c3df94
+index 0000000..af1ecb8
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,163 @@
 +package maestro.harmonyos.layout
 +
 +import maestro.TreeNode
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.utils.TempFileHandler
 +import java.nio.ByteBuffer
 +import java.nio.charset.CharacterCodingException
@@ -362,7 +1672,7 @@ index 0000000..9c3df94
 +
 +/**
 + * Reads a fresh dump using the OpenHarmony UITest `dumpLayout -p` interface.
-+ * Availability and permissions on commercial HarmonyOS devices remain unverified.
++ * Dump and transfer can share a deadline; cleanup has its own bounded allowance.
 + */
 +class HierarchyReader(
 +    private val hdc: HdcClient,
@@ -371,18 +1681,26 @@ index 0000000..9c3df94
 +    private val commandTimeout: Duration = Duration.ofSeconds(15),
 +    private val cleanupTimeout: Duration = Duration.ofSeconds(2),
 +    private val maxLayoutBytes: Int = 8 * 1024 * 1024,
++    private val totalTimeout: Duration? = null,
 +) {
 +    init {
 +        require(deviceId.isNotBlank()) { "A target device is required" }
 +        require(!commandTimeout.isNegative && !commandTimeout.isZero) { "Command timeout must be positive" }
 +        require(!cleanupTimeout.isNegative && !cleanupTimeout.isZero) { "Cleanup timeout must be positive" }
 +        require(maxLayoutBytes in 1..8 * 1024 * 1024) { "Layout limit must be between 1 byte and 8 MiB" }
++        totalTimeout?.let { require(it > Duration.ZERO && it <= Duration.ofMinutes(5)) { "Total timeout must be positive and at most 5 minutes" } }
 +    }
 +
 +    @Synchronized
 +    fun read(): TreeNode {
 +        if (Thread.currentThread().isInterrupted) {
 +            throw InterruptedException("Hierarchy read interrupted before creating temporary files")
++        }
++        val deadline = totalTimeout?.let { System.nanoTime() + it.toNanos() }
++        fun remainingBudget(): Duration {
++            val remaining = deadline?.let { Duration.ofNanos(it - System.nanoTime()) } ?: return commandTimeout
++            if (remaining <= Duration.ZERO) throw HdcTimeoutException(checkNotNull(totalTimeout))
++            return minOf(commandTimeout, remaining)
 +        }
 +        val files = TempFileHandler()
 +        var localDirectory: Path? = null
@@ -396,15 +1714,16 @@ index 0000000..9c3df94
 +            localFile = localDirectory.resolve("layout.json")
 +            checkInterrupted()
 +            dumpAttempted = true
-+            val result = hdc.shell(deviceId, listOf("uitest", "dumpLayout", "-p", remotePath), commandTimeout)
++            val result = hdc.shell(deviceId, listOf("uitest", "dumpLayout", "-p", remotePath), remainingBudget())
 +            if (DUMP_FAILURE.containsMatchIn(result.stdout) || DUMP_FAILURE.containsMatchIn(result.stderr)) {
 +                throw HierarchyReadException("UITest failed to create the requested layout")
 +            }
 +            checkInterrupted()
-+            hdc.receiveFile(deviceId, remotePath, localFile, commandTimeout)
++            hdc.receiveFile(deviceId, remotePath, localFile, remainingBudget())
 +            checkInterrupted()
 +            val root = parser.parse(readLayout(localFile))
 +            checkInterrupted()
++            remainingBudget()
 +            return root
 +        } catch (error: Throwable) {
 +            failure = error
@@ -690,6 +2009,540 @@ index 0000000..7785dcd
 +
 +        assertEquals(2, HarmonyOsHostCli.run(listOf("test", "flow.yaml"), client, {}, {}))
 +        assertFalse(invoked)
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
+new file mode 100644
+index 0000000..17c19f6
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
+@@ -0,0 +1,323 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.KeyCode
++import maestro.Point
++import maestro.SwipeDirection
++import maestro.TreeNode
++import maestro.ViewHierarchy
++import maestro.device.Platform
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import okio.Buffer
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.awt.image.BufferedImage
++import java.io.ByteArrayOutputStream
++import java.time.Duration
++import javax.imageio.ImageIO
++
++class HarmonyOSDriverTest {
++    @Test
++    fun `open verifies screenshot and layout then close rejects actions`() {
++        val device = Device()
++        val driver = driver(device)
++        assertThrows(IllegalStateException::class.java) { driver.inputText("hello") }
++        driver.open()
++        driver.open()
++        assertThat(device.connections).isEqualTo(1)
++        assertThat(device.layoutReads).isEqualTo(1)
++        assertThat(device.screenshots).isEqualTo(1)
++        assertThat(driver.deviceInfo().platform).isEqualTo(Platform.HARMONYOS)
++        assertThat(driver.deviceInfo().widthGrid).isEqualTo(80)
++        assertThat(driver.deviceInfo().heightGrid).isEqualTo(120)
++        driver.close()
++        driver.close()
++        assertThat(driver.isShutdown()).isTrue()
++        assertThrows(IllegalStateException::class.java) { driver.tap(Point(1, 1)) }
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `failed open preserves original error and can be retried`() {
++        val device = Device()
++        val error = HdcException("UITest access denied")
++        device.layout = { throw error }
++        val driver = driver(device)
++        assertThat(assertThrows(HdcException::class.java) { driver.open() }).isSameInstanceAs(error)
++        driver.close()
++        assertThrows(IllegalStateException::class.java) { driver.inputText("hello") }
++        device.layout = { tree("ready") }
++        driver.open()
++        assertThat(driver.isShutdown()).isFalse()
++    }
++
++    @Test
++    fun `screen size comes from fresh PNG rather than layout bounds`() {
++        val device = Device()
++        device.layout = { TreeNode(attributes = mutableMapOf("bounds" to "[0,0][1,1]")) }
++        val driver = driver(device)
++        driver.open()
++        device.image = png(120, 80)
++        val info = driver.deviceInfo()
++        assertThat(info.widthPixels).isEqualTo(120)
++        assertThat(info.heightPixels).isEqualTo(80)
++        assertThrows(IllegalArgumentException::class.java) { driver.tap(Point(120, 0)) }
++        assertThrows(IllegalArgumentException::class.java) { driver.tap(Point(0, 1)) }
++        assertThrows(IllegalArgumentException::class.java) { driver.swipe(Point(1, 0), Point(30, 40), 200) }
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `malformed screenshot prevents opening the session`() {
++        val device = Device().apply { image = "not a PNG".toByteArray() }
++        val driver = driver(device)
++        assertThrows(HdcException::class.java) { driver.open() }
++        assertThat(driver.isShutdown()).isTrue()
++        assertThat(device.layoutReads).isEqualTo(0)
++    }
++
++    @Test
++    fun `launch requires an explicit ability and validates arguments before starting app`() {
++        val device = Device()
++        val driver = HarmonyOSDriver(device)
++        driver.open()
++        val missing = assertThrows(IllegalStateException::class.java) { driver.launchApp("org.example.demo", emptyMap()) }
++        assertThat(missing.message).contains("MAESTRO_HARMONYOS_ABILITY")
++        assertThat(device.commands).isEmpty()
++
++        val configured = driver(device)
++        configured.open()
++        assertThrows(IllegalArgumentException::class.java) {
++            configured.launchApp("org.example.demo", mapOf("valid" to "yes", "invalid" to -1))
++        }
++        assertThat(device.commands).isEmpty()
++        configured.launchApp("org.example.demo", mapOf("name" to "熊猫", "count" to 2, "active" to true, "empty" to ""))
++        assertThat(device.commands.single()).containsExactly(
++            "aa", "start", "-b", "org.example.demo", "-a", "TestAbility", "-m", "entry",
++            "--ps", "name", "熊猫", "--pi", "count", "2", "--pb", "active", "true", "--psn", "empty",
++        ).inOrder()
++    }
++
++    @Test
++    fun `aa must confirm success even when transport reports successful execution`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        device.output = "The device screen is locked (10106102)"
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            driver.launchApp("org.example.demo", emptyMap())
++        }
++        assertThat(error.stdout).contains("10106102")
++        assertThat(device.commands).hasSize(1)
++    }
++
++    @Test
++    fun `core gestures text and stop use target device commands once`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        driver.tap(Point(10, 20))
++        driver.longPress(Point(30, 40))
++        driver.swipe(Point(10, 20), Point(70, 100), 500)
++        driver.inputText("中文 'quotes' \"double\"; \$HOME\nnext")
++        driver.backPress()
++        driver.pressKey(KeyCode.ENTER)
++        driver.eraseText(2)
++        driver.stopApp("org.example.demo")
++        assertThat(device.commands).containsExactly(
++            listOf("uitest", "uiInput", "click", "10", "20"),
++            listOf("uitest", "uiInput", "longClick", "30", "40"),
++            listOf("uitest", "uiInput", "swipe", "10", "20", "70", "100", "200"),
++            listOf("uitest", "uiInput", "text", "中文 'quotes' \"double\"; \$HOME\nnext"),
++            listOf("uitest", "uiInput", "keyEvent", "Back"),
++            listOf("uitest", "uiInput", "keyEvent", "2054"),
++            listOf("uitest", "uiInput", "keyEvent", "2055"),
++            listOf("uitest", "uiInput", "keyEvent", "2055"),
++            listOf("aa", "force-stop", "org.example.demo"),
++        ).inOrder()
++    }
++
++    @Test
++    fun `input failure is preserved without retrying side effects`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        val failure = HdcException("device disconnected after accepting input")
++        device.executeFailure = failure
++        assertThat(assertThrows(HdcException::class.java) { driver.inputText("hello") }).isSameInstanceAs(failure)
++        assertThat(device.commands).hasSize(1)
++    }
++
++    @Test
++    fun `swiping from an element near the screen edge preserves requested direction`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        driver.swipe(Point(10, 10), SwipeDirection.UP, 400)
++        driver.swipe(Point(70, 110), SwipeDirection.RIGHT, 400)
++        assertThat(device.commands).containsExactly(
++            listOf("uitest", "uiInput", "swipe", "10", "10", "10", "1", "200"),
++            listOf("uitest", "uiInput", "swipe", "70", "110", "79", "110", "200"),
++        ).inOrder()
++    }
++
++    @Test
++    fun `unsupported capabilities fail without changing device state`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        driver.setPermissions("org.example.demo", emptyMap())
++        assertThrows(UnsupportedOperationException::class.java) { driver.setPermissions("org.example.demo", mapOf("all" to "allow")) }
++        assertThrows(UnsupportedOperationException::class.java) { driver.hideKeyboard() }
++        assertThrows(UnsupportedOperationException::class.java) { driver.startScreenRecording(Buffer()) }
++        assertThrows(UnsupportedOperationException::class.java) { driver.clearAppState("org.example.demo") }
++        assertThrows(UnsupportedOperationException::class.java) { driver.contentDescriptor(true) }
++        assertThat(driver.capabilities()).isEmpty()
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test
++    fun `settling requires two fresh matching hierarchies`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        val samples = ArrayDeque(listOf(tree("old"), tree("new"), tree("new")))
++        device.layout = { samples.removeFirst() }
++        val readsBefore = device.layoutReads
++        val settled = driver.waitForAppToSettle(ViewHierarchy(tree("old")), null, 1000)
++        assertThat(settled?.root).isEqualTo(tree("new"))
++        assertThat(device.layoutReads - readsBefore).isEqualTo(3)
++    }
++
++    @Test
++    fun `unstable hierarchy times out and device failures remain errors`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        device.layout = { tree(device.layoutReads.toString()) }
++        assertThat(driver.waitForAppToSettle(null, null, 20)).isNull()
++        val error = HdcException("layout transport failed")
++        device.layout = { throw error }
++        assertThat(assertThrows(HdcException::class.java) {
++            driver.waitForAppToSettle(null, null, 1000)
++        }).isSameInstanceAs(error)
++    }
++
++    @Test
++    fun `a shortened wait budget may expire without claiming that the app settled`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        device.layout = { throw HdcTimeoutException(Duration.ofSeconds(1)) }
++        assertThat(driver.waitForAppToSettle(null, null, 1000)).isNull()
++        device.screenshotFailure = HdcTimeoutException(Duration.ofSeconds(1))
++        assertThat(driver.waitUntilScreenIsStatic(1000)).isFalse()
++        val cleanupFailure = HdcTimeoutException(Duration.ofSeconds(1)).apply {
++            addSuppressed(HdcException("remote cleanup failed"))
++        }
++        device.layout = { throw cleanupFailure }
++        assertThat(assertThrows(HdcTimeoutException::class.java) {
++            driver.waitForAppToSettle(null, null, 1000)
++        }).isSameInstanceAs(cleanupFailure)
++    }
++
++    @Test
++    fun `full command timeout during settling remains a device error`() {
++        val device = Device()
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(commandTimeout = Duration.ofMillis(10)))
++        driver.open()
++        val error = HdcTimeoutException(Duration.ofMillis(10))
++        device.layout = { throw error }
++        assertThat(assertThrows(HdcTimeoutException::class.java) {
++            driver.waitForAppToSettle(null, null, 1000)
++        }).isSameInstanceAs(error)
++        device.screenshotFailure = error
++        assertThat(assertThrows(HdcTimeoutException::class.java) {
++            driver.waitUntilScreenIsStatic(1000)
++        }).isSameInstanceAs(error)
++    }
++
++    @Test
++    fun `screen static check compares pixels and zero timeout makes no reads`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        val before = device.screenshots
++        assertThat(driver.waitUntilScreenIsStatic(0)).isFalse()
++        assertThat(device.screenshots).isEqualTo(before)
++        assertThat(driver.waitUntilScreenIsStatic(1000)).isTrue()
++        assertThat(device.screenshots - before).isEqualTo(2)
++    }
++
++    @Test
++    fun `screenshot remains valid PNG and does not close caller sink`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        val buffer = Buffer()
++        driver.takeScreenshot(buffer, false)
++        assertThat(buffer.readByteArray()).isEqualTo(device.image)
++        buffer.writeUtf8("still open")
++        assertThat(buffer.readUtf8()).isEqualTo("still open")
++    }
++
++    @Test
++    fun `interrupted session does not send commands`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        try {
++            Thread.currentThread().interrupt()
++            assertThrows(InterruptedException::class.java) { driver.inputText("hello") }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(device.commands).isEmpty()
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    private fun driver(device: Device) = HarmonyOSDriver(
++        device,
++        HarmonyOSDriverConfig(abilityName = "TestAbility", moduleName = "entry", pollInterval = Duration.ofMillis(1)),
++    )
++
++    private class Device : HarmonyOSDevice {
++        var connections = 0
++        var layoutReads = 0
++        var screenshots = 0
++        var image = png(80, 120)
++        var layout: () -> TreeNode = { tree("ready") }
++        var output: String? = null
++        var executeFailure: Throwable? = null
++        var screenshotFailure: Throwable? = null
++        val commands = mutableListOf<List<String>>()
++        override fun connect() { connections++ }
++        override fun isAvailable(): Boolean = true
++        override fun hierarchy(timeout: Duration): TreeNode { layoutReads++; return layout() }
++        override fun screenshot(timeout: Duration): ByteArray {
++            screenshots++
++            screenshotFailure?.let { throw it }
++            return image
++        }
++        override fun execute(arguments: List<String>, timeout: Duration): String {
++            commands += arguments
++            executeFailure?.let { throw it }
++            return output ?: when (arguments.take(2)) {
++                listOf("aa", "start") -> "start ability successfully."
++                listOf("aa", "force-stop") -> "force stop process successfully."
++                else -> ""
++            }
++        }
++    }
++
++    companion object {
++        private fun tree(text: String) = TreeNode(attributes = mutableMapOf("text" to text))
++
++        private fun png(width: Int, height: Int): ByteArray = ByteArrayOutputStream().use { out ->
++            ImageIO.write(BufferedImage(width, height, BufferedImage.TYPE_INT_RGB), "png", out)
++            out.toByteArray()
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSPlatformTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSPlatformTest.kt
+new file mode 100644
+index 0000000..db63669
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSPlatformTest.kt
+@@ -0,0 +1,35 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.device.DeviceService
++import maestro.device.Platform
++import maestro.device.locale.DeviceLocale
++import maestro.device.locale.LocaleValidationException
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++
++class HarmonyOSPlatformTest {
++    @Test
++    fun `platform names accept case variants without pretending to be Android`() {
++        assertThat(Platform.fromString("harmonyos")).isEqualTo(Platform.HARMONYOS)
++        assertThat(Platform.fromString("HarmonyOS")).isEqualTo(Platform.HARMONYOS)
++        assertThat(Platform.fromString("HARMONYOS")).isEqualTo(Platform.HARMONYOS)
++        assertThat(Platform.fromString("Android")).isEqualTo(Platform.ANDROID)
++        assertThrows(IllegalArgumentException::class.java) { Platform.fromString("harmony") }
++    }
++
++    @Test
++    fun `HarmonyOS does not reuse another platforms locale catalog`() {
++        assertThat(DeviceLocale.all(Platform.HARMONYOS)).isEmpty()
++        assertThat(DeviceLocale.allCodes(Platform.HARMONYOS)).isEmpty()
++        assertThat(DeviceLocale.find("en", "US", Platform.HARMONYOS)).isNull()
++        assertThat(DeviceLocale.isValid("en_US", Platform.HARMONYOS)).isFalse()
++        assertThrows(LocaleValidationException::class.java) { DeviceLocale.getDefault(Platform.HARMONYOS) }
++    }
++
++    @Test
++    fun `managed emulator lookup does not discover an Android device for HarmonyOS`() {
++        assertThat(DeviceService.isDeviceConnected("test-device", Platform.HARMONYOS)).isNull()
++        assertThat(DeviceService.isDeviceAvailableToLaunch("test-device", Platform.HARMONYOS)).isNull()
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
+new file mode 100644
+index 0000000..5085e79
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
+@@ -0,0 +1,158 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcException
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++
++class HdcHarmonyOSDeviceTest {
++    @Test
++    fun `remote failure is detected even when HDC exits zero`() {
++        var calls = 0
++        val device = device { command, _ ->
++            calls++
++            HdcCommandResult(0, "injection denied\n${marker(command)}37\n", "device diagnostic")
++        }
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            device.execute(listOf("uitest", "uiInput", "text", "hello"), TIMEOUT)
++        }
++        assertThat(error.remoteExitCode).isEqualTo(37)
++        assertThat(error.stdout).isEqualTo("injection denied")
++        assertThat(error.stderr).isEqualTo("device diagnostic")
++        assertThat(calls).isEqualTo(1)
++    }
++
++    @Test
++    fun `missing or misplaced marker cannot confirm successful execution`() {
++        for (output in listOf("done", "MAESTRO_EXIT_deadbeef=0", "done\n%s0\nunexpected trailing output")) {
++            val device = device { command, _ -> HdcCommandResult(0, output.replace("%s", marker(command)), "") }
++            assertThrows(HarmonyOSCommandException::class.java) {
++                device.execute(listOf("uitest", "uiInput", "keyEvent", "Back"), TIMEOUT)
++            }
++        }
++    }
++
++    @Test
++    fun `successful remote status does not hide UITest failure output`() {
++        val device = device { command, _ ->
++            HdcCommandResult(0, "ScreenCap failed: permission denied\n${marker(command)}0\n", "")
++        }
++        val error = assertThrows(HarmonyOSCommandException::class.java) {
++            device.execute(listOf("uitest", "screenCap", "-p", "/data/local/tmp/example.png"), TIMEOUT)
++        }
++        assertThat(error.message).contains("permission denied")
++    }
++
++    @Test
++    fun `UITest API errors are detected when both host and device exits are zero`() {
++        for (output in listOf("Initialization failed.", "This operation is not supported.", "", "No Error\nUnexpected diagnostic")) {
++            var calls = 0
++            val device = device { command, _ ->
++                calls++
++                HdcCommandResult(0, "$output\n${marker(command)}0\n", "")
++            }
++            val error = assertThrows(HarmonyOSCommandException::class.java) {
++                device.execute(listOf("uitest", "uiInput", "text", "hello"), TIMEOUT)
++            }
++            assertThat(error.stdout).isEqualTo(output)
++            assertThat(error.remoteExitCode).isEqualTo(0)
++            assertThat(calls).isEqualTo(1)
++        }
++    }
++
++    @Test
++    fun `UITest successful input must provide the official success message without diagnostics`() {
++        val success = device { command, _ -> HdcCommandResult(0, "No Error\r\n${marker(command)}0\r\n", "") }
++        assertThat(success.execute(listOf("uitest", "uiInput", "keyEvent", "Back"), TIMEOUT)).isEqualTo("No Error")
++        val diagnostic = device { command, _ -> HdcCommandResult(0, "No Error\n${marker(command)}0\n", "unexpected device diagnostic") }
++        assertThrows(HarmonyOSCommandException::class.java) {
++            diagnostic.execute(listOf("uitest", "uiInput", "keyEvent", "Back"), TIMEOUT)
++        }
++    }
++
++    @Test
++    fun `capture uses fresh path and cleans up both remote and local scratch`() {
++        val runner = ScreenshotRunner()
++        val device = device(runner)
++        assertThat(device.screenshot(TIMEOUT)).isEqualTo(byteArrayOf(1, 2, 3))
++        assertThat(runner.captures).isEqualTo(1)
++        assertThat(runner.cleanupCalls).isEqualTo(1)
++        assertThat(Files.exists(runner.localPath!!)).isFalse()
++        assertThat(Files.exists(runner.localPath!!.parent)).isFalse()
++        assertThat(runner.timeouts).hasSize(3)
++        assertThat(runner.timeouts.first().toMillis()).isGreaterThan(TIMEOUT.toMillis() * 2 / 3)
++        assertThat(runner.timeouts.all { it <= TIMEOUT && !it.isZero && !it.isNegative }).isTrue()
++        assertThat(runner.timeouts[1] <= runner.timeouts[0]).isTrue()
++        assertThat(runner.timeouts[2].toMillis()).isEqualTo(2000L)
++    }
++
++    @Test
++    fun `transfer failure is not replaced by cleanup failure`() {
++        val runner = ScreenshotRunner().apply { transferFailure = HdcException("transfer interrupted"); cleanupFailure = true }
++        val error = assertThrows(HdcException::class.java) { device(runner).screenshot(TIMEOUT) }
++        assertThat(error).isSameInstanceAs(runner.transferFailure)
++        assertThat(error.suppressed).hasLength(1)
++        assertThat(error.suppressed[0].message).contains("exit 9")
++        assertThat(runner.cleanupCalls).isEqualTo(1)
++        assertThat(Files.exists(runner.localPath!!.parent)).isFalse()
++    }
++
++    @Test
++    fun `successful transfer without creating file fails instead of returning stale screenshot`() {
++        val runner = ScreenshotRunner().apply { createFile = false }
++        val error = assertThrows(HdcException::class.java) { device(runner).screenshot(TIMEOUT) }
++        assertThat(error.message).contains("did not create")
++        assertThat(runner.cleanupCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `cleanup interruption preserves cancellation`() {
++        val runner = ScreenshotRunner().apply { interruptCleanup = true }
++        try {
++            assertThrows(InterruptedException::class.java) { device(runner).screenshot(TIMEOUT) }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(Files.exists(runner.localPath!!.parent)).isFalse()
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    private class ScreenshotRunner : HdcCommandRunner {
++        var captures = 0
++        var cleanupCalls = 0
++        var localPath: Path? = null
++        var transferFailure: Throwable? = null
++        var cleanupFailure = false
++        var interruptCleanup = false
++        var createFile = true
++        val timeouts = mutableListOf<Duration>()
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            timeouts += timeout
++            if (command.getOrNull(3) == "file") {
++                localPath = Path.of(command.last())
++                assertThat(Files.exists(localPath!!)).isFalse()
++                transferFailure?.let { throw it }
++                if (createFile) Files.write(localPath!!, byteArrayOf(1, 2, 3))
++                return HdcCommandResult(0, "FileTransfer finish", "")
++            }
++            if ("screenCap" in command.last()) captures++ else {
++                cleanupCalls++
++                if (interruptCleanup) throw InterruptedException("cleanup interrupted")
++                if (cleanupFailure) return HdcCommandResult(0, "${marker(command)}9\n", "")
++            }
++            return HdcCommandResult(0, "${marker(command)}0\n", "")
++        }
++    }
++
++    companion object {
++        private val TIMEOUT = Duration.ofSeconds(3)
++        private fun marker(command: List<String>): String = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(command.last())!!.value
++        private fun device(runner: HdcCommandRunner) = HdcHarmonyOSDevice("TEST-DEVICE", HdcClient("hdc", runner))
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
@@ -1028,10 +2881,10 @@ index 0000000..e8bdd2d
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt
 new file mode 100644
-index 0000000..b63d848
+index 0000000..503a66d
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,258 @@
 +package maestro.harmonyos.layout
 +
 +import com.google.common.truth.Truth.assertThat
@@ -1039,6 +2892,7 @@ index 0000000..b63d848
 +import maestro.harmonyos.hdc.HdcCommandException
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcTimeoutException
 +import org.junit.jupiter.api.Assertions.assertThrows
 +import org.junit.jupiter.api.Test
 +import java.nio.file.Files
@@ -1046,6 +2900,36 @@ index 0000000..b63d848
 +import java.time.Duration
 +
 +class HierarchyReaderTest {
++    @Test
++    fun `dump and transfer share the remaining budget instead of equal time slices`() {
++        val runner = LayoutRunner()
++        val delayed = HdcCommandRunner { command, timeout ->
++            if (command.last().startsWith("'uitest' 'dumpLayout'")) Thread.sleep(20)
++            runner.run(command, timeout)
++        }
++        HierarchyReader(HdcClient("hdc", delayed), "USB-TEST", totalTimeout = Duration.ofSeconds(10)).read()
++        assertThat(runner.calls.first().timeout.toMillis()).isGreaterThan(5000)
++        assertThat(runner.calls[1].timeout).isLessThan(runner.calls.first().timeout)
++        assertThat(runner.calls.last().timeout).isEqualTo(Duration.ofSeconds(2))
++        assertRemoved(runner)
++    }
++
++    @Test
++    fun `exhausted total read budget still allows bounded remote cleanup`() {
++        val runner = LayoutRunner()
++        val delayed = HdcCommandRunner { command, timeout ->
++            if (command.last().startsWith("'uitest' 'dumpLayout'")) Thread.sleep(timeout.toMillis() + 10)
++            runner.run(command, timeout)
++        }
++        assertThrows(HdcTimeoutException::class.java) {
++            HierarchyReader(HdcClient("hdc", delayed), "USB-TEST", totalTimeout = Duration.ofMillis(200)).read()
++        }
++        assertThat(runner.calls).hasSize(2)
++        assertThat(runner.localPaths).isEmpty()
++        assertThat(runner.calls.last().command.last()).startsWith("'rm' '-f'")
++        assertThat(runner.calls.last().timeout).isEqualTo(Duration.ofSeconds(2))
++    }
++
 +    @Test
 +    fun `reads fresh layout with target bound to dump transfer and cleanup`() {
 +        val runner = LayoutRunner()
@@ -1555,3 +3439,541 @@ index 0000000..d2de2c5
 +    }
 +  ]
 +}
+diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
+index c388689..2f9d73a 100644
+--- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
++++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
+@@ -36,6 +36,7 @@ import maestro.Maestro
+ import maestro.DeviceConnectionException
+ import maestro.MaestroException
+ import maestro.device.AppCrashReport
++import maestro.device.Platform
+ import maestro.Point
+ import maestro.ScreenRecording
+ import maestro.UiElement
+@@ -1337,9 +1338,12 @@ class Orchestra(
+             maestro.clearAppState(command.appId)
+         }
+ 
+-        // For testing convenience, default to allow all on app launch
+-        val permissions = command.permissions ?: mapOf("all" to "allow")
+-        maestro.setPermissions(command.appId, permissions)
++        // HarmonyOS uses the app's current grants; there is no equivalent of grant-all.
++        // Explicit permission commands must still reach the driver and fail if unsupported.
++        if (command.permissions != null || maestro.cachedDeviceInfo.platform != Platform.HARMONYOS) {
++            val permissions = command.permissions ?: mapOf("all" to "allow")
++            maestro.setPermissions(command.appId, permissions)
++        }
+ 
+         maestro.launchApp(
+             appId = command.appId,
+diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt b/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt
+index d02ae86..7cca459 100644
+--- a/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt
++++ b/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt
+@@ -86,6 +86,7 @@ class AppValidator(
+             }
+             Platform.ANDROID -> return
+             Platform.WEB -> return
++            Platform.HARMONYOS -> throw AppValidationException.UnsupportedPlatform("HarmonyOS package installation")
+         }
+     }
+ }
+diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
+new file mode 100644
+index 0000000..cacb1e9
+--- /dev/null
++++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
+@@ -0,0 +1,167 @@
++package maestro.harmonyos
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.runBlocking
++import maestro.Maestro
++import maestro.MaestroException
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSCommandException
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.hdc.HdcClient
++import maestro.orchestra.MaestroCommand
++import maestro.orchestra.Orchestra
++import maestro.orchestra.util.Env.withEnv
++import maestro.orchestra.yaml.YamlCommandReader
++import maestro.utils.FileAccessScope
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import javax.imageio.ImageIO
++
++/** Real Maestro execution with a simulated HDC device, not a simulated Driver. */
++class HarmonyOSFlowIntegrationTest {
++    @Test
++    fun `standard YAML runs variables conditional subflow input assertions and screenshot`() {
++        withFlow("flow.yaml") { flow ->
++            val result = runBlocking { flow.orchestra.runFlow(flow.commands) }
++
++            assertThat(result.success).isTrue()
++            assertThat(flow.device.inputValues).containsExactly(INPUT_TEXT)
++            assertThat(flow.device.tapCount).isEqualTo(3)
++            assertThat(flow.device.launchedApps).containsExactly(APP_ID)
++            assertThat(flow.device.stoppedApps).containsExactly(APP_ID)
++            assertThat(flow.device.state).isEqualTo(SimulatedHarmonyOSDevice.State.RESULT)
++            assertThat(flow.device.remoteFiles).isEmpty()
++
++            val screenshots = Files.walk(flow.artifacts).use { paths ->
++                paths.filter { it.fileName.toString() == "flow-complete.png" }.toList()
++            }
++            assertThat(screenshots).hasSize(1)
++            val screenshot = ImageIO.read(screenshots.single().toFile())
++            assertThat(screenshot.width).isEqualTo(SimulatedHarmonyOSDevice.WIDTH)
++            assertThat(screenshot.height).isEqualTo(SimulatedHarmonyOSDevice.HEIGHT)
++            val manifest = ObjectMapper().readTree(flow.artifacts.resolve("manifest.json").toFile())
++            // The manifest registers takeScreenshot as a collection, with one entry per folder.
++            val screenshotEntries = manifest["entries"].filter { it["kind"].asText() == "TAKE_SCREENSHOT" }
++            assertThat(screenshotEntries).hasSize(1)
++            val screenshotEntry = screenshotEntries.single()
++            assertThat(screenshotEntry["count"].asInt()).isEqualTo(1)
++            assertThat(flow.artifacts.resolve(screenshotEntry["relativePath"].asText()).normalize())
++                .isEqualTo(screenshots.single().parent)
++            val workspaceFiles = Files.walk(flow.workspace).use { paths ->
++                paths.filter { Files.isRegularFile(it) }.map { it.fileName.toString() }.toList()
++            }
++            assertThat(workspaceFiles).containsExactlyElementsIn(RESOURCES)
++        }
++    }
++
++    @Test
++    fun `a failed YAML assertion stops later device actions`() {
++        withFlow("assertion-failure.yaml") { flow ->
++            assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(flow.device.tapCount).isEqualTo(0)
++            assertThat(flow.device.inputValues).isEmpty()
++            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `a nonzero device command status fails the flow even when host HDC exits zero`() {
++        withFlow("remote-failure.yaml", SimulatedHarmonyOSDevice(rejectTap = true)) { flow ->
++            val failure = assertThrows<HarmonyOSCommandException> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(failure.remoteExitCode).isEqualTo(37)
++            assertThat(flow.device.tapCount).isEqualTo(1)
++            assertThat(flow.device.state).isEqualTo(SimulatedHarmonyOSDevice.State.HOME)
++            assertThat(flow.device.inputValues).isEmpty()
++            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `a failed UITest response stops the flow even when both exit codes are zero`() {
++        withFlow("remote-failure.yaml", SimulatedHarmonyOSDevice(tapFailureOutput = "Initialization failed.")) { flow ->
++            val failure = assertThrows<HarmonyOSCommandException> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(failure.stdout).contains("Initialization failed.")
++            assertThat(flow.device.tapCount).isEqualTo(1)
++            assertThat(flow.device.state).isEqualTo(SimulatedHarmonyOSDevice.State.HOME)
++            assertThat(flow.device.inputValues).isEmpty()
++            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `an unsupported YAML operation fails instead of reporting success`() {
++        withFlow("unsupported.yaml") { flow ->
++            assertThrows<UnsupportedOperationException> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(flow.device.tapCount).isEqualTo(0)
++            assertThat(flow.device.inputValues).isEmpty()
++        }
++    }
++
++    private fun withFlow(
++        filename: String,
++        device: SimulatedHarmonyOSDevice = SimulatedHarmonyOSDevice(),
++        block: (FlowFixture) -> Unit,
++    ) {
++        TempFileHandler().use { temporary ->
++            val root = temporary.createTempDirectory("harmonyos-flow-").toPath()
++            val workspace = Files.createDirectory(root.resolve("workspace"))
++            val artifacts = Files.createDirectory(root.resolve("artifacts"))
++            RESOURCES.forEach { resource ->
++                checkNotNull(javaClass.getResourceAsStream("/harmonyos/$resource")).use { input ->
++                    Files.copy(input, workspace.resolve(resource))
++                }
++            }
++            val scope = FileAccessScope.under(workspace)
++            val commands = YamlCommandReader.readCommands(workspace.resolve(filename), scope)
++                .withEnv(mapOf("APP_ID" to APP_ID, "INPUT_TEXT" to INPUT_TEXT))
++            val driver = HarmonyOSDriver(
++                deviceId = SimulatedHarmonyOSDevice.DEVICE_ID,
++                hdc = HdcClient(executablePath = "simulated-hdc", runner = device),
++                config = HarmonyOSDriverConfig(
++                    abilityName = "EntryAbility",
++                    commandTimeout = Duration.ofSeconds(2),
++                    settleTimeout = Duration.ofMillis(250),
++                    pollInterval = Duration.ofMillis(1),
++                ),
++            )
++            driver.open()
++            Maestro(driver).use { maestro ->
++                val orchestra = Orchestra(
++                    maestro = maestro,
++                    artifactsDir = artifacts,
++                    lookupTimeoutMs = 0L,
++                    optionalLookupTimeoutMs = 0L,
++                    scope = scope,
++                )
++                block(FlowFixture(device, commands, orchestra, workspace, artifacts))
++            }
++        }
++    }
++
++    private data class FlowFixture(
++        val device: SimulatedHarmonyOSDevice,
++        val commands: List<MaestroCommand>,
++        val orchestra: Orchestra,
++        val workspace: Path,
++        val artifacts: Path,
++    )
++
++    private companion object {
++        const val APP_ID = "org.example.harmonyos.flowfixture"
++        const val INPUT_TEXT = "熊猫 O'Reilly \"测试\""
++        val RESOURCES = listOf("flow.yaml", "enter-name.yaml", "assertion-failure.yaml", "remote-failure.yaml", "unsupported.yaml")
++    }
++}
+diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
+new file mode 100644
+index 0000000..d58af5f
+--- /dev/null
++++ b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
+@@ -0,0 +1,217 @@
++package maestro.harmonyos
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import java.awt.Color
++import java.awt.image.BufferedImage
++import java.io.ByteArrayOutputStream
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import javax.imageio.ImageIO
++
++/** In-process HDC protocol fixture. It does not launch a shell or represent a real phone. */
++internal class SimulatedHarmonyOSDevice(
++    private val rejectTap: Boolean = false,
++    private val tapFailureOutput: String? = null,
++) : HdcCommandRunner {
++    enum class State { HOME, FORM, RESULT }
++
++    var state = State.HOME
++        private set
++    var tapCount = 0
++        private set
++    val inputValues = mutableListOf<String>()
++    val launchedApps = mutableListOf<String>()
++    val stoppedApps = mutableListOf<String>()
++    val remoteFiles = mutableMapOf<String, ByteArray>()
++
++    private var inputFocused = false
++    private var enteredName = ""
++    private val mapper = ObjectMapper()
++
++    @Synchronized
++    override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++        require(!timeout.isNegative && !timeout.isZero)
++        if (command.drop(1) == listOf("list", "targets")) return hostSuccess("$DEVICE_ID\n")
++        check(command.size >= 5 && command[1] == "-t" && command[2] == DEVICE_ID) {
++            "Unexpected HDC invocation: $command"
++        }
++        return when (command[3]) {
++            "file" -> {
++                check(command.size == 7 && command[4] == "recv") { "Unexpected file transfer: $command" }
++                val bytes = checkNotNull(remoteFiles[command[5]]) { "Remote file does not exist: ${command[5]}" }
++                Files.write(Path.of(command[6]), bytes)
++                hostSuccess("FileTransfer finish\n")
++            }
++            "shell" -> {
++                check(command.size == 5)
++                val arguments = decodeQuotedArguments(command[4])
++                if (arguments.take(2) == listOf("sh", "-c")) {
++                    check(arguments.size == 3)
++                    val script = arguments[2]
++                    val boundary = script.lastIndexOf("; __maestro_status=")
++                    check(boundary >= 0) { "Missing device exit-status wrapper" }
++                    val marker = checkNotNull(Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script.substring(boundary))).value
++                    val result = execute(decodeQuotedArguments(script.substring(0, boundary)))
++                    // HDC can report host success even when the command on the device failed.
++                    hostSuccess("${result.stdout}\n$marker${result.exitCode}\n")
++                } else {
++                    execute(arguments)
++                }
++            }
++            else -> error("Unexpected HDC invocation: $command")
++        }
++    }
++
++    private fun execute(arguments: List<String>): HdcCommandResult = when {
++        arguments.take(2) == listOf("aa", "force-stop") -> {
++            check(arguments.size == 3)
++            stoppedApps += arguments[2]
++            state = State.HOME
++            inputFocused = false
++            enteredName = ""
++            hostSuccess("force stop process successfully.\n")
++        }
++        arguments.take(2) == listOf("aa", "start") -> {
++            check(arguments.size == 6 && arguments[2] == "-b" && arguments[4] == "-a")
++            check(arguments[5] == "EntryAbility")
++            launchedApps += arguments[3]
++            state = State.HOME
++            hostSuccess("start ability successfully.\n")
++        }
++        arguments.take(3) == listOf("uitest", "dumpLayout", "-p") -> {
++            check(arguments.size == 4)
++            remoteFiles[arguments[3]] = mapper.writeValueAsBytes(layout())
++            hostSuccess("Dump layout saved\n")
++        }
++        arguments.take(3) == listOf("uitest", "screenCap", "-p") -> {
++            check(arguments.size == 4)
++            remoteFiles[arguments[3]] = screenshot()
++            hostSuccess("Screen capture saved\n")
++        }
++        arguments.take(3) == listOf("uitest", "uiInput", "click") -> {
++            check(arguments.size == 5)
++            tap(arguments[3].toInt(), arguments[4].toInt())
++        }
++        arguments.take(3) == listOf("uitest", "uiInput", "text") -> {
++            check(arguments.size == 4 && state == State.FORM && inputFocused) {
++                "Text input requires the form's input field to be focused"
++            }
++            inputValues += arguments[3]
++            enteredName += arguments[3]
++            hostSuccess("No Error")
++        }
++        arguments.take(2) == listOf("rm", "-f") -> {
++            check(arguments.size == 3)
++            remoteFiles.remove(arguments[2])
++            hostSuccess()
++        }
++        else -> error("Unexpected device command: $arguments")
++    }
++
++    private fun tap(x: Int, y: Int): HdcCommandResult {
++        tapCount++
++        if (rejectTap) return HdcCommandResult(37, "tap rejected by simulated device", "")
++        tapFailureOutput?.let { return hostSuccess(it) }
++        when {
++            state == State.HOME && x in 40..359 && y in 120..199 -> state = State.FORM
++            state == State.FORM && x in 40..359 && y in 120..199 -> inputFocused = true
++            state == State.FORM && x in 40..359 && y in 300..379 -> {
++                check(enteredName.isNotEmpty())
++                state = State.RESULT
++            }
++            else -> error("Unexpected tap at ($x, $y) on $state")
++        }
++        return hostSuccess("No Error")
++    }
++
++    private fun layout(): Map<String, Any> {
++        val children = when (state) {
++            State.HOME -> listOf(
++                node(text = "欢迎", bounds = "[40,40][360,100]"),
++                node(id = "open-form", text = "填写表单", bounds = "[40,120][360,200]", clickable = true),
++            )
++            State.FORM -> listOf(
++                node(text = "姓名", bounds = "[40,40][360,100]"),
++                node(id = "name-input", text = enteredName, bounds = "[40,120][360,200]", clickable = true, focused = inputFocused),
++                node(id = "submit", text = "提交", bounds = "[40,300][360,380]", clickable = true),
++            )
++            State.RESULT -> listOf(
++                node(text = "已提交", bounds = "[40,40][360,100]"),
++                node(text = enteredName, bounds = "[40,120][360,200]"),
++            )
++        }
++        return node(bounds = "[0,0][$WIDTH,$HEIGHT]", children = children)
++    }
++
++    private fun node(
++        id: String = "",
++        text: String = "",
++        bounds: String,
++        clickable: Boolean = false,
++        focused: Boolean = false,
++        children: List<Map<String, Any>> = emptyList(),
++    ): Map<String, Any> = mapOf(
++        "attributes" to mapOf(
++            "id" to id,
++            "text" to text,
++            "type" to if (clickable) "Button" else "Text",
++            "bounds" to bounds,
++            "clickable" to clickable.toString(),
++            "focused" to focused.toString(),
++            "enabled" to "true",
++            "visible" to "true",
++        ),
++        "children" to children,
++    )
++
++    private fun screenshot(): ByteArray {
++        val image = BufferedImage(WIDTH, HEIGHT, BufferedImage.TYPE_INT_RGB)
++        val graphics = image.createGraphics()
++        try {
++            graphics.color = when (state) {
++                State.HOME -> Color.WHITE
++                State.FORM -> if (inputFocused) Color.LIGHT_GRAY else Color.GRAY
++                State.RESULT -> Color.GREEN
++            }
++            graphics.fillRect(0, 0, WIDTH, HEIGHT)
++        } finally {
++            graphics.dispose()
++        }
++        return ByteArrayOutputStream().use { output ->
++            check(ImageIO.write(image, "png", output))
++            output.toByteArray()
++        }
++    }
++
++    /** Decodes only the quoted argument form emitted by HdcClient; never evaluates shell syntax. */
++    private fun decodeQuotedArguments(command: String): List<String> {
++        val arguments = mutableListOf<String>()
++        var position = 0
++        while (position < command.length) {
++            while (position < command.length && command[position].isWhitespace()) position++
++            if (position == command.length) break
++            val argument = StringBuilder()
++            while (position < command.length && !command[position].isWhitespace()) {
++                val quote = command[position++]
++                check(quote == '\'' || quote == '"') { "Expected a quoted argument: $command" }
++                val end = command.indexOf(quote, position)
++                check(end >= 0) { "Unterminated argument: $command" }
++                argument.append(command, position, end)
++                position = end + 1
++            }
++            arguments += argument.toString()
++        }
++        return arguments
++    }
++
++    private fun hostSuccess(stdout: String = "") = HdcCommandResult(0, stdout, "")
++
++    companion object {
++        const val DEVICE_ID = "simulated-harmonyos-device"
++        const val WIDTH = 400
++        const val HEIGHT = 800
++    }
++}
+diff --git a/maestro-test/src/test/resources/harmonyos/README.md b/maestro-test/src/test/resources/harmonyos/README.md
+new file mode 100644
+index 0000000..f5fcc88
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/README.md
+@@ -0,0 +1,14 @@
++# HarmonyOS Flow integration fixtures
++
++These are synthetic scenarios for the host test suite. `HarmonyOSFlowIntegrationTest`
++runs the real YAML reader, Orchestra, Maestro, HarmonyOSDriver and HdcClient. Only
++the HDC transport is replaced by a stateful in-process device fixture.
++
++The fixture returns UITest-shaped layouts and PNG files, records actions, and can
++return a nonzero device command status while the host HDC exit code is zero. It
++can also return a UITest failure message with both exit codes set to zero. The
++tests cover Flow variables, conditional sub-Flows, id/text selection, Unicode and
++quotes in text input, screenshot artifacts, and failure propagation.
++
++These results do not demonstrate device permissions, native input behavior,
++screenshots or application compatibility on a physical HarmonyOS device.
+diff --git a/maestro-test/src/test/resources/harmonyos/assertion-failure.yaml b/maestro-test/src/test/resources/harmonyos/assertion-failure.yaml
+new file mode 100644
+index 0000000..e0ca3b9
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/assertion-failure.yaml
+@@ -0,0 +1,6 @@
++appId: ${APP_ID}
++---
++- launchApp
++- assertVisible: never-present
++- tapOn:
++    id: open-form
+diff --git a/maestro-test/src/test/resources/harmonyos/enter-name.yaml b/maestro-test/src/test/resources/harmonyos/enter-name.yaml
+new file mode 100644
+index 0000000..b5050e8
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/enter-name.yaml
+@@ -0,0 +1,7 @@
++appId: ${APP_ID}
++---
++- tapOn:
++    id: name-input
++    retryTapIfNoChange: false
++- inputText: ${NAME}
++- assertVisible: ${NAME}
+diff --git a/maestro-test/src/test/resources/harmonyos/flow.yaml b/maestro-test/src/test/resources/harmonyos/flow.yaml
+new file mode 100644
+index 0000000..63f3b9f
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/flow.yaml
+@@ -0,0 +1,26 @@
++# Synthetic device scenario. It is not evidence from a HarmonyOS phone.
++appId: ${APP_ID}
++---
++- launchApp
++- assertVisible: 欢迎
++- tapOn:
++    id: open-form
++    retryTapIfNoChange: false
++- assertVisible: 姓名
++- runFlow:
++    when:
++      visible: 姓名
++    file: enter-name.yaml
++    env:
++      NAME: ${INPUT_TEXT}
++- runFlow:
++    when:
++      visible: 不存在的页面
++    commands:
++      - inputText: should-not-run
++- tapOn:
++    text: 提交
++    retryTapIfNoChange: false
++- assertVisible: 已提交
++- assertVisible: ${INPUT_TEXT}
++- takeScreenshot: flow-complete
+diff --git a/maestro-test/src/test/resources/harmonyos/remote-failure.yaml b/maestro-test/src/test/resources/harmonyos/remote-failure.yaml
+new file mode 100644
+index 0000000..b8790d2
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/remote-failure.yaml
+@@ -0,0 +1,7 @@
++appId: ${APP_ID}
++---
++- launchApp
++- tapOn:
++    id: open-form
++    retryTapIfNoChange: false
++- inputText: must-not-run
+diff --git a/maestro-test/src/test/resources/harmonyos/unsupported.yaml b/maestro-test/src/test/resources/harmonyos/unsupported.yaml
+new file mode 100644
+index 0000000..60d3752
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/unsupported.yaml
+@@ -0,0 +1,6 @@
++appId: ${APP_ID}
++---
++- launchApp
++- startRecording: unsupported-recording
++- tapOn:
++    id: open-form

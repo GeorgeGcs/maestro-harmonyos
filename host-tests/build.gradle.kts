@@ -9,12 +9,14 @@ kotlin {
             kotlin.srcDir("../.upstream/maestro/maestro-client/src/main/java")
             kotlin.srcDir("../.upstream/maestro/maestro-utils/src/main/kotlin")
             kotlin.include("maestro/harmonyos/**", "maestro/TreeNode.kt", "TempFileHandler.kt")
+            kotlin.exclude("maestro/harmonyos/driver/**")
         }
         test {
             kotlin.srcDir("../.upstream/maestro/maestro-client/src/test/kotlin")
             kotlin.include("maestro/harmonyos/**")
             // These checks depend on the complete Maestro SDK and run with -FullUpstream.
             kotlin.exclude("maestro/harmonyos/layout/UitestMaestroSelectorTest.kt")
+            kotlin.exclude("maestro/harmonyos/driver/**")
         }
     }
 }

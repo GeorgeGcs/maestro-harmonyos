@@ -2,7 +2,7 @@
 
 为 Maestro 增加 HarmonyOS 原生 UI 自动化测试能力，参与「课题 11：YAML 声明式 UI 测试框架 Maestro 支持鸿蒙」。
 
-**当前进度：已完成首批主机模块，包括 HDC 调用、设备选择、布局读取与转换。完整鸿蒙驱动尚未接入 Maestro CLI，录屏和 VSCode 扩展尚未实现。**
+**当前进度：已接入 `HarmonyOSDriver` 和 CLI 会话，支持通过 `--platform harmonyos` 执行标准 YAML Flow。已实现启动、布局定位、点击、输入、返回、滑动和截图；真机验证结果单独记录，录屏和 VSCode 扩展尚未实现。**
 
 ## 目标
 
@@ -26,15 +26,15 @@
 ```text
 docs/                   技术方案、里程碑、验收与进展
 scripts/                环境检查、固定版本上游获取
-patches/maestro/         主机端适配代码和测试补丁
+patches/maestro/         驱动、CLI 和测试补丁
 host-tests/              不依赖设备的编译和测试入口
 packages/vscode/        后续 VSCode 扩展
-examples/flows/          标准 YAML 流程设计示例
+examples/flows/          参数化的标准 YAML 示例
 upstream.lock.json      上游来源与固定提交
 .upstream/maestro/      本地上游工作副本（不提交）
 ```
 
-本仓采用固定上游与补丁的方式维护适配代码。当前补丁在上游 `maestro-client` 中增加主机端模块和测试，后续再接入 Driver、平台识别和 CLI 会话。
+本仓采用固定上游与补丁的方式维护适配代码，复用上游的 YAML 解析、Orchestra 执行和报告机制。鸿蒙驱动通过 HDC 调用设备上的 UITest，不需要另写一套 Flow 语法。
 
 ## 开始开发
 
@@ -48,7 +48,11 @@ if (Test-Path ./config.local.ps1) { . ./config.local.ps1 }
 ./scripts/test-host.ps1
 ```
 
-测试入口会检查并应用补丁，首次运行需要下载 Gradle 和依赖。它编译同一份适配源码并运行主机测试，不操作手机。具体范围与设备查询方法见[主机测试说明](host-tests/README.md)。当前还不能执行鸿蒙 YAML Flow，示例需在驱动接入后验证。
+测试入口会检查并应用补丁，首次运行需要下载 Gradle 和依赖。默认测试不操作手机；完整驱动、YAML 集成和 CLI 会话的测试命令见[主机测试说明](host-tests/README.md)。
+
+构建 CLI 后，可运行 [input-smoke.yaml](examples/flows/input-smoke.yaml)：启动示例应用，按提示文字找到输入框，输入并断言，返回后截图。需提供应用包名、启动 Ability 和页面文字，具体命令见[环境与使用说明](docs/setup.md)。另保留 [smoke.yaml](examples/flows/smoke.yaml)，用于按控件 ID 点击并检查结果。
+
+当前仅支持连接到本机 HDC 的单台设备。HAP 安装、权限修改、清除应用数据、录屏、Studio/MCP 和多设备分片尚未支持。主机测试中的布局与设备响应为模拟数据，不能替代不同系统版本上的真机验证。
 
 ## 活动交付
 

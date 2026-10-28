@@ -2,3 +2,5 @@
 *.png binary
 *.jpg binary
 *.zip binary
+# Unified diff context uses a single space for an unchanged empty line.
+*.patch whitespace=-blank-at-eol

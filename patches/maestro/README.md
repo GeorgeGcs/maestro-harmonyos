@@ -1,6 +1,6 @@
 # Maestro 适配补丁
 
-上游版本由仓库根目录的 `upstream.lock.json` 固定。当前补丁为 `0001-harmonyos-host.patch`，包含鸿蒙主机端代码和测试；补丁范围以文件差异为准，不表示已经通过真机验证。
+上游版本由仓库根目录的 `upstream.lock.json` 固定。当前补丁为 `0001-harmonyos-host.patch`，包含 HDC、布局转换、HarmonyOSDriver、平台与 CLI 会话接入，以及对应的主机和 YAML 集成测试。名称沿用第一批补丁；它是针对固定提交的完整补丁，不需要先应用旧版。
 
 在仓库根目录使用 PowerShell：
 
@@ -26,3 +26,5 @@
 默认报告位于 `host-tests/build/reports/tests/test/index.html`；完整客户端报告位于 `.upstream/maestro/maestro-client/build/reports/tests/test/index.html`。
 
 更新补丁时将未跟踪的新源码和测试一并导出，保留上游版权声明。在干净的固定版本检出中检查回放，再记录构建与测试结果。
+
+Windows 检出可能使用 CRLF。导出时应让 Git 按仓库规则归一化换行，检查差异没有把未改动的整份文件重写。只导出适配源码、测试和样本，不包含 npm 锁文件、下载资源或生成的二进制文件。CLI 运行步骤和当前限制见[开发环境说明](../../docs/setup.md)。

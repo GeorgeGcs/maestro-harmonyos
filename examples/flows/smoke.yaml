@@ -1,10 +1,11 @@
-# Design example only: requires the future HarmonyOS driver and a configured sample app.
-# Supply APP_ID, START_TEXT, BUTTON_ID and RESULT_TEXT for the agreed test sample.
+# 使用已安装的测试应用，传入 APP_ID、START_TEXT、BUTTON_ID、RESULT_TEXT。
+# BUTTON_ID 应指向测试页面上的本地操作，避免提交实际业务数据。
 appId: ${APP_ID}
 ---
 - launchApp
 - assertVisible: ${START_TEXT}
 - tapOn:
     id: ${BUTTON_ID}
+    retryTapIfNoChange: false
 - assertVisible: ${RESULT_TEXT}
-- takeScreenshot: artifacts/smoke
+- takeScreenshot: smoke

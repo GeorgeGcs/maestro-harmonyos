@@ -1,0 +1,14 @@
+# 输入框应为空，页面返回后仍显示 START_TEXT；不点击登录或提交按钮。
+# 传入 APP_ID、START_TEXT、INPUT_HINT、INPUT_TEXT。
+appId: ${APP_ID}
+---
+- launchApp
+- assertVisible: ${START_TEXT}
+- tapOn:
+    text: ${INPUT_HINT}
+    retryTapIfNoChange: false
+- inputText: ${INPUT_TEXT}
+- assertVisible: ${INPUT_TEXT}
+- back
+- assertVisible: ${START_TEXT}
+- takeScreenshot: input-smoke
