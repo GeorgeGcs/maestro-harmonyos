@@ -7626,10 +7626,10 @@ index 0000000..a950816
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
 new file mode 100644
-index 0000000..6aa06c9
+index 0000000..91d76e9
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,427 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
@@ -7809,18 +7809,13 @@ index 0000000..6aa06c9
 +        }
 +
 +        private fun finish(budget: Budget) {
-+            if (resource != null) {
-+                // Persistent recovery needs an observed end, not merely a readable MP4.
-+                stopIfOwned(budget)
-+                while (captureInstances(budget).isNotEmpty()) pause(budget)
-+                resource.ended()
-+            }
++            // A readable MP4 can be published while capture is still active.
++            stopIfOwned(budget)
++            while (captureInstances(budget).isNotEmpty()) pause(budget)
++            resource?.ended()
 +            var uri = query(budget)
 +            var complete = uri?.let { exportIfComplete(it, budget) } ?: false
 +            if (!complete) {
-+                // The system publishes an asset while it is still recording. Only a
-+                // finalized MP4, not URI presence alone, proves that it has finished.
-+                if (!stopSent) stopIfOwned(budget)
 +                while (!complete) {
 +                    pause(budget)
 +                    uri = query(budget)
@@ -10600,10 +10595,10 @@ index 0000000..db63669
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..faa9cce
+index 0000000..8f49821
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,914 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -10746,16 +10741,18 @@ index 0000000..faa9cce
 +    }
 +
 +    @Test
-+    fun `an already finalized file is exported without touching a replacement recorder`() {
++    fun `a readable file does not permit export when a replacement recorder owns capture`() {
 +        val device = Device()
 +        val recording = recorder(device).start(Buffer())
 +        device.finishExternally()
 +        device.recorderPids = setOf(900)
 +        device.capturePids = setOf(900)
-+        recording.close()
++        assertThat(assertThrows(HdcException::class.java) { recording.close() }.message).contains("refusing to toggle")
 +        assertThat(device.stops).isEqualTo(0)
-+        assertThat(device.deletes).containsExactly(device.uri)
++        assertThat(device.receives).isEqualTo(0)
++        assertThat(device.deletes).isEmpty()
 +        assertThat(device.recorderPids).containsExactly(900)
++        assertThat(device.capturePids).containsExactly(900)
 +    }
 +
 +    @Test
@@ -10784,12 +10781,12 @@ index 0000000..faa9cce
 +        }
 +        recording.close()
 +        assertThat(device.stops).isEqualTo(1)
-+        assertThat(device.receives).isEqualTo(2)
++        assertThat(device.receives).isEqualTo(1)
 +        assertThat(device.deletes).containsExactly(device.uri)
 +    }
 +
 +    @Test
-+    fun `an active recording with an unreadable asset is stopped once before export`() {
++    fun `an ended capture can still need another export before its media becomes readable`() {
 +        val device = Device()
 +        val sink = RecordingSink()
 +        val recording = recorder(device).start(sink)
@@ -10797,8 +10794,13 @@ index 0000000..faa9cce
 +        val unreadable = HarmonyOSCommandException(
 +            "media file is not ready", "Table Name: Photos\n[FAIL] open source media file failed.\n", "", 0,
 +        )
++        var exportAttempts = 0
 +        device.response = { args ->
-+            if (args.take(2) == listOf("mediatool", "recv") && device.stops == 0) throw unreadable
++            if (args.take(2) == listOf("mediatool", "recv")) {
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(device.capturePids).isEmpty()
++                if (++exportAttempts == 1) throw unreadable
++            }
 +            null
 +        }
 +
@@ -10911,7 +10913,7 @@ index 0000000..faa9cce
 +            val recording = recorder(device).start(Buffer())
 +            device.response = { args -> if (args.take(2) == listOf("mediatool", "query")) reply else null }
 +            assertThrows(HdcException::class.java) { recording.close() }
-+            assertThat(device.stops).isEqualTo(0)
++            assertThat(device.stops).isEqualTo(1)
 +            assertThat(device.receives).isEqualTo(0)
 +            assertThat(device.deletes).isEmpty()
 +        }
@@ -10967,6 +10969,118 @@ index 0000000..faa9cce
 +        assertThat(sink.closed).isFalse()
 +    }
 +
++    @Test fun `a short receive keeps device media and cannot authorize recovery without an archive`(): Unit = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            val directory = files.createTempDirectory("recording-short-receive").toPath()
++            val journalPath = directory.resolve("recovery-journal.json")
++            val id = UUID.randomUUID().toString()
++            val device = Device().apply {
++                sessionScratch = persistent
++                receivedVideo = video.copyOf(video.size / 2)
++            }
++            val sink = RecordingSink()
++            var marker: RecordingResourceFailure? = null
++            val journal = if (persistent) HarmonyOSRecoveryJournal.create(journalPath, id, UUID.randomUUID().toString()) else null
++            journal.use {
++                val resources = journal?.enableRecordingResources()
++                val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                    config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink)
++
++                val failure = assertThrows(HdcException::class.java) { recording.close() }
++
++                assertThat(failure.message).contains("expected file size")
++                assertThat(assertThrows(HdcException::class.java) { recording.close() }).isSameInstanceAs(failure)
++                assertThat(device.receives).isEqualTo(1)
++                assertThat(device.receivedVideo!!.size).isLessThan(device.video.size)
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(device.capturePids).isEmpty()
++                assertThat(device.deletes).isEmpty()
++                assertThat(device.wasDeleted).isFalse()
++                assertThat(sink.bytes.size).isEqualTo(0)
++                assertThat(sink.flushCalls).isEqualTo(0)
++                assertThat(sink.closed).isFalse()
++                assertThat(Files.exists(checkNotNull(device.localPath))).isFalse()
++                resources?.let {
++                    val entry = jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]
++                    assertThat(entry["captureEnded"].booleanValue()).isTrue()
++                    assertThat(entry["archiveName"].isNull).isTrue()
++                    assertThat(it.isComplete()).isFalse()
++                    marker = failure.suppressed.filterIsInstance<RecordingResourceFailure>().single()
++                }
++            }
++            if (persistent) {
++                val remote = MediaRemote(device.uri).apply { video = device.video }
++                HarmonyOSRecoveryJournal.open(journalPath).use { reopened ->
++                    val resources = checkNotNull(reopened.recordings)
++                    val issues = resources.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(3))
++                    assertThat(issues.map { it.code }).containsExactly("RECORDING_ARCHIVE_UNCONFIRMED")
++                    assertThat(resources.isComplete()).isFalse()
++                    assertThat(resources.verifyArchives()).isFalse()
++                    val failure = checkNotNull(marker)
++                    assertThat(resources.resolvesFailure(failure.recordingId, failure.fingerprint)).isFalse()
++                }
++                assertThat(remote.deleted).isEmpty()
++                assertThat(remote.commands.none { it.contains("'mediatool'") || it.contains("'aa'") || it.contains("kill") }).isTrue()
++            }
++        }
++    }
++
++    @Test fun `flush failure retains media and a complete archive permits resource recovery`(): Unit = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            val directory = files.createTempDirectory("recording-flush-failure").toPath()
++            val journalPath = directory.resolve("recovery-journal.json")
++            val id = UUID.randomUUID().toString()
++            val device = Device().apply { sessionScratch = persistent }
++            val original = IOException("output flush failed")
++            val sink = RecordingSink().apply { flushFailure = original }
++            var marker: RecordingResourceFailure? = null
++            val journal = if (persistent) HarmonyOSRecoveryJournal.create(journalPath, id, UUID.randomUUID().toString()) else null
++            journal.use {
++                val resources = journal?.enableRecordingResources()
++                val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                    config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink)
++
++                assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++                assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(device.capturePids).isEmpty()
++                assertThat(device.receives).isEqualTo(1)
++                assertThat(device.deletes).isEmpty()
++                assertThat(device.wasDeleted).isFalse()
++                assertThat(sink.bytes.snapshot().toByteArray()).isEqualTo(device.video)
++                assertThat(sink.flushCalls).isEqualTo(1)
++                assertThat(sink.flushed).isFalse()
++                assertThat(sink.closed).isFalse()
++                assertThat(Files.exists(checkNotNull(device.localPath))).isFalse()
++                resources?.let {
++                    val entry = jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]
++                    assertThat(entry["captureEnded"].booleanValue()).isTrue()
++                    assertThat(entry["uri"].asText()).isEqualTo(device.uri)
++                    assertThat(Files.readAllBytes(directory.resolve("recording-originals").resolve(entry["archiveName"].asText())))
++                        .isEqualTo(device.video)
++                    assertThat(it.verifyArchives()).isTrue()
++                    assertThat(it.isComplete()).isFalse()
++                    marker = original.suppressed.filterIsInstance<RecordingResourceFailure>().single()
++                }
++            }
++            if (persistent) {
++                val remote = MediaRemote(device.uri).apply { video = device.video }
++                HarmonyOSRecoveryJournal.open(journalPath).use { reopened ->
++                    val resources = checkNotNull(reopened.recordings)
++                    assertThat(resources.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(3))).isEmpty()
++                    assertThat(resources.isComplete()).isTrue()
++                    assertThat(resources.verifyArchives()).isTrue()
++                    val failure = checkNotNull(marker)
++                    assertThat(resources.resolvesFailure(failure.recordingId, failure.fingerprint)).isTrue()
++                }
++                assertThat(remote.deleted).containsExactly(device.uri)
++                assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
++                assertThat(sink.bytes.snapshot().toByteArray()).isEqualTo(device.video)
++                assertThat(sink.flushed).isFalse()
++            }
++        }
++    }
++
 +    @Test
 +    fun `delete must explicitly confirm success after a valid export`() {
 +        val device = Device()
@@ -11013,6 +11127,133 @@ index 0000000..faa9cce
 +
 +    private fun recorder(device: Device, config: HarmonyOSDriverConfig = config(), id: String = UUID.randomUUID().toString()) =
 +        HarmonyOSSystemScreenRecorder(id, device, device::receive, config)
++
++    @Test fun `readable active media waits for confirmed capture end with or without a journal`() = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            val directory = files.createTempDirectory("recording-active-container").toPath()
++            val id = UUID.randomUUID().toString()
++            val journal = if (persistent) HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()) else null
++            journal.use {
++                val resources = journal?.enableRecordingResources()
++                val device = Device().apply { sessionScratch = persistent }
++                val sink = RecordingSink()
++                val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                    config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink)
++                device.finished = true // The URI and a structurally valid file exist while capture remains active.
++                var endChecks = 0
++                device.response = { arguments ->
++                    when {
++                        arguments.first() == "aa" -> {
++                            device.stops++
++                            assertThat(sink.bytes.size).isEqualTo(0)
++                            "start ability successfully.\n" // Acknowledgement alone does not end capture.
++                        }
++                        arguments.first() == "hidumper" && device.stops > 0 -> {
++                            if (++endChecks == 3) device.finishExternally()
++                            null
++                        }
++                        arguments.take(2) == listOf("mediatool", "recv") -> {
++                            assertThat(endChecks).isEqualTo(3)
++                            assertThat(device.capturePids).isEmpty()
++                            resources?.let {
++                                assertThat(jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]["captureEnded"].booleanValue()).isTrue()
++                            }
++                            null
++                        }
++                        else -> null
++                    }
++                }
++
++                recording.close()
++                recording.close()
++
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(endChecks).isEqualTo(3)
++                assertThat(device.receives).isEqualTo(1)
++                assertThat(device.deletes).containsExactly(device.uri)
++                assertThat(sink.bytes.readByteArray()).isEqualTo(device.video)
++                assertThat(sink.flushed).isTrue()
++                resources?.let { assertThat(it.isComplete()).isTrue(); assertThat(it.verifyArchives()).isTrue() }
++            }
++        }
++    }
++
++    @Test fun `readable media is retained when capture outlives the stop budget with or without a journal`() = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            val directory = files.createTempDirectory("recording-capture-timeout").toPath()
++            val id = UUID.randomUUID().toString()
++            val journal = if (persistent) HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()) else null
++            journal.use {
++                val resources = journal?.enableRecordingResources()
++                val device = Device().apply { sessionScratch = persistent }
++                val sink = RecordingSink()
++                val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                    config().copy(recordingStopTimeout = Duration.ofMillis(500)), journal).start(sink)
++                device.finished = true
++                device.response = { arguments ->
++                    if (arguments.first() == "aa") {
++                        device.stops++
++                        "start ability successfully.\n"
++                    } else null
++                }
++
++                val failure = assertThrows(HdcTimeoutException::class.java) { recording.close() }
++                assertThat(assertThrows(HdcTimeoutException::class.java) { recording.close() }).isSameInstanceAs(failure)
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(device.capturePids).containsExactly(51)
++                assertThat(device.commands.none { it.take(2) == listOf("mediatool", "recv") }).isTrue()
++                assertThat(device.receives).isEqualTo(0)
++                assertThat(device.deletes).isEmpty()
++                assertThat(sink.bytes.size).isEqualTo(0)
++                assertThat(sink.flushed).isFalse()
++                resources?.let {
++                    val entry = jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]
++                    assertThat(entry["stopRequested"].booleanValue()).isTrue()
++                    assertThat(entry["captureEnded"].booleanValue()).isFalse()
++                    assertThat(it.isComplete()).isFalse()
++                }
++            }
++        }
++    }
++
++    @Test fun `a stop that executes before losing its reply is not retried or accepted with or without a journal`() = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            val directory = files.createTempDirectory("recording-lost-stop-reply").toPath()
++            val id = UUID.randomUUID().toString()
++            val journal = if (persistent) HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()) else null
++            journal.use {
++                val resources = journal?.enableRecordingResources()
++                val device = Device().apply { sessionScratch = persistent }
++                val sink = RecordingSink()
++                val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                    config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink)
++                val original = HdcException("stop executed but reply lost")
++                device.response = { arguments ->
++                    if (arguments.first() == "aa") {
++                        device.stops++
++                        device.finishExternally()
++                        throw original
++                    }
++                    null
++                }
++
++                assertThat(assertThrows(HdcException::class.java) { recording.close() }).isSameInstanceAs(original)
++                assertThat(assertThrows(HdcException::class.java) { recording.close() }).isSameInstanceAs(original)
++                assertThat(device.stops).isEqualTo(1)
++                assertThat(device.commands.count { it.first() == "aa" }).isEqualTo(2)
++                assertThat(device.capturePids).isEmpty()
++                assertThat(device.receives).isEqualTo(0)
++                assertThat(device.deletes).isEmpty()
++                assertThat(sink.bytes.size).isEqualTo(0)
++                resources?.let {
++                    val entry = jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]
++                    assertThat(entry["stopRequested"].booleanValue()).isTrue()
++                    assertThat(entry["captureEnded"].booleanValue()).isFalse()
++                    assertThat(it.isComplete()).isFalse()
++                }
++            }
++        }
++    }
 +
 +    @Test fun `retention records dispatch before commands and preserves an original after stopping`() = TempFileHandler().use { files ->
 +        val directory = files.createTempDirectory("recording-retention-test").toPath()
@@ -11094,7 +11335,7 @@ index 0000000..faa9cce
 +        assertThat(sink.bytes.size).isEqualTo(0)
 +    }
 +
-+    @Test fun `later valid export preserves the preceding invalid original`() = TempFileHandler().use { files ->
++    @Test fun `later valid export preserves the preceding invalid original`(): Unit = TempFileHandler().use { files ->
 +        val directory = files.createTempDirectory("recording-finalization-history").toPath()
 +        val invalid = "unfinished container".toByteArray()
 +        val valid = Mp4RecordingValidatorTest.minimalVideoRecording()
@@ -11173,8 +11414,10 @@ index 0000000..faa9cce
 +        var flushed = false
 +        var closed = false
 +        var writeFailure: Throwable? = null
++        var flushFailure: Throwable? = null
++        var flushCalls = 0
 +        override fun write(source: Buffer, byteCount: Long) { writeFailure?.let { throw it }; bytes.write(source, byteCount) }
-+        override fun flush() { flushed = true }
++        override fun flush() { flushCalls++; flushFailure?.let { throw it }; flushed = true }
 +        override fun timeout() = Timeout.NONE
 +        override fun close() { closed = true }
 +    }
@@ -11189,6 +11432,7 @@ index 0000000..faa9cce
 +        var stops = 0
 +        var receives = 0
 +        var video = Mp4RecordingValidatorTest.minimalVideoRecording()
++        var receivedVideo: ByteArray? = null
 +        var localPath: Path? = null
 +        var receiveFailure: Throwable? = null
 +        var sessionScratch = false
@@ -11258,7 +11502,7 @@ index 0000000..faa9cce
 +            receives++
 +            localPath = path
 +            receiveFailure?.let { throw it }
-+            Files.write(path, video)
++            Files.write(path, receivedVideo ?: video)
 +        }
 +
 +        private fun checkRemote(remote: String) {
