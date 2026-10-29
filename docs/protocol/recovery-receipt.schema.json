@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:recovery-receipt:1-2",
+  "title": "HarmonyOS internal immutable cleanup receipt v1 or v2",
+  "$comment": "This is the on-disk audit receipt, not the agent wire recoveryReport envelope. A complete value is not proof of release; verify the durable gate, owner, snapshot and originals.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "recoveryId",
+    "deviceId",
+    "sessionId",
+    "observedAt",
+    "reason",
+    "previousState",
+    "previousReportPath",
+    "previousReportSha256",
+    "requiresRecovery",
+    "uncertainReason",
+    "unresolvedRecording",
+    "closeFailure",
+    "state",
+    "operations",
+    "pendingOperations",
+    "temporaryFiles",
+    "issues"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "enum": [
+        1,
+        2
+      ]
+    },
+    "recoveryId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sessionId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "reason": {
+      "enum": [
+        "session_close",
+        "recovery"
+      ]
+    },
+    "previousState": {
+      "enum": [
+        "active",
+        "quarantined",
+        "clean"
+      ]
+    },
+    "previousReportPath": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "previousReportSha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requiresRecovery": {
+      "type": "boolean"
+    },
+    "uncertainReason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "unresolvedRecording": {
+      "type": "boolean"
+    },
+    "closeFailure": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "code",
+            "message"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1
+            },
+            "code": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "enum": [
+        "complete",
+        "unknown"
+      ]
+    },
+    "operations": {
+      "$ref": "#/$defs/counter"
+    },
+    "pendingOperations": {
+      "$ref": "#/$defs/counter"
+    },
+    "temporaryFiles": {
+      "$ref": "#/$defs/counter"
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "recordingResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": 2
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "recordingResources"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "recordingResources"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "previousReportPath": {
+            "type": "null"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "previousReportSha256": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "previousReportSha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "unresolvedRecording": {
+            "const": false
+          },
+          "closeFailure": {
+            "type": "null"
+          },
+          "pendingOperations": {
+            "const": 0
+          },
+          "temporaryFiles": {
+            "const": 0
+          },
+          "issues": {
+            "maxItems": 0
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "counter": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    }
+  }
+}

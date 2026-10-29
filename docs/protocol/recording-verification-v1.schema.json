@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:recording-verification:1",
+  "title": "HarmonyOS full video decode verification v1",
+  "$comment": "Describes verify-recording.ps1 output. Schema cannot rerun decoding, compare two hash fields or verify actual file content. Only the first video stream is checked.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "schemaVersion",
+    "status",
+    "startedAt",
+    "endedAt",
+    "inputPath",
+    "inputSha256",
+    "inputSha256After",
+    "bytes",
+    "decoderPath",
+    "decoderSha256",
+    "decoderVersion",
+    "timeoutSeconds",
+    "arguments",
+    "exitCode",
+    "timedOut",
+    "frames",
+    "progressEnded",
+    "error",
+    "stdout",
+    "stderr"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "maestro.harmonyos.recording-verification"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed"
+      ]
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "endedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "inputPath": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inputSha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inputSha256After": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bytes": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decoderPath": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decoderSha256": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "decoderVersion": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "arguments": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "exitCode": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timedOut": {
+      "type": "boolean"
+    },
+    "frames": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "progressEnded": {
+      "type": "boolean"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stdout": {
+      "const": "decode.stdout.log"
+    },
+    "stderr": {
+      "const": "decode.stderr.log"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "inputPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "inputSha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "inputSha256After": {
+            "$ref": "#/$defs/sha256"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "decoderPath": {
+            "type": "string",
+            "minLength": 1
+          },
+          "decoderSha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "decoderVersion": {
+            "type": "string",
+            "pattern": "^ffmpeg version "
+          },
+          "arguments": {
+            "minItems": 1
+          },
+          "exitCode": {
+            "const": 0
+          },
+          "timedOut": {
+            "const": false
+          },
+          "frames": {
+            "minimum": 1
+          },
+          "progressEnded": {
+            "const": true
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

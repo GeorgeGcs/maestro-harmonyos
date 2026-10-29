@@ -301,6 +301,8 @@ $cli = './.upstream/maestro/maestro-cli/build/install/maestro/bin/maestro.bat'
 
 完整 YAML 使用 CLI `test`，通过 `--harmonyos-agent-output` 指定稳定输出根，可同时传 `--harmonyos-run-id`、`--harmonyos-attempt-id` 和 `--harmonyos-attempt-no`。使用 [run-harmonyos.ps1](../scripts/run-harmonyos.ps1) 时默认启用，`RunId`、`AttemptId`、`AttemptNo` 对应这些参数；结果路径由每次调用的 `invocation.json` 给出。重试保留 `RunId`，生成新 `AttemptId` 并递增 `AttemptNo`，输入和设备保持一致。修改流程、配置或设备时创建新任务。
 
+上述新 Attempt 指调用方安排的整次执行。YAML 内部 `retry` 仍在同一个 Attempt 中，通过独立 trace 的 `retryInvocationId`、`tryNo` 和原 `stepId` 关联；新增记录不会改写 agent v1 字段。各磁盘格式及 Schema 见[协议索引](protocol/README.md)。
+
 当前实现对已派发的修改操作保守记录 `possible`，没有仅凭退出码宣称业务副作用已经验证。错误类别依据实际异常类型；无法取得截图或布局时索引明确记为缺失，不能保证每次失败都能从离线设备取回图片。CLI 由拥有它的调用方取消，强制结束进程可能只留下未完成记录；未确认清理时仍不能直接接管。
 
 可直接运行的完整调用方见 [examples/agent-client](../examples/agent-client/README.md)，包括普通断言与截图、取消演示、可选 CLI 接管及原材料保存。示例显式要求设备、应用、Ability 和输出目录，不内置个人设备信息。

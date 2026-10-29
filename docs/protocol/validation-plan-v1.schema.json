@@ -1,0 +1,515 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:validation-plan:1",
+  "title": "Frozen validation plan v1",
+  "$comment": "Structure only. This schema does not establish cross-document identity, original file hashes, command execution, or qualification. See retry-and-validation.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "status",
+    "purpose",
+    "measurementMode",
+    "repeat",
+    "runTimeoutSeconds",
+    "thresholdPolicy",
+    "preparationProcedure",
+    "retryPolicy",
+    "manualInterventionPolicy",
+    "evidencePolicy",
+    "devices",
+    "environmentFingerprint",
+    "protocol",
+    "frozenAt",
+    "sourcePlan",
+    "projectRoot",
+    "profiles",
+    "units",
+    "confirmation",
+    "buildFiles",
+    "applicationFiles",
+    "toolFiles",
+    "batches"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "status": {
+      "const": "frozen"
+    },
+    "purpose": {
+      "enum": [
+        "development",
+        "formal"
+      ]
+    },
+    "measurementMode": {
+      "enum": [
+        "per-flow",
+        "suite"
+      ]
+    },
+    "repeat": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "runTimeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "thresholdPolicy": {
+      "$ref": "#/$defs/thresholdPolicy"
+    },
+    "preparationProcedure": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retryPolicy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "manualInterventionPolicy": {
+      "const": "review-required"
+    },
+    "evidencePolicy": {
+      "$ref": "#/$defs/evidencePolicy"
+    },
+    "devices": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/device"
+      }
+    },
+    "environmentFingerprint": {
+      "description": "Operator-supplied JSON metadata. Recorded, not probed or verified."
+    },
+    "protocol": {
+      "const": "maestro.harmonyos.validation-plan"
+    },
+    "frozenAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sourcePlan": {
+      "$ref": "#/$defs/absoluteFingerprint"
+    },
+    "projectRoot": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
+    },
+    "confirmation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/absoluteFingerprint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "buildFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "applicationFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "toolFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "batches": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/batchIdentity"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "measurementMode": {
+            "const": "per-flow"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "units": {
+            "items": {
+              "properties": {
+                "requiredTopLevelFlows": {
+                  "maxItems": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "formal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confirmation": {
+            "$ref": "#/$defs/absoluteFingerprint"
+          },
+          "buildFiles": {
+            "minItems": 1
+          },
+          "applicationFiles": {
+            "minItems": 1
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "absoluteFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "thresholdPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "minimumRate"
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "firstPass",
+            "finalPass"
+          ]
+        },
+        "minimumRate": {
+          "type": "string",
+          "pattern": "^(?:0(?:\\.\\d{1,6})?|1(?:\\.0{1,6})?)$"
+        }
+      }
+    },
+    "evidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requireVideo"
+      ],
+      "properties": {
+        "requireVideo": {
+          "type": "boolean"
+        },
+        "decoderSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "deviceId"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+        },
+        "matrixInfoSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "batchIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchId",
+        "unitId",
+        "deviceId"
+      ],
+      "properties": {
+        "batchId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleId",
+        "abilityName",
+        "moduleName",
+        "environmentNames",
+        "environmentHashes"
+      ],
+      "properties": {
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "abilityName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentNames": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "string",
+            "pattern": "^(?![Aa][Pp][Pp]_[Ii][Dd]$)[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true
+        },
+        "environmentHashes": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?![Aa][Pp][Pp]_[Ii][Dd]$)[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unitId",
+        "profile",
+        "entry",
+        "sourceRoot",
+        "sources",
+        "requiredTopLevelFlows"
+      ],
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "profile": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sourceRoot": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/absoluteFingerprint"
+          }
+        },
+        "requiredTopLevelFlows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256",
+              "name",
+              "requiredSteps"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+                "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requiredSteps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "sourcePath",
+                    "sourceSha256",
+                    "commandIndex",
+                    "role"
+                  ],
+                  "properties": {
+                    "sourcePath": {
+                      "type": "string",
+                      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+                      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+                    },
+                    "sourceSha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "commandIndex": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "enum": [
+                        "action",
+                        "assertion"
+                      ]
+                    }
+                  }
+                },
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "assertion"
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

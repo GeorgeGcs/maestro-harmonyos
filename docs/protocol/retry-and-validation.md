@@ -1,0 +1,46 @@
+# Retry 与验证计划协议
+
+这些独立产物使用 JSON Schema draft 2020-12，不增加 agent v1/v2 字段，也不改变原矩阵报告。Schema 文件可离线使用，内部引用均在单个文件中。
+
+| Schema | 校验对象 |
+| --- | --- |
+| [retry-trace-v1.schema.json](retry-trace-v1.schema.json) | `retry-trace.jsonl` 的每一行，分别校验 |
+| [retry-summary-v1.schema.json](retry-summary-v1.schema.json) | 一次顶层 Flow 的重试观察汇总 |
+| [validation-plan-input-v1.schema.json](validation-plan-input-v1.schema.json) | 用户编写的验证计划 |
+| [validation-plan-v1.schema.json](validation-plan-v1.schema.json) | 冻结后的 `plan.json` |
+| [validation-summary-v1.schema.json](validation-summary-v1.schema.json) | 执行与审核过程中更新的 `validation-summary.json` |
+| [validation-review-v1.schema.json](validation-review-v1.schema.json) | 人工审核输入 |
+
+## Retry trace
+
+首行 `traceStarted` 带 `protocol`、`schemaVersion`、`runId`、`attemptId`、`flowExecutionId`、`flowPath` 和 `flowSha256`。后续事件带 `flowExecutionId`、连续 `sequence` 与单调计时 `elapsedNanos`；首行不占事件序号。`eventCount` 包括 `flowFinished` 和末尾 `traceCompleted`，不包括首行。
+
+步骤由 `stepStarted` 和 `stepFinished` / `stepInterrupted` 配对。`stepId` 沿用 agent v1 步骤身份，`executionSequence` 标识实际执行实例；重复调用同一子 Flow 或重试同一源码会产生不同实例。`commandIndex` 和 `sourceOffset` 是源码位置，不能当执行次数。生成步骤可没有源码，字段保留为 null。
+
+`retryContext` 是从外到内的栈，每帧含 `retryInvocationId`、`retryCommandStepId`、`tryNo`。`parentExecutionSequence` 记录调用关系，`flowScopeOwner` 与 `phase` 区分 body、setup、onFlowStart、onFlowComplete。`commandOptional`、`selectorOptional` 和 `optionalAncestorSequences` 保留可选上下文。
+
+重试块包含 `retryBlockStarted`、每次 `retryTryStarted` / `retryTryFinished`、可能的 `retryScheduled`，最后以 `retryBlockFinished` 收尾。重试是同一 CLI attempt 内的活动，不新分配 `attemptId`。步骤结果保留 Maestro 的 Completed、Failed、Warned、Skipped；中断使用独立事件，`outcome=null`。这与 agent v1 把 Warned/Skipped 都映射为 skipped 的表示不同。
+
+`retry-summary` 的 complete 表示观察记录已封存，不等于 Flow 执行成功。`retryUsed` 只有实际开始第二次尝试才为 true；`optionalRetryUsed` 仅指 retry 命令自身 optional。只要实际重试，首次成功就不能为 passed。incomplete 状态下这两个标志为 null，`firstPassStatus=unknown`；初始 incomplete 的 error 也可以为 null。
+
+Schema 保留上游可能记录的负 `maxRetries`，因为执行器当前只限制上界。执行核验器会拒绝用这种块证明合格；结构校验通过不能替代执行语义检查。
+
+## 验证计划
+
+输入计划通过 `measurementMode` 区分每 Flow 与整个 suite 的一轮。`units`、显式设备、`repeat` 确定分母。`requiredTopLevelFlows[].requiredSteps` 指明必须执行的源码步骤，每个 Flow 至少需要一个 assertion。
+
+冻结产物增加源码、实现、应用及工具文件指纹、环境值哈希和预分配 `batches`。路径转换为绝对路径，人工填写的环境说明不会自动成为已验证事实。正式计划还要求确认范围和非空实现/应用文件指纹。
+
+汇总中的 `slots` 保留所有计划槽位，包括 pending、not-run、cancelled 和 unknown。`firstPassStatus` 与 `finalPass` 分开；groups 中的原始通过率、必测覆盖、无人干预成功数与 qualified 也分开。`batches[].releaseConfirmed` 记录设备交接核验。批次与槽位在执行前只含基本字段，派发、结果与审核字段随后增加。
+
+审核文件用 `planSha256` 绑定计划，逐槽明确 `manualIntervention=none/present`，可引用视频完整解码报告。`finish` 本身不提供人工结论；审核入口重新核对原始证据。操作示例及限制见 [验证计划使用说明](../validation-plan.md)。
+
+## 校验边界与检查命令
+
+Schema 只检查形状、类型、枚举和部分同文档条件。它不证明序号连续、栈平衡、跨文件身份相同、步骤确实执行、哈希匹配、路径安全、分母未减少、人工未干预或统计合格。仍须运行 `scripts/validation` 中的证据核验逻辑；`qualified=true` 的结构合法性不代表其内容可信。日期 format 的约束程度也取决于所用 validator。
+
+```powershell
+pwsh -NoProfile -File .\scripts\tests\test-retry-validation-schema.ps1
+```
+
+检查包含公开合成正负例。若本地存在开发真机产物，还会只读检查原件形态；缺失时明确输出 SKIP，不计作真机检查通过。测试不连接设备、不修改原件，也不复制真实设备编号或本机路径到公开示例。

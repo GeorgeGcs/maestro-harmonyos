@@ -86,6 +86,7 @@ upstream.lock.json      上游来源与固定提交
 ## 测试与维护
 
 - [测试计划与验证记录](docs/acceptance.md)：测试场景、结果和重复运行的统计方法。
+- [协议与磁盘文件格式](docs/protocol/README.md)：agent、重试、录屏和验证计划的版本与 Schema。
 - [第三方依赖及 AI 辅助记录](THIRD_PARTY.md)。
 
 ## 许可证

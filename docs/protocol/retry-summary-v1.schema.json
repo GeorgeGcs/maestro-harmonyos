@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:retry-summary:1",
+  "title": "Retry summary v1",
+  "$comment": "Structure only. This schema does not establish cross-document identity, original file hashes, event completeness, command execution, or qualification. See retry-and-validation.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "schemaVersion",
+    "runId",
+    "attemptId",
+    "flowExecutionId",
+    "flowPath",
+    "flowSha256",
+    "state",
+    "traceCompleted",
+    "tracePath",
+    "traceSha256",
+    "eventCount",
+    "expectedEventCount",
+    "stepCount",
+    "retryUsed",
+    "optionalRetryUsed",
+    "firstPassStatus",
+    "outcomeCounts",
+    "coverageIndex",
+    "error"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "maestro.harmonyos.retry-trace"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "flowExecutionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "flowPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "flowSha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "state": {
+      "enum": [
+        "complete",
+        "incomplete"
+      ]
+    },
+    "traceCompleted": {
+      "type": "boolean"
+    },
+    "tracePath": {
+      "const": "retry-trace.jsonl"
+    },
+    "traceSha256": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "eventCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expectedEventCount": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "stepCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "retryUsed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "optionalRetryUsed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "firstPassStatus": {
+      "enum": [
+        "passed",
+        "not_passed",
+        "unknown"
+      ]
+    },
+    "outcomeCounts": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "Completed",
+          "Failed",
+          "Warned",
+          "Skipped",
+          "Interrupted"
+        ]
+      },
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "coverageIndex": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "Completed",
+          "Failed",
+          "Warned",
+          "Skipped",
+          "Interrupted"
+        ]
+      },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 0,
+        "items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uniqueItems": true
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "traceCompleted": {
+            "const": true
+          },
+          "traceSha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expectedEventCount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "retryUsed": {
+            "type": "boolean"
+          },
+          "optionalRetryUsed": {
+            "type": "boolean"
+          },
+          "firstPassStatus": {
+            "enum": [
+              "passed",
+              "not_passed"
+            ]
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "traceCompleted": {
+            "const": false
+          },
+          "retryUsed": {
+            "type": "null"
+          },
+          "optionalRetryUsed": {
+            "type": "null"
+          },
+          "firstPassStatus": {
+            "const": "unknown"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "error": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "class",
+            "message"
+          ],
+          "properties": {
+            "class": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

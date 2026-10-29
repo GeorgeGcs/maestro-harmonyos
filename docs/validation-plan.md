@@ -2,6 +2,8 @@
 
 `scripts/test-validation-plan.ps1` 按事先确定的设备、Flow 和轮次运行验证，分别统计首次成功与重试后的最终成功。它复用 `test-device-matrix.ps1`；YAML 仍由 Maestro 执行，工具本身不解释 YAML，也不会失败补跑。
 
+输入、冻结计划、汇总和人工审核的字段及 Schema 见[协议说明](protocol/retry-and-validation.md)。结构检查之后，工具仍会核对原文件哈希、实际步骤和设备交接状态。
+
 适用环境：Windows PowerShell 5.1 或 PowerShell 7、Node.js 20+，以及已配置并能执行 Flow 的 HarmonyOS CLI。首次使用先按 [环境配置](setup.md) 跑通一个用例。
 
 ## 先确定计数单位
