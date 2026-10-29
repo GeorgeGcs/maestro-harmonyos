@@ -7266,6 +7266,19 @@ index c956fee..1743497 100644
      @Test
      fun `will delete old files`() {
          // Create directory structure, and an old test directory
+diff --git a/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
+new file mode 100644
+index 0000000..94193ae
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
+@@ -0,0 +1,7 @@
++package maestro.debuglog
++
++/** Optional, opaque link between a recorder's observations and its output sink. */
++interface RecordingDiagnosticContext {
++    /** Implementations may emit a diagnostic binding; callers must tolerate failure. */
++    fun recordingDiagnosticContext(): String?
++}
 diff --git a/maestro-client/src/main/java/maestro/device/DeviceService.kt b/maestro-client/src/main/java/maestro/device/DeviceService.kt
 index 0845ff4..5bccac4 100644
 --- a/maestro-client/src/main/java/maestro/device/DeviceService.kt
@@ -7874,18 +7887,254 @@ index 0000000..a950816
 +        "$name must be non-empty and cannot contain whitespace, NUL, or start with '-'"
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt
+new file mode 100644
+index 0000000..7e966ea
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt
+@@ -0,0 +1,226 @@
++package maestro.harmonyos.driver
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
++import org.slf4j.LoggerFactory
++import java.time.Instant
++import java.util.TreeSet
++
++/** Host observations only. These events are neither ownership nor recovery evidence. */
++internal class HarmonyOSRecordingDiagnostics(
++    fileName: String,
++    resourceId: String?,
++    contextId: String? = null,
++    private val emitLine: (String) -> Unit = {
++        LoggerFactory.getLogger(HarmonyOSRecordingDiagnostics::class.java).info(it)
++    },
++    private val wallClock: () -> Instant = Instant::now,
++    private val nanoClock: () -> Long = System::nanoTime,
++) {
++    enum class Stage {
++        CREATED, SERVICE, PROCESSES, CAPTURES, QUERY, START, READY, STOP, CAPTURE_ENDED,
++        EXPORT, EXPORT_SCRATCH, EXPORT_MEDIA, STAT, RECEIVE, VALIDATE, ARCHIVE, COPY, FLUSH, DELETE,
++        MEDIA_RETAINED, MEDIA_REMOVED, LIMIT_REACHED, RESOURCE_FAILURE,
++        CLEANUP_REMOTE, CLEANUP_LOCAL, CLEANUP_TEMP, CLEANUP_RESOURCE, CLEANUP, CLOSE, ABORT, TRUNCATED,
++    }
++
++    enum class Result { BEGIN, RETURNED, ACKNOWLEDGED, OBSERVED, ABSENT, PRESENT, INVALID, INCOMPLETE, FAILED, SKIPPED }
++
++    // URI values are independently checked against this recording's generated name before emission.
++    // No response text, command arguments, host paths or exception messages are accepted.
++    data class Fields(
++        val attempt: Int? = null,
++        val expectedBytes: Long? = null,
++        val receivedBytes: Long? = null,
++        val copiedBytes: Long? = null,
++        val count: Int? = null,
++        val pids: Set<Int>? = null,
++        val retentionRequested: Boolean? = null,
++        val persistent: Boolean? = null,
++        val priorFailure: Boolean? = null,
++        val cleanupErrors: Int? = null,
++        val mediaUri: String? = null,
++        val uriUnavailable: Boolean? = null,
++        val mediaUriPreviouslyObserved: Boolean? = null,
++        val archiveBytes: Long? = null,
++        val archiveSha256: String? = null,
++        val archiveMetadataUnavailable: Boolean? = null,
++    )
++
++    private val recordingId = Regex("maestro-recording-([0-9a-f]{32})\\.mp4").matchEntire(fileName)?.groupValues?.get(1) ?: "unavailable"
++    private val ownedMediaUri = Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-$recordingId\\.mp4")
++    private val resourceId = resourceId?.takeIf { Regex("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").matches(it) }
++    private val contextId = contextId?.takeIf { Regex("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").matches(it) }
++    private var startNanos: Long? = null
++    private var lastElapsedMs = 0L
++    private var sequence = 0
++    private var detailCount = 0
++    private var finalCount = 0
++    private var dropped = 0
++    private var emissionFailures = 0
++    private var finalized = false
++    private var queryStarted = false
++    private var previousMediaUri: String? = null
++    private val observations = mutableMapOf<Stage, Any>()
++
++    fun mark(): Long? = try { nanoClock() } catch (_: Throwable) { null }
++
++    fun event(stage: Stage, result: Result, fields: Fields = Fields(), since: Long? = null, error: Throwable? = null) {
++        safely { append(stage, result, fields, since, error, terminal = false) }
++    }
++
++    fun state(stage: Stage, pids: Set<Int>) {
++        safely {
++            // Keep bounded diagnostic state even if the device response lists many processes.
++            val value = pids.size to smallestPids(pids)
++            if (observations.put(stage, value) != value) append(stage, Result.OBSERVED, Fields(count = pids.size, pids = pids), null, null, false)
++        }
++    }
++
++    fun queryStarted() {
++        safely {
++            if (!queryStarted) {
++                queryStarted = true
++                append(Stage.QUERY, Result.BEGIN, Fields(), null, null, false)
++            }
++        }
++    }
++
++    fun query(uri: String?, since: Long?) {
++        safely {
++            val present = uri != null
++            val safeUri = safeMediaUri(uri)
++            val state = present to safeUri
++            if (observations.put(Stage.QUERY, state) != state) {
++                append(Stage.QUERY, if (present) Result.PRESENT else Result.ABSENT,
++                    Fields(mediaUri = if (present) safeUri else previousMediaUri,
++                        uriUnavailable = present && safeUri == null,
++                        mediaUriPreviouslyObserved = !present && previousMediaUri != null), since, null, false)
++            }
++            if (present) previousMediaUri = safeUri
++        }
++    }
++
++    fun finish(stage: Stage, error: Throwable?, since: Long? = null) {
++        safely {
++            if (!finalized) {
++                append(stage, if (error == null) Result.RETURNED else Result.FAILED, Fields(), since, error, true)
++                finalized = true
++            }
++        }
++    }
++
++    fun archived(attempt: Int, read: () -> HarmonyOSRecordingResourceJournal.Archive?) {
++        safely {
++            val archive = try { read() } catch (_: Throwable) { null }
++            append(Stage.ARCHIVE, Result.OBSERVED,
++                Fields(attempt = attempt, archiveBytes = archive?.size, archiveSha256 = archive?.sha256,
++                    archiveMetadataUnavailable = archive == null), null, null, false)
++        }
++    }
++
++    fun <T> step(stage: Stage, fields: Fields = Fields(), success: Result = Result.RETURNED, block: () -> T): T {
++        val began = mark()
++        event(stage, Result.BEGIN, fields)
++        try {
++            return block().also { event(stage, success, fields, began) }
++        } catch (error: Throwable) {
++            event(stage, Result.FAILED, fields, began, error)
++            throw error
++        }
++    }
++
++    @Synchronized
++    private fun safely(block: () -> Unit) {
++        try { block() } catch (_: Throwable) { emissionFailures++ }
++    }
++
++    private fun append(stage: Stage, result: Result, fields: Fields, since: Long?, error: Throwable?, terminal: Boolean) {
++        if (finalized) return
++        val finalStage = stage in FINAL_STAGES
++        if (!terminal && (if (finalStage) finalCount >= FINAL_EVENTS else detailCount >= DETAIL_EVENTS)) {
++            dropped++
++            if (dropped == 1) write(Stage.TRUNCATED, Result.OBSERVED, Fields(), null, null, false)
++            return
++        }
++        if (!terminal) { if (finalStage) finalCount++ else detailCount++ }
++        write(stage, result, fields, since, error, terminal)
++    }
++
++    private fun write(stage: Stage, result: Result, fields: Fields, since: Long?, error: Throwable?, terminal: Boolean) {
++        val now = nanoClock()
++        val origin = startNanos ?: now.also { startNanos = it }
++        val elapsed = ((now - origin).coerceAtLeast(0) / 1_000_000).coerceAtLeast(lastElapsedMs)
++        lastElapsedMs = elapsed
++        val values = linkedMapOf<String, Any>("result" to result.name.lowercase())
++        since?.let { values["stageElapsedMs"] = (now - it).coerceAtLeast(0) / 1_000_000 }
++        fields.attempt?.let { values["attempt"] = it }
++        fields.expectedBytes?.let { values["expectedBytes"] = it }
++        fields.receivedBytes?.let { values["receivedBytes"] = it }
++        fields.copiedBytes?.let { values["copiedBytes"] = it }
++        fields.count?.let { values["count"] = it }
++        fields.pids?.let { values["pids"] = smallestPids(it); values["pidsTruncated"] = it.size > MAX_PIDS }
++        fields.retentionRequested?.let { values["retentionRequested"] = it }
++        fields.persistent?.let { values["persistent"] = it }
++        fields.priorFailure?.let { values["priorFailure"] = it }
++        fields.cleanupErrors?.let { values["cleanupErrors"] = it }
++        fields.uriUnavailable?.let { values["uriUnavailable"] = it }
++        fields.mediaUriPreviouslyObserved?.let { values["mediaUriPreviouslyObserved"] = it }
++        fields.mediaUri?.let { uri ->
++            val safeUri = safeMediaUri(uri)
++            if (safeUri == null) values["uriUnavailable"] = true else values["mediaUri"] = safeUri
++        }
++        fields.archiveMetadataUnavailable?.let { values["archiveMetadataUnavailable"] = it }
++        if (fields.archiveBytes != null || fields.archiveSha256 != null) {
++            if (fields.archiveBytes != null && fields.archiveBytes >= 0 &&
++                fields.archiveSha256?.matches(Regex("[0-9a-f]{64}")) == true) {
++                values["archiveBytes"] = fields.archiveBytes
++                values["archiveSha256"] = fields.archiveSha256
++            } else values["archiveMetadataUnavailable"] = true
++        }
++        error?.let { values["errorKind"] = when (it) {
++            is HdcTimeoutException -> "timeout"
++            is InterruptedException -> "interrupted"
++            is InvalidMp4RecordingException -> "invalid_mp4"
++            is java.io.IOException -> "io"
++            else -> "other"
++        } }
++        val seq = ++sequence
++        if (terminal || stage == Stage.TRUNCATED) {
++            values["truncated"] = dropped > 0
++            values["droppedEvents"] = dropped
++            values["emissionFailures"] = emissionFailures
++        }
++        if (terminal) { values["terminal"] = true; values["expectedEventCount"] = seq }
++        val record = linkedMapOf<String, Any?>(
++            "schemaVersion" to 1, "recordingId" to recordingId, "seq" to seq,
++            "observedAt" to wallClock().toString(), "elapsedMs" to elapsed,
++            "stage" to stage.name.lowercase(), "fields" to values, "contextId" to contextId,
++        )
++        resourceId?.let { record["resourceId"] = it }
++        emitLine(PREFIX + mapper.writeValueAsString(record))
++    }
++
++    private fun safeMediaUri(uri: String?): String? = uri?.takeIf {
++        recordingId != "unavailable" && it.length <= 512 && ownedMediaUri.matches(it)
++    }
++
++    private fun smallestPids(pids: Set<Int>): List<Int> {
++        val smallest = TreeSet<Int>()
++        for (pid in pids) {
++            smallest.add(pid)
++            if (smallest.size > MAX_PIDS) smallest.pollLast()
++        }
++        return smallest.toList()
++    }
++
++    companion object {
++        const val PREFIX = "HARMONYOS_RECORDING_DIAGNOSTIC "
++        const val DETAIL_EVENTS = 160
++        const val FINAL_EVENTS = 24
++        const val MAX_PIDS = 8
++        private val FINAL_STAGES = setOf(Stage.CLEANUP_REMOTE, Stage.CLEANUP_LOCAL, Stage.CLEANUP_TEMP, Stage.CLEANUP_RESOURCE, Stage.CLEANUP)
++        private val mapper by lazy { jacksonObjectMapper() }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
 new file mode 100644
-index 0000000..91d76e9
+index 0000000..603a3e0
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,526 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
++import maestro.debuglog.RecordingDiagnosticContext
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Fields
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Result
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Stage
 +import maestro.utils.TempFileHandler
 +import okio.Buffer
 +import okio.Sink
@@ -7906,13 +8155,24 @@ index 0000000..91d76e9
 + * Commands match DevEco Studio 6.1.1's OpenHarmonyDevice.screenRecord/recvScreenRecord.
 + * The recorder's toggle command requires exclusive use of screen recording on the device.
 + */
-+class HarmonyOSSystemScreenRecorder(
++class HarmonyOSSystemScreenRecorder internal constructor(
 +    private val deviceId: String,
 +    private val device: HarmonyOSDevice,
 +    private val receiveFile: (String, Path, Duration) -> Unit,
 +    private val config: HarmonyOSDriverConfig,
-+    private val recoveryJournal: HarmonyOSRecoveryJournal? = null,
++    private val recoveryJournal: HarmonyOSRecoveryJournal?,
++    private val diagnosticFactory: (String, String?, String?) -> HarmonyOSRecordingDiagnostics,
 +) {
++    constructor(
++        deviceId: String,
++        device: HarmonyOSDevice,
++        receiveFile: (String, Path, Duration) -> Unit,
++        config: HarmonyOSDriverConfig,
++        recoveryJournal: HarmonyOSRecoveryJournal? = null,
++    ) : this(deviceId, device, receiveFile, config, recoveryJournal, { fileName, resourceId, contextId ->
++        HarmonyOSRecordingDiagnostics(fileName, resourceId, contextId)
++    })
++
 +    fun start(out: Sink): ScreenRecording {
 +        check(config.enableScreenRecording) { "System screen recording must be explicitly enabled" }
 +        check(!config.recordingRetainMedia || recoveryJournal?.recordings != null) { "Recording retention requires a persistent recording session." }
@@ -7931,6 +8191,8 @@ index 0000000..91d76e9
 +        private val resource = recoveryJournal?.allocateRecording()
 +        private val fileName = resource?.fileName ?: "maestro-recording-${UUID.randomUUID().toString().replace("-", "")}.mp4"
 +        private val remotePath = resource?.remotePath ?: "/data/local/tmp/$fileName"
++        private val diagnosticContext = try { (out as? RecordingDiagnosticContext)?.recordingDiagnosticContext() } catch (_: Throwable) { null }
++        private val diagnostics = diagnosticFactory(fileName, resource?.id, diagnosticContext)
 +        private val files = TempFileHandler()
 +        private var localDirectory: Path? = null
 +        private var localPath: Path? = null
@@ -7944,12 +8206,15 @@ index 0000000..91d76e9
 +        private var deadlineTask: ScheduledFuture<*>? = null
 +        private var lastIncomplete: HdcException? = null
 +        private var validatedSize: Long? = null
++        private var exportAttempt = 0
++        private var deferDiagnosticTerminal = false
 +        override lateinit var startedAt: Instant
 +            private set
 +
 +        fun start() {
++            diagnostics.event(Stage.CREATED, Result.OBSERVED, Fields(persistent = resource != null, retentionRequested = config.recordingRetainMedia))
 +            val budget = Budget(config.commandTimeout)
-+            val bundle = command(listOf("bm", "dump", "-n", BUNDLE), budget)
++            val bundle = diagnostics.step(Stage.SERVICE) { command(listOf("bm", "dump", "-n", BUNDLE), budget) }
 +            if (!bundle.contains(ABILITY)) throw UnsupportedOperationException("Huawei system screen recorder is not available")
 +            if (processes(budget).isNotEmpty() || captureInstances(budget).isNotEmpty()) {
 +                throw HdcException("A screen recorder process or capture session already exists; leave it under its owner's control")
@@ -7959,7 +8224,7 @@ index 0000000..91d76e9
 +            localPath = localDirectory!!.resolve(fileName)
 +            resource?.starting()
 +            startSent = true
-+            aa(listOf("--ps", "CustomizedFileName", fileName), budget)
++            diagnostics.step(Stage.START, success = Result.ACKNOWLEDGED) { aa(listOf("--ps", "CustomizedFileName", fileName), budget) }
 +            startConfirmed = true
 +            while (true) {
 +                val pids = processes(budget)
@@ -7970,6 +8235,7 @@ index 0000000..91d76e9
 +                    ownerPid = pid
 +                    resource?.started(pid)
 +                    startedAt = Instant.now()
++                    diagnostics.event(Stage.READY, Result.OBSERVED, Fields(pids = setOf(pid)))
 +                    break
 +                }
 +                pause(budget)
@@ -7985,13 +8251,21 @@ index 0000000..91d76e9
 +            synchronized(this) {
 +                if (closed) return
 +                val limit = HdcException("Recording reached its ${config.recordingMaxDuration.toSeconds()} second limit")
++                val expiryBegan = diagnostics.mark()
++                var diagnosticFailure: Throwable = limit
++                deferDiagnosticTerminal = true
++                diagnostics.event(Stage.LIMIT_REACHED, Result.OBSERVED)
 +                try {
 +                    close()
 +                    failure = limit
 +                    noteResourceFailure(limit)
 +                } catch (error: Throwable) {
++                    diagnosticFailure = error
 +                    error.addSuppressed(limit)
 +                    noteResourceFailure(error)
++                } finally {
++                    deferDiagnosticTerminal = false
++                    diagnostics.finish(Stage.CLOSE, diagnosticFailure, expiryBegan)
 +                }
 +            }
 +        }
@@ -8003,6 +8277,8 @@ index 0000000..91d76e9
 +                return
 +            }
 +            closed = true
++            val closeBegan = diagnostics.mark()
++            diagnostics.event(Stage.CLOSE, Result.BEGIN)
 +            deadlineTask?.cancel(false)
 +            timer?.shutdown()
 +            timer = null
@@ -8022,10 +8298,13 @@ index 0000000..91d76e9
 +            failure = primary
 +            primary?.let(::addRecoveryHint)
 +            primary?.let(::noteResourceFailure)
++            if (!deferDiagnosticTerminal) diagnostics.finish(Stage.CLOSE, primary, closeBegan)
 +            primary?.let { throw it }
 +        }
 +
 +        fun abortStart(original: Throwable) {
++            val abortBegan = diagnostics.mark()
++            diagnostics.event(Stage.ABORT, Result.BEGIN)
 +            val interrupted = Thread.interrupted()
 +            closed = true
 +            deadlineTask?.cancel(false)
@@ -8053,6 +8332,7 @@ index 0000000..91d76e9
 +                cleanup(original)
 +                if (startSent) addRecoveryHint(original)
 +                noteResourceFailure(original)
++                diagnostics.finish(Stage.ABORT, original, abortBegan)
 +                leases.remove(deviceId)
 +                if (interrupted || original is InterruptedException) Thread.currentThread().interrupt()
 +            }
@@ -8063,6 +8343,7 @@ index 0000000..91d76e9
 +            stopIfOwned(budget)
 +            while (captureInstances(budget).isNotEmpty()) pause(budget)
 +            resource?.ended()
++            diagnostics.event(Stage.CAPTURE_ENDED, Result.OBSERVED)
 +            var uri = query(budget)
 +            var complete = uri?.let { exportIfComplete(it, budget) } ?: false
 +            if (!complete) {
@@ -8073,16 +8354,25 @@ index 0000000..91d76e9
 +                }
 +            }
 +            resource?.media(checkNotNull(uri))
-+            resource?.archive(checkNotNull(localPath), budget.remaining())
++            if (resource != null) {
++                diagnostics.step(Stage.ARCHIVE, Fields(attempt = exportAttempt)) { resource.archive(checkNotNull(localPath), budget.remaining()) }
++                diagnostics.archived(exportAttempt, resource::latestArchive)
++            }
 +            copyToSink(budget)
-+            if (config.recordingRetainMedia) return
++            if (config.recordingRetainMedia) {
++                diagnostics.event(Stage.MEDIA_RETAINED, Result.OBSERVED)
++                return
++            }
 +            val ownedUri = checkNotNull(uri)
-+            val deletion = command(listOf("mediatool", "delete", ownedUri), budget)
-+            if (deletion.trim() != "[SUCCESS] delete success.") {
-+                throw HdcException("The recording was exported but mediatool did not confirm deletion: $deletion")
++            diagnostics.step(Stage.DELETE, success = Result.ACKNOWLEDGED) {
++                val deletion = command(listOf("mediatool", "delete", ownedUri), budget)
++                if (deletion.trim() != "[SUCCESS] delete success.") {
++                    throw HdcException("The recording was exported but mediatool did not confirm deletion: $deletion")
++                }
 +            }
 +            if (query(budget) != null) throw HdcException("The recording was exported but its media asset was not deleted: $ownedUri")
 +            resource?.removed()
++            diagnostics.event(Stage.MEDIA_REMOVED, Result.OBSERVED)
 +        }
 +
 +        private fun stopIfOwned(budget: Budget) {
@@ -8097,7 +8387,9 @@ index 0000000..91d76e9
 +                check(!stopSent) { "A recording stop request has already been sent" }
 +                resource?.stopping()
 +                stopSent = true
-+                aa(emptyList(), budget)
++                diagnostics.step(Stage.STOP, success = Result.ACKNOWLEDGED) { aa(emptyList(), budget) }
++            } else {
++                diagnostics.event(Stage.STOP, Result.SKIPPED)
 +            }
 +        }
 +
@@ -8116,10 +8408,19 @@ index 0000000..91d76e9
 +        }
 +
 +        private fun exportIfComplete(uri: String, budget: Budget): Boolean {
++            val attempt = ++exportAttempt
++            return diagnostics.step(Stage.EXPORT, Fields(attempt = attempt)) {
++                exportAttempt(uri, budget, attempt).also { complete ->
++                    if (!complete) diagnostics.event(Stage.EXPORT, Result.INCOMPLETE, Fields(attempt = attempt))
++                }
++            }
++        }
++
++        private fun exportAttempt(uri: String, budget: Budget, attempt: Int): Boolean {
 +            val path = checkNotNull(localPath)
-+            command(listOf("rm", "-f", remotePath), budget)
++            diagnostics.step(Stage.EXPORT_SCRATCH, Fields(attempt = attempt)) { command(listOf("rm", "-f", remotePath), budget) }
 +            val output = try {
-+                command(listOf("mediatool", "recv", uri, remotePath), budget)
++                diagnostics.step(Stage.EXPORT_MEDIA, Fields(attempt = attempt)) { command(listOf("mediatool", "recv", uri, remotePath), budget) }
 +            } catch (error: HarmonyOSCommandException) {
 +                if (error.remoteExitCode == 0 && error.stderr.isEmpty() &&
 +                    error.stdout.trim().lines() == listOf("Table Name: Photos", "[FAIL] open source media file failed.")
@@ -8132,27 +8433,34 @@ index 0000000..91d76e9
 +            if (output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList() != listOf("Table Name: Photos", remotePath)) {
 +                throw HdcException("mediatool did not confirm the requested recording export: $output")
 +            }
-+            val sizeOutput = command(listOf("stat", "-c", "%s", remotePath), budget).trim()
-+            val size = sizeOutput.toLongOrNull() ?: throw HdcException("Invalid recording size returned by stat: $sizeOutput")
++            val size = diagnostics.step(Stage.STAT, Fields(attempt = attempt)) {
++                val sizeOutput = command(listOf("stat", "-c", "%s", remotePath), budget).trim()
++                sizeOutput.toLongOrNull() ?: throw HdcException("Invalid recording size returned by stat: $sizeOutput")
++            }
++            diagnostics.event(Stage.STAT, Result.OBSERVED, Fields(attempt = attempt, expectedBytes = size))
 +            if (size > config.recordingMaxBytes || size < 0) throw HdcException("Recording exceeds the configured ${config.recordingMaxBytes} byte limit")
 +            if (size == 0L) return false
 +            Files.deleteIfExists(path)
-+            receiveFile(remotePath, path, budget.remaining())
-+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || Files.size(path) != size) {
++            diagnostics.step(Stage.RECEIVE, Fields(attempt = attempt, expectedBytes = size)) { receiveFile(remotePath, path, budget.remaining()) }
++            val received = if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) Files.size(path) else null
++            diagnostics.event(Stage.RECEIVE, Result.OBSERVED, Fields(attempt = attempt, expectedBytes = size, receivedBytes = received))
++            if (received != size) {
 +                throw HdcException("Recording transfer did not produce the expected file size")
 +            }
 +            return try {
-+                Mp4RecordingValidator.validate(path, config.recordingMaxBytes)
++                diagnostics.step(Stage.VALIDATE, Fields(attempt = attempt, receivedBytes = size)) { Mp4RecordingValidator.validate(path, config.recordingMaxBytes) }
 +                validatedSize = size
 +                true
 +            } catch (error: InvalidMp4RecordingException) {
 +                lastIncomplete = error
++                diagnostics.event(Stage.VALIDATE, Result.INVALID, Fields(attempt = attempt))
 +                // A confirmed capture can end with an invalid container. Preserve its
 +                // bytes before the next export or scratch cleanup, without accepting it.
 +                if (resource != null) {
 +                    try {
 +                        resource.media(uri)
-+                        resource.archive(path, budget.remaining())
++                        diagnostics.step(Stage.ARCHIVE, Fields(attempt = attempt, receivedBytes = size)) { resource.archive(path, budget.remaining()) }
++                        diagnostics.archived(attempt, resource::latestArchive)
 +                    } catch (archiveError: Throwable) {
 +                        archiveError.addSuppressed(error)
 +                        throw archiveError
@@ -8167,13 +8475,19 @@ index 0000000..91d76e9
 +        }
 +
 +        private fun noteResourceFailure(error: Throwable) {
-+            try { resource?.failed(error) } catch (journalError: Throwable) {
++            try {
++                if (resource != null) diagnostics.step(Stage.RESOURCE_FAILURE) { resource.failed(error) }
++            } catch (journalError: Throwable) {
 +                if (journalError !== error) error.addSuppressed(journalError)
 +            }
 +        }
 +
 +        private fun copyToSink(budget: Budget) {
 +            val expected = checkNotNull(validatedSize)
++            diagnostics.step(Stage.COPY, Fields(expectedBytes = expected)) { copyToSink(budget, expected) }
++        }
++
++        private fun copyToSink(budget: Budget, expected: Long) {
 +            var copied = 0L
 +            Files.newInputStream(checkNotNull(localPath), LinkOption.NOFOLLOW_LINKS).use { input ->
 +                val bytes = ByteArray(64 * 1024)
@@ -8188,10 +8502,20 @@ index 0000000..91d76e9
 +                }
 +            }
 +            if (copied != expected || Files.size(checkNotNull(localPath)) != expected) throw HdcException("Recording changed after validation")
-+            out.flush()
++            diagnostics.event(Stage.COPY, Result.OBSERVED, Fields(expectedBytes = expected, copiedBytes = copied))
++            diagnostics.step(Stage.FLUSH) { out.flush() }
 +        }
 +
 +        private fun query(budget: Budget): String? {
++            val began = diagnostics.mark()
++            diagnostics.queryStarted()
++            return try { queryUri(budget).also { diagnostics.query(it, began) } } catch (error: Throwable) {
++                diagnostics.event(Stage.QUERY, Result.FAILED, since = began, error = error)
++                throw error
++            }
++        }
++
++        private fun queryUri(budget: Budget): String? {
 +            val output = try {
 +                command(listOf("mediatool", "query", fileName, "-u"), budget)
 +            } catch (error: HarmonyOSCommandException) {
@@ -8223,28 +8547,48 @@ index 0000000..91d76e9
 +
 +        private fun cleanup(original: Throwable?): Throwable? {
 +            var result = original
++            var cleanupErrors = 0
 +            fun record(error: Throwable) {
++                cleanupErrors++
 +                if (result == null) result = error else if (result !== error) result!!.addSuppressed(error)
 +            }
 +            if (localPath != null) {
 +                if (Thread.currentThread().isInterrupted) {
++                    diagnostics.event(Stage.CLEANUP_REMOTE, Result.SKIPPED)
 +                    record(HdcException("Recording scratch cleanup interrupted; temporary file may remain at $remotePath"))
 +                } else {
 +                    try {
-+                        device.execute(listOf("rm", "-f", remotePath), Duration.ofSeconds(2))
++                        diagnostics.step(Stage.CLEANUP_REMOTE) { device.execute(listOf("rm", "-f", remotePath), Duration.ofSeconds(2)) }
 +                    } catch (error: Throwable) {
 +                        record(error)
 +                    }
 +                }
 +            }
 +            for (path in listOfNotNull(localPath, localDirectory)) {
-+                try { Files.deleteIfExists(path) } catch (error: Exception) { record(error) }
++                try { diagnostics.step(Stage.CLEANUP_LOCAL) { Files.deleteIfExists(path) } } catch (error: Exception) { record(error) }
 +            }
-+            try { files.close() } catch (error: Exception) { record(error) }
++            try { diagnostics.step(Stage.CLEANUP_TEMP) { files.close() } } catch (error: Exception) { record(error) }
 +            if (result == null && !config.recordingRetainMedia) {
-+                try { resource?.cleaned() } catch (error: Exception) { record(error) }
++                try {
++                    if (resource != null) diagnostics.step(Stage.CLEANUP_RESOURCE) { resource.cleaned() }
++                } catch (error: Exception) { record(error) }
++            } else if (resource != null) {
++                diagnostics.event(Stage.CLEANUP_RESOURCE, Result.SKIPPED)
 +            }
++            diagnostics.event(Stage.CLEANUP, if (cleanupErrors == 0) Result.RETURNED else Result.FAILED,
++                Fields(retentionRequested = config.recordingRetainMedia, priorFailure = original != null, cleanupErrors = cleanupErrors))
 +            return result
++        }
++
++        private fun processes(budget: Budget): Set<Int> = observeStatus(Stage.PROCESSES) { this@HarmonyOSSystemScreenRecorder.processes(budget) }
++
++        private fun captureInstances(budget: Budget): Set<Int> = observeStatus(Stage.CAPTURES) { this@HarmonyOSSystemScreenRecorder.captureInstances(budget) }
++
++        private fun observeStatus(stage: Stage, read: () -> Set<Int>): Set<Int> = try {
++            read().also { diagnostics.state(stage, it) }
++        } catch (error: Throwable) {
++            diagnostics.event(stage, Result.FAILED, error = error)
++            throw error
 +        }
 +    }
 +
@@ -8718,10 +9062,10 @@ index 0000000..b7ea2b2
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
-index 0000000..e0a3814
+index 0000000..37ca2ae
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,336 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -8777,6 +9121,10 @@ index 0000000..e0a3814
 +            resource.uri = uri
 +        }
 +        fun archive(source: Path, timeout: Duration = Duration.ofSeconds(30)) = archiveResource(resource, source, deadline(timeout))
++        /** In-memory metadata, not a fresh validation. Read only after the archive call returned successfully. */
++        fun latestArchive(): Archive? = synchronized(this@HarmonyOSRecordingResourceJournal) {
++            resource.archives.lastOrNull()?.copy()
++        }
 +        fun removed() = update { check(resource.captureEnded && resource.archiveName != null); resource.mediaRemoved = true }
 +        fun cleaned() = update { check(!resource.startRequested || resource.mediaRemoved); resource.clean = true }
 +        fun failed(error: Throwable) {
@@ -10843,16 +11191,198 @@ index 0000000..db63669
 +        assertThat(DeviceService.isDeviceAvailableToLaunch("test-device", Platform.HARMONYOS)).isNull()
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSRecordingDiagnosticsTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSRecordingDiagnosticsTest.kt
+new file mode 100644
+index 0000000..8eafe89
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSRecordingDiagnosticsTest.kt
+@@ -0,0 +1,174 @@
++package maestro.harmonyos.driver
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Fields
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Result
++import maestro.harmonyos.driver.HarmonyOSRecordingDiagnostics.Stage
++import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.io.IOException
++import java.time.Instant
++
++class HarmonyOSRecordingDiagnosticsTest {
++    @Test
++    fun `PID observations use the same smallest bounded subset regardless of set iteration order`() {
++        val lines = mutableListOf<String>()
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = lines::add)
++        diagnostics.state(Stage.CAPTURES, linkedSetOf(71, 51))
++        diagnostics.state(Stage.CAPTURES, linkedSetOf(51, 71))
++        diagnostics.state(Stage.PROCESSES, (100 downTo 1).toSet())
++        diagnostics.state(Stage.PROCESSES, (1..100).toSet())
++        assertThat(lines).hasSize(2)
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events[0]["fields"]["pids"].map { it.asInt() }).containsExactly(51, 71).inOrder()
++        assertThat(events[1]["fields"]["pids"].map { it.asInt() }).containsExactlyElementsIn(1..8).inOrder()
++        assertThat(events[1]["fields"]["count"].asInt()).isEqualTo(100)
++        assertThat(events[1]["fields"]["pidsTruncated"].asBoolean()).isTrue()
++    }
++
++    @Test
++    fun `archive metadata failures and untrusted hashes are explicit without leaking their values`() {
++        val lines = mutableListOf<String>()
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = lines::add)
++        diagnostics.archived(1) { HarmonyOSRecordingResourceJournal.Archive("not-logged", 24, "a".repeat(64)) }
++        diagnostics.archived(2) { null }
++        diagnostics.archived(3) { throw IOException("secret archive failure") }
++        diagnostics.archived(4) { HarmonyOSRecordingResourceJournal.Archive("not-logged", 25, "secret".repeat(200)) }
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events).hasSize(4)
++        assertThat(events[0]["fields"]["archiveBytes"].asLong()).isEqualTo(24L)
++        assertThat(events[0]["fields"]["archiveSha256"].asText()).isEqualTo("a".repeat(64))
++        assertThat(events[0]["fields"]["archiveMetadataUnavailable"].asBoolean()).isFalse()
++        assertThat(events.drop(1).all { it["fields"]["archiveMetadataUnavailable"].asBoolean() }).isTrue()
++        assertThat(events.drop(1).all { it["fields"]["archiveSha256"] == null && it["fields"]["archiveBytes"] == null }).isTrue()
++        assertThat(lines.joinToString()).doesNotContain("secret")
++        assertThat(lines.joinToString()).doesNotContain("not-logged")
++    }
++
++    @Test
++    fun `records host UTC and monotonic elapsed times despite wall clock moving backwards`() {
++        val lines = mutableListOf<String>()
++        var nanos = 9_000_000L
++        var wall = Instant.parse("2026-01-02T03:04:05Z")
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = lines::add, wallClock = { wall }, nanoClock = { nanos })
++        diagnostics.event(Stage.CREATED, Result.OBSERVED)
++        val began = diagnostics.mark()
++        nanos += 25_000_000
++        wall = wall.minusSeconds(30)
++        diagnostics.event(Stage.STAT, Result.OBSERVED, Fields(expectedBytes = 123), since = began)
++        diagnostics.finish(Stage.CLOSE, null)
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events.map { it["elapsedMs"].asLong() }).containsExactly(0L, 25L, 25L).inOrder()
++        assertThat(events[1]["observedAt"].asText()).isEqualTo("2026-01-02T03:03:35Z")
++        assertThat(events[1]["fields"]["stageElapsedMs"].asLong()).isEqualTo(25L)
++        assertThat(events.last()["fields"]["expectedEventCount"].asInt()).isEqualTo(3)
++    }
++
++    @Test
++    fun `unchanged polling is deduplicated and changing polling leaves bounded terminal evidence`() {
++        val lines = mutableListOf<String>()
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = lines::add)
++        repeat(5_000) { diagnostics.state(Stage.CAPTURES, setOf(51)) }
++        repeat(5_000) { diagnostics.queryStarted(); diagnostics.query(null, null) }
++        assertThat(lines).hasSize(3)
++        repeat(5_000) { diagnostics.state(Stage.CAPTURES, setOf(51 + it % 2)) }
++        repeat(50) { diagnostics.event(Stage.CLEANUP, Result.RETURNED) }
++        diagnostics.finish(Stage.CLOSE, null)
++        diagnostics.finish(Stage.ABORT, IOException())
++        assertThat(lines).hasSize(HarmonyOSRecordingDiagnostics.DETAIL_EVENTS + HarmonyOSRecordingDiagnostics.FINAL_EVENTS + 2)
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events.count { it["stage"].asText() == "truncated" }).isEqualTo(1)
++        assertThat(events.last()["stage"].asText()).isEqualTo("close")
++        assertThat(events.last()["fields"]["truncated"].asBoolean()).isTrue()
++        assertThat(events.last()["fields"]["droppedEvents"].asInt()).isGreaterThan(4_000)
++        assertThat(events.last()["fields"]["expectedEventCount"].asInt()).isEqualTo(lines.size)
++        assertThat(events.map { it["seq"].asInt() }).containsExactlyElementsIn(1..lines.size).inOrder()
++    }
++
++    @Test
++    fun `untrusted identities and exception text are excluded and PID fields stay bounded`() {
++        val secret = "serial-secret proof-nonce\nstdout stderr " + "x".repeat(4_000)
++        val lines = mutableListOf<String>()
++        val diagnostics = HarmonyOSRecordingDiagnostics(secret, secret, secret, emitLine = lines::add)
++        diagnostics.state(Stage.PROCESSES, (1..10_000).toSet())
++        diagnostics.finish(Stage.ABORT, IOException(secret))
++        assertThat(lines.joinToString()).doesNotContain("secret")
++        assertThat(lines.joinToString()).doesNotContain("proof")
++        assertThat(lines.all { it.length < 1_000 && '\n' !in it }).isTrue()
++        val event = mapper.readTree(lines.first().removePrefix(HarmonyOSRecordingDiagnostics.PREFIX))
++        assertThat(event["recordingId"].asText()).isEqualTo("unavailable")
++        assertThat(event["resourceId"]).isNull()
++        assertThat(event["contextId"].isNull).isTrue()
++        assertThat(event["fields"]["pids"].size()).isEqualTo(8)
++        assertThat(event["fields"]["count"].asInt()).isEqualTo(10_000)
++        assertThat(event["fields"]["pidsTruncated"].asBoolean()).isTrue()
++    }
++
++    @Test
++    fun `failed emission leaves a sequence gap and does not mask the operation exception`() {
++        val lines = mutableListOf<String>()
++        var calls = 0
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = {
++            if (++calls == 1) throw IOException("logger unavailable")
++            lines += it
++        })
++        val original = IOException("operation failed")
++        val error = assertThrows(IOException::class.java) { diagnostics.step(Stage.FLUSH) { throw original } }
++        diagnostics.finish(Stage.CLOSE, error)
++        assertThat(error).isSameInstanceAs(original)
++        assertThat(error.suppressed).isEmpty()
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events.map { it["seq"].asInt() }).containsExactly(2, 3).inOrder()
++        assertThat(events.last()["fields"]["emissionFailures"].asInt()).isEqualTo(1)
++        assertThat(events.last()["fields"]["expectedEventCount"].asInt()).isEqualTo(3)
++    }
++
++    @Test
++    fun `broken diagnostic clocks and sinks do not change operation results or interrupts`() {
++        val original = IOException("original")
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null,
++            emitLine = { throw IllegalStateException("log failed") },
++            nanoClock = { throw IllegalStateException("clock failed") },
++            wallClock = { throw IllegalStateException("clock failed") })
++        Thread.currentThread().interrupt()
++        try {
++            assertThat(diagnostics.step(Stage.EXPORT) { 7 }).isEqualTo(7)
++            assertThat(assertThrows(IOException::class.java) { diagnostics.step(Stage.RECEIVE) { throw original } }).isSameInstanceAs(original)
++            diagnostics.finish(Stage.CLOSE, original)
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++        } finally {
++            Thread.interrupted()
++        }
++    }
++
++    @Test
++    fun `only bounded owned URIs are exposed and deletion refers to an earlier observation`() {
++        val lines = mutableListOf<String>()
++        val diagnostics = HarmonyOSRecordingDiagnostics(FILE, null, emitLine = lines::add)
++        val first = "file://media/Photo/123/VID_123/$FILE"
++        val changed = "file://media/Photo/124/VID_124/$FILE"
++        diagnostics.query(first, null)
++        diagnostics.query(first, null)
++        diagnostics.query(changed, null)
++        diagnostics.query(null, null)
++        diagnostics.query("file://media/Photo/125/private-proof-token/another-recording.mp4", null)
++        diagnostics.query(null, null)
++        diagnostics.query("file://media/Photo/125/" + "secret".repeat(200) + "/$FILE", null)
++        diagnostics.finish(Stage.CLOSE, null)
++        val events = lines.map { mapper.readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        assertThat(events.take(3).map { it["fields"]["mediaUri"].asText() }).containsExactly(first, changed, changed).inOrder()
++        assertThat(events[2]["fields"]["mediaUriPreviouslyObserved"].asBoolean()).isTrue()
++        assertThat(events[2]["fields"]["result"].asText()).isEqualTo("absent")
++        assertThat(events[3]["fields"]["uriUnavailable"].asBoolean()).isTrue()
++        assertThat(events[5]["fields"]["uriUnavailable"].asBoolean()).isTrue()
++        assertThat(lines.joinToString()).doesNotContain("private-proof-token")
++        assertThat(lines.joinToString()).doesNotContain("secret")
++    }
++
++    private companion object {
++        const val FILE = "maestro-recording-0123456789abcdef0123456789abcdef.mp4"
++        val mapper = jacksonObjectMapper()
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..8f49821
+index 0000000..af1549b
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,914 @@
+@@ -0,0 +1,1105 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
 +import maestro.TreeNode
++import maestro.debuglog.ScopedLogCapture
++import maestro.debuglog.RecordingDiagnosticContext
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.HdcTimeoutException
@@ -10877,6 +11407,136 @@ index 0000000..8f49821
 +import java.util.concurrent.TimeUnit
 +
 +class HarmonyOSSystemScreenRecorderTest {
++    @Test
++    fun `stage diagnostics reach scoped logs in operation order without additional device calls`(): Unit = TempFileHandler().use { files ->
++        val log = files.createTempDirectory("recording-diagnostics").resolve("maestro.log")
++        val device = Device()
++        ScopedLogCapture.start(log).use {
++            recorder(device, config().copy(recordingStopTimeout = Duration.ofSeconds(3)), "sensitive-device-serial").start(Buffer()).close()
++        }
++        val lines = log.readLines().filter { HarmonyOSRecordingDiagnostics.PREFIX in it }
++        val events = lines.map { jacksonObjectMapper().readTree(it.substringAfter(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        val stages = events.map { it["stage"].asText() to it["fields"]["result"].asText() }
++        assertThat(stages).containsAtLeast(
++            "start" to "begin", "start" to "acknowledged", "ready" to "observed",
++            "stop" to "begin", "stop" to "acknowledged", "capture_ended" to "observed",
++            "query" to "present", "export" to "begin", "stat" to "observed",
++            "receive" to "observed", "validate" to "returned", "flush" to "returned",
++            "delete" to "acknowledged", "media_removed" to "observed", "cleanup" to "returned", "close" to "returned",
++        ).inOrder()
++        val stat = events.single { it["stage"].asText() == "stat" && it["fields"]["result"].asText() == "observed" }
++        val received = events.single { it["stage"].asText() == "receive" && it["fields"]["result"].asText() == "observed" }
++        assertThat(stat["fields"]["expectedBytes"].asLong()).isEqualTo(device.video.size.toLong())
++        assertThat(received["fields"]["receivedBytes"].asLong()).isEqualTo(device.video.size.toLong())
++        assertThat(events.map { it["seq"].asInt() }).containsExactlyElementsIn(1..events.size).inOrder()
++        assertThat(events.map { it["recordingId"].asText() }.toSet()).containsExactly(device.fileName!!.removePrefix("maestro-recording-").removeSuffix(".mp4"))
++        assertThat(events.last()["fields"]["expectedEventCount"].asInt()).isEqualTo(events.size)
++        assertThat(events.last()["fields"]["truncated"].asBoolean()).isFalse()
++        assertThat(events.last()["fields"]["emissionFailures"].asInt()).isEqualTo(0)
++        assertThat(events.map { it["elapsedMs"].asLong() }.zipWithNext().all { (a, b) -> a <= b }).isTrue()
++        events.forEach { Instant.parse(it["observedAt"].asText()) }
++        assertThat(lines.joinToString()).doesNotContain("sensitive-device-serial")
++        assertThat(events.single { it["stage"].asText() == "query" && it["fields"]["result"].asText() == "present" }
++            ["fields"]["mediaUri"].asText()).isEqualTo(device.uri)
++        assertThat(device.commands.map { it.first() }).containsExactly(
++            "bm", "ps", "hidumper", "mediatool", "aa", "ps", "hidumper",
++            "ps", "hidumper", "aa", "hidumper", "mediatool", "rm", "mediatool", "stat", "mediatool", "mediatool", "rm",
++        ).inOrder()
++    }
++
++    @Test
++    fun `lost acknowledgements and throwing logger preserve the exact error and never repeat a toggle`() {
++        for (loseStart in listOf(true, false)) {
++            val original = IOException("serial-secret raw-command proof-token stdout stderr")
++            val device = Device()
++            var logCalls = 0
++            val recorder = diagnosticRecorder(device) { ++logCalls; throw IOException("log failed") }
++            if (loseStart) {
++                device.response = { if (it.first() == "aa") throw original else null }
++                assertThat(assertThrows(IOException::class.java) { recorder.start(Buffer()) }).isSameInstanceAs(original)
++            } else {
++                val recording = recorder.start(Buffer())
++                device.response = { if (it.first() == "aa") { device.finishExternally(); throw original } else null }
++                assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++                assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++            }
++            assertThat(logCalls).isGreaterThan(0)
++            assertThat(device.commands.count { it.first() == "aa" }).isEqualTo(if (loseStart) 1 else 2)
++            assertThat(device.deletes).isEmpty()
++            assertThat(original.suppressed.none { it.message == "log failed" }).isTrue()
++        }
++    }
++
++    @Test
++    fun `diagnostics distinguish a short transfer from a sink flush failure without leaking errors`() {
++        for (short in listOf(true, false)) {
++            val device = Device().apply { if (short) receivedVideo = video.copyOf(video.size / 2) }
++            val sink = RecordingSink().apply { if (!short) flushFailure = IOException("private-proof-token") }
++            val lines = mutableListOf<String>()
++            val recording = diagnosticRecorder(device, lines::add).start(sink)
++            val failure = if (short) assertThrows(HdcException::class.java) { recording.close() }
++                else assertThrows(IOException::class.java) { recording.close() }
++            if (!short) assertThat(failure).isSameInstanceAs(sink.flushFailure)
++            val events = lines.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++            val received = events.single { it["stage"].asText() == "receive" && it["fields"]["result"].asText() == "observed" }
++            assertThat(received["fields"]["receivedBytes"].asInt()).isEqualTo(if (short) device.video.size / 2 else device.video.size)
++            assertThat(events.any { it["stage"].asText() == "flush" && it["fields"]["result"].asText() == "failed" }).isEqualTo(!short)
++            assertThat(events.last()["fields"]["result"].asText()).isEqualTo("failed")
++            val cleanup = events.single { it["stage"].asText() == "cleanup" }
++            assertThat(cleanup["fields"]["result"].asText()).isEqualTo("returned")
++            assertThat(cleanup["fields"]["priorFailure"].asBoolean()).isTrue()
++            assertThat(cleanup["fields"]["cleanupErrors"].asInt()).isEqualTo(0)
++            assertThat(lines.joinToString()).doesNotContain("private-proof-token")
++            assertThat(device.deletes).isEmpty()
++            assertThat(device.stops).isEqualTo(1)
++        }
++    }
++
++    @Test
++    fun `diagnostic context is requested once and a broken context does not affect recording`() {
++        for (broken in listOf(true, false)) {
++            val id = UUID.randomUUID().toString()
++            var calls = 0
++            val sink = object : Sink by Buffer(), RecordingDiagnosticContext {
++                override fun recordingDiagnosticContext(): String? {
++                    calls++
++                    if (broken) throw IOException("private context failure")
++                    return id
++                }
++            }
++            val lines = mutableListOf<String>()
++            val device = Device()
++            diagnosticRecorder(device, lines::add).start(sink).close()
++            assertThat(calls).isEqualTo(1)
++            val events = lines.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++            assertThat(events.all { if (broken) it["contextId"].isNull else it["contextId"].asText() == id }).isTrue()
++            assertThat(device.deletes).containsExactly(device.uri)
++        }
++    }
++
++    private fun diagnosticRecorder(device: Device, emit: (String) -> Unit) = HarmonyOSSystemScreenRecorder(
++        UUID.randomUUID().toString(), device, device::receive, config().copy(recordingStopTimeout = Duration.ofSeconds(3)), null,
++        { fileName, resourceId, contextId -> HarmonyOSRecordingDiagnostics(fileName, resourceId, contextId, emitLine = emit) },
++    )
++
++    @Test
++    fun `malformed query responses never enter diagnostic fields`() {
++        val device = Device()
++        val lines = mutableListOf<String>()
++        val recording = diagnosticRecorder(device, lines::add).start(Buffer())
++        device.response = { args ->
++            if (args.take(2) == listOf("mediatool", "query")) "private-serial proof-nonce\nstdout stderr" else null
++        }
++        val failure = assertThrows(HdcException::class.java) { recording.close() }
++        assertThat(failure.message).contains("proof-nonce")
++        assertThat(lines.joinToString()).doesNotContain("proof-nonce")
++        assertThat(lines.joinToString()).doesNotContain("private-serial")
++        assertThat(lines.joinToString()).doesNotContain("stdout")
++        assertThat(lines.joinToString()).doesNotContain("stderr")
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).isEmpty()
++    }
++
 +    @Test
 +    fun `recording starts only after readiness and exports exactly its own file`() {
 +        val device = Device()
@@ -11599,8 +12259,10 @@ index 0000000..8f49821
 +        HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "finalization-fixture", UUID.randomUUID().toString()).use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val sink = RecordingSink()
++            val diagnostics = mutableListOf<String>()
 +            HarmonyOSSystemScreenRecorder("finalization-fixture", device, device::receive,
-+                config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink).close()
++                config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal,
++                { name, resourceId, contextId -> HarmonyOSRecordingDiagnostics(name, resourceId, contextId, emitLine = diagnostics::add) }).start(sink).close()
 +            assertThat(sink.bytes.readByteArray()).isEqualTo(valid)
 +            assertThat(resources.isComplete()).isTrue()
 +            assertThat(resources.verifyArchives()).isTrue()
@@ -11609,6 +12271,20 @@ index 0000000..8f49821
 +            assertThat(Files.readAllBytes(directory.resolve("recording-originals").resolve(archives[0]["name"].asText()))).isEqualTo(invalid)
 +            assertThat(Files.readAllBytes(directory.resolve("recording-originals").resolve(archives[1]["name"].asText()))).isEqualTo(valid)
 +            assertThat(device.deletes).containsExactly(device.uri)
++            val events = diagnostics.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++            assertThat(events.filter { it["stage"].asText() == "export" && it["fields"]["result"].asText() == "begin" }
++                .map { it["fields"]["attempt"].asInt() }).containsExactly(1, 2).inOrder()
++            assertThat(events.any { it["stage"].asText() == "validate" && it["fields"]["result"].asText() == "invalid" }).isTrue()
++            assertThat(events.count { it["stage"].asText() == "archive" && it["fields"]["result"].asText() == "returned" }).isEqualTo(2)
++            val archiveEvents = events.filter { it["stage"].asText() == "archive" && it["fields"]["result"].asText() == "observed" }
++            assertThat(archiveEvents.map { it["fields"]["attempt"].asInt() }).containsExactly(1, 2).inOrder()
++            for ((index, event) in archiveEvents.withIndex()) {
++                assertThat(event["fields"]["archiveMetadataUnavailable"].asBoolean()).isFalse()
++                assertThat(event["fields"]["archiveBytes"].asLong()).isEqualTo(archives[index]["size"].asLong())
++                assertThat(event["fields"]["archiveSha256"].asText()).isEqualTo(archives[index]["sha256"].asText())
++            }
++            assertThat(events.map { it["resourceId"].asText() }.toSet()).containsExactly(
++                jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]["id"].asText())
 +        }
 +    }
 +
@@ -11618,8 +12294,10 @@ index 0000000..8f49821
 +        HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "archive-failure-fixture", UUID.randomUUID().toString()).use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val sink = RecordingSink()
++            val diagnostics = mutableListOf<String>()
 +            val recording = HarmonyOSSystemScreenRecorder("archive-failure-fixture", device, device::receive,
-+                config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(sink)
++                config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal,
++                { name, resourceId, contextId -> HarmonyOSRecordingDiagnostics(name, resourceId, contextId, emitLine = diagnostics::add) }).start(sink)
 +            Files.writeString(directory.resolve("recording-originals"), "prevent archive directory creation")
 +            val failure = assertThrows(IOException::class.java) { recording.close() }
 +            assertThat(failure.suppressed.any { it is InvalidMp4RecordingException }).isTrue()
@@ -11630,6 +12308,9 @@ index 0000000..8f49821
 +            assertThat(entry["archiveName"].isNull).isTrue()
 +            assertThat(device.deletes).isEmpty()
 +            assertThat(sink.bytes.size).isEqualTo(0)
++            val events = diagnostics.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++            assertThat(events.any { it["stage"].asText() == "archive" && it["fields"]["result"].asText() == "failed" }).isTrue()
++            assertThat(events.any { it["fields"]["archiveBytes"] != null || it["fields"]["archiveSha256"] != null }).isFalse()
 +        }
 +    }
 +
@@ -11639,8 +12320,10 @@ index 0000000..8f49821
 +        HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()).use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val device = Device().apply { sessionScratch = true }
++            val diagnostics = mutableListOf<String>()
 +            val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
-+                config().copy(recordingMaxDuration = Duration.ofSeconds(1), recordingStopTimeout = Duration.ofSeconds(3)), journal).start(Buffer())
++                config().copy(recordingMaxDuration = Duration.ofSeconds(1), recordingStopTimeout = Duration.ofSeconds(3)), journal,
++                { name, resourceId, contextId -> HarmonyOSRecordingDiagnostics(name, resourceId, contextId, emitLine = diagnostics::add) }).start(Buffer())
 +            assertThat(device.deleted.await(5, TimeUnit.SECONDS)).isTrue()
 +            val failure = assertThrows(HdcException::class.java) { recording.close() }
 +            assertThat(failure.message).contains("1 second limit")
@@ -11650,7 +12333,43 @@ index 0000000..8f49821
 +            assertThat(resources.isComplete()).isTrue()
 +            assertThat(resources.verifyArchives()).isTrue()
 +            assertThat(device.stops).isEqualTo(1)
++            val events = diagnostics.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++            val terminal = events.single { it["fields"]["terminal"]?.asBoolean() == true }
++            assertThat(terminal).isEqualTo(events.last())
++            assertThat(terminal["stage"].asText()).isEqualTo("close")
++            assertThat(terminal["fields"]["result"].asText()).isEqualTo("failed")
++            assertThat(events.any { it["stage"].asText() == "close" && it["fields"]["result"].asText() == "returned" }).isFalse()
++            assertThat(events.indexOfFirst { it["stage"].asText() == "limit_reached" }).isLessThan(
++                events.indexOfLast { it["stage"].asText() == "resource_failure" && it["fields"]["result"].asText() == "returned" })
++            assertThat(events.indexOfLast { it["stage"].asText() == "resource_failure" }).isLessThan(events.lastIndex)
 +        }
++    }
++
++    @Test
++    fun `timer diagnostic terminal preserves a close failure with the limit suppressed`() {
++        val device = Device()
++        val original = IOException("flush failed during timer close")
++        val sink = RecordingSink().apply { flushFailure = original }
++        val diagnostics = mutableListOf<String>()
++        val terminalWritten = CountDownLatch(1)
++        val recording = HarmonyOSSystemScreenRecorder(UUID.randomUUID().toString(), device, device::receive,
++            config().copy(recordingMaxDuration = Duration.ofSeconds(1), recordingStopTimeout = Duration.ofSeconds(3)), null,
++            { name, resourceId, contextId -> HarmonyOSRecordingDiagnostics(name, resourceId, contextId, emitLine = { line ->
++                diagnostics += line
++                if (jacksonObjectMapper().readTree(line.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX))["fields"]["terminal"]?.asBoolean() == true) {
++                    terminalWritten.countDown()
++                }
++            }) }).start(sink)
++        assertThat(terminalWritten.await(5, TimeUnit.SECONDS)).isTrue()
++        assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(original.suppressed.any { it is HdcException && it.message?.contains("1 second limit") == true }).isTrue()
++        val events = diagnostics.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++        val terminal = events.single { it["fields"]["terminal"]?.asBoolean() == true }
++        assertThat(terminal).isEqualTo(events.last())
++        assertThat(terminal["fields"]["result"].asText()).isEqualTo("failed")
++        assertThat(terminal["fields"]["errorKind"].asText()).isEqualTo("io")
++        assertThat(device.stops).isEqualTo(1)
++        assertThat(device.deletes).isEmpty()
 +    }
 +
 +    private fun config() = HarmonyOSDriverConfig(
@@ -12250,10 +12969,10 @@ index 0000000..93af213
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
-index 0000000..bf40a85
+index 0000000..a06a0e5
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,275 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -12270,6 +12989,33 @@ index 0000000..bf40a85
 +    @TempDir lateinit var directory: Path
 +    private val mapper = jacksonObjectMapper()
 +    private fun create() = HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString())
++
++    @Test fun `latest archive metadata is a copy of registered values and does not revalidate files`() {
++        create().use { journal ->
++            journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            assertThat(recording.latestArchive()).isNull()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            recording.media("file://media/Photo/123/VID_123/${recording.fileName}")
++            val original = directory.resolve("original.mp4")
++            Files.writeString(original, "first original")
++            recording.archive(original)
++            val first = checkNotNull(recording.latestArchive())
++            assertThat(recording.latestArchive()).isEqualTo(first)
++            assertThat(recording.latestArchive()).isNotSameInstanceAs(first)
++            Files.writeString(original, "second original with different bytes")
++            recording.archive(original)
++            val second = checkNotNull(recording.latestArchive())
++            assertThat(second).isNotEqualTo(first)
++            assertThat(first.size).isEqualTo("first original".length.toLong())
++            assertThat(second.size).isEqualTo("second original with different bytes".length.toLong())
++            Files.delete(original)
++            Files.writeString(directory.resolve("recording-originals").resolve(second.name), "changed after archive")
++            assertThat(recording.latestArchive()).isEqualTo(second)
++            assertThrows<IllegalArgumentException> { recording.archive(original) }
++            assertThat(recording.latestArchive()).isEqualTo(second)
++        }
++    }
 +
 +    @Test fun `completed retained media is removed after restart with its original unchanged`() {
 +        val journal = create()
@@ -14482,25 +15228,32 @@ index fd49b2f..8c1c1b7 100644
       * @param sequenceNumber monotonic across the whole flow, nested commands included.
       * @param depth nesting level: 0 at the flow top, +1 per runFlow/repeat/retry.
 diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
-index 70bcfdb..59dd568 100644
+index 70bcfdb..cf18b9b 100644
 --- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
 +++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
-@@ -2,6 +2,7 @@ package maestro.orchestra.debug
+@@ -1,9 +1,14 @@
+ package maestro.orchestra.debug
  
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
  import maestro.Maestro
  import maestro.ScreenRecording
++import maestro.debuglog.RecordingDiagnosticContext
 +import okio.ForwardingSink
  import okio.Sink
++import org.slf4j.LoggerFactory
  import java.io.File
++import java.util.UUID
  
-@@ -11,16 +12,56 @@ import java.io.File
+ /**
+  * Starts a screen recording that writes into [file] through [sink].
+@@ -11,16 +16,84 @@ import java.io.File
   * When no recording starts, [sink] is closed and [file] deleted, so no empty recording is left
   * on disk or reported as an artifact. That covers both outcomes: a recording already in
   * progress (returns null) and a driver that failed to start (the failure is rethrown).
 + * A started recording owns this output sink until its handle is closed.
   */
  internal suspend fun Maestro.startScreenRecordingInto(sink: Sink, file: File): ScreenRecording? {
-+    val output = RecordingOutputSink(sink)
++    val output = RecordingOutputSink(sink, file)
      val recording = try {
 -        startScreenRecording(sink)
 +        startScreenRecording(output)
@@ -14542,8 +15295,36 @@ index 70bcfdb..59dd568 100644
 +    }
 +}
 +
-+private class RecordingOutputSink(delegate: Sink) : ForwardingSink(delegate) {
++internal class RecordingOutputSink(
++    delegate: Sink,
++    private val file: File,
++    private val emitBinding: (String) -> Unit = {
++        LoggerFactory.getLogger(RecordingOutputSink::class.java).info(it)
++    },
++) : ForwardingSink(delegate), RecordingDiagnosticContext {
 +    private var closed = false
++    private var diagnosticContextId: String? = null
++
++    @Synchronized
++    override fun recordingDiagnosticContext(): String {
++        diagnosticContextId?.let { return it }
++        val id = UUID.randomUUID().toString()
++        diagnosticContextId = id
++        // Only a backend requesting diagnostics emits this link. Other platforms
++        // keep the same output path and sink lifecycle without additional logging.
++        runCatching {
++            val outputPath = file.toPath().toAbsolutePath().normalize().toString()
++            val available = outputPath.length <= 4096
++            val binding = linkedMapOf(
++                "schemaVersion" to 1,
++                "contextId" to id,
++                "outputPath" to outputPath.takeIf { available },
++                "pathAvailable" to available,
++            )
++            emitBinding("MAESTRO_RECORDING_OUTPUT " + jacksonObjectMapper().writeValueAsString(binding))
++        }
++        return id
++    }
 +
 +    @Synchronized
 +    override fun close() {
@@ -14659,13 +15440,14 @@ index 8d7ac96..bb6cbf8 100644
      }
 diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
 new file mode 100644
-index 0000000..7a5c15a
+index 0000000..75e7d2d
 --- /dev/null
 +++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,252 @@
 +package maestro.orchestra.debug
 +
 +import com.google.common.truth.Truth.assertThat
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import io.mockk.every
 +import io.mockk.mockk
 +import io.mockk.verify
@@ -14673,6 +15455,8 @@ index 0000000..7a5c15a
 +import maestro.Driver
 +import maestro.Maestro
 +import maestro.ScreenRecording
++import maestro.debuglog.RecordingDiagnosticContext
++import maestro.debuglog.ScopedLogCapture
 +import maestro.utils.TempFileHandler
 +import okio.Buffer
 +import okio.ForwardingSink
@@ -14686,6 +15470,83 @@ index 0000000..7a5c15a
 +import java.time.Instant
 +
 +class ScreenRecordingOutputTest {
++    @Test
++    fun `diagnostic context is bound once to its exact output without changing bytes`() = withOutput { file, sink ->
++        val lines = mutableListOf<String>()
++        val output = RecordingOutputSink(sink, file, lines::add)
++        assertThat(lines).isEmpty()
++        val id = output.recordingDiagnosticContext()
++        assertThat(output.recordingDiagnosticContext()).isEqualTo(id)
++        assertThat(id).matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
++        assertThat(lines).hasSize(1)
++        val binding = jacksonObjectMapper().readTree(lines.single().removePrefix("MAESTRO_RECORDING_OUTPUT "))
++        assertThat(binding["schemaVersion"].intValue()).isEqualTo(1)
++        assertThat(binding["contextId"].asText()).isEqualTo(id)
++        assertThat(binding["outputPath"].asText()).isEqualTo(file.toPath().toAbsolutePath().normalize().toString())
++        assertThat(binding["pathAvailable"].booleanValue()).isTrue()
++        output.write(Buffer().writeUtf8("video"), 5)
++        output.close()
++        output.close()
++        assertThat(file.readText()).isEqualTo("video")
++        assertThat(sink.closeCalls).isEqualTo(1)
++    }
++
++    @Test
++    fun `failed binding logging is not retried and cannot fail output writes`() = withOutput { file, sink ->
++        var calls = 0
++        val output = RecordingOutputSink(sink, file) { calls++; throw IllegalStateException("logger failed") }
++        val id = output.recordingDiagnosticContext()
++        assertThat(output.recordingDiagnosticContext()).isEqualTo(id)
++        assertThat(calls).isEqualTo(1)
++        output.write(Buffer().writeUtf8("video"), 5)
++        output.close()
++        assertThat(file.readText()).isEqualTo("video")
++    }
++
++    @Test
++    fun `overlong output paths are explicitly unavailable without changing the sink`() {
++        val bytes = Buffer()
++        val lines = mutableListOf<String>()
++        val output = RecordingOutputSink(bytes, File("x".repeat(4097)), lines::add)
++        val id = output.recordingDiagnosticContext()
++        assertThat(output.recordingDiagnosticContext()).isEqualTo(id)
++        assertThat(lines).hasSize(1)
++        val binding = jacksonObjectMapper().readTree(lines.single().substringAfter("MAESTRO_RECORDING_OUTPUT "))
++        assertThat(binding["pathAvailable"].booleanValue()).isFalse()
++        assertThat(binding["outputPath"].isNull).isTrue()
++        output.write(Buffer().writeUtf8("video"), 5)
++        output.flush()
++        assertThat(bytes.readUtf8()).isEqualTo("video")
++        output.close()
++        output.close()
++    }
++
++    @Test
++    fun `backend context reaches the real scoped log with a distinct id per output`() = TempFileHandler().use { files ->
++        val log = files.createTempFile("recording-bindings-", ".log")
++        val ids = mutableListOf<String>()
++        ScopedLogCapture.start(log).use {
++            repeat(2) {
++                withOutput { file, sink ->
++                    val driver = mockk<Driver>()
++                    every { driver.startScreenRecording(any()) } answers {
++                        val context = firstArg<Sink>() as RecordingDiagnosticContext
++                        ids += checkNotNull(context.recordingDiagnosticContext())
++                        object : ScreenRecording {
++                            override val startedAt = Instant.EPOCH
++                            override fun close() = Unit
++                        }
++                    }
++                    runBlocking { Maestro(driver).startScreenRecordingInto(sink, file) }!!.close()
++                }
++            }
++        }
++        val bindings = log.readLines().filter { it.contains("MAESTRO_RECORDING_OUTPUT ") }
++            .map { jacksonObjectMapper().readTree(it.substringAfter("MAESTRO_RECORDING_OUTPUT ")) }
++        assertThat(ids.distinct()).hasSize(2)
++        assertThat(bindings.map { it["contextId"].asText() }).containsExactlyElementsIn(ids).inOrder()
++    }
++
 +    @Test
 +    fun `successful close flushes and releases the output exactly once`() = withOutput { file, sink ->
 +        val fixture = RecordingFixture { out -> out.write(Buffer().writeUtf8("recording"), 9) }
