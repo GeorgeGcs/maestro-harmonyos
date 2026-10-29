@@ -6327,10 +6327,10 @@ index 0000000..7e8da31
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 new file mode 100644
-index 0000000..e9c8da9
+index 0000000..4f4ace8
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,384 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.node.ObjectNode
@@ -6687,6 +6687,8 @@ index 0000000..e9c8da9
 +                return HdcCommandResult(0, "", "")
 +            }
 +            val script = command.last()
++            var unquoted = script
++            while ("'\"'\"'" in unquoted) unquoted = unquoted.replace("'\"'\"'", "'")
 +            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
 +            if (marker == null) {
 +                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
@@ -6701,7 +6703,8 @@ index 0000000..e9c8da9
 +                script.contains("mediatool") && script.contains("delete") -> { present = false; deletes++; "[SUCCESS] delete success." }
 +                script.contains("mediatool") && script.contains("recv") -> "Table Name: Photos\n" +
 +                    Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
-+                script.contains("stat") -> video.size.toString()
++                unquoted.contains("'rm' '-f'") -> ""
++                unquoted.contains("'stat' '-c'") -> video.size.toString()
 +                else -> error("Unexpected command $command")
 +            }
 +            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)!!.value
@@ -8808,10 +8811,10 @@ index 0000000..e0a3814
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..02883a1
+index 0000000..65cdd0c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,416 @@
+@@ -0,0 +1,420 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -9049,12 +9052,16 @@ index 0000000..02883a1
 +                    steps += "[ ! -L ${quote(remote)} ] && rm -f ${quote(remote)} && [ ! -e ${quote(remote)} ] || exit 121; " to
 +                        { state.temporaryFiles.remove(remote); Unit }
 +                }
-+                for (operation in state.operations.filterNot { it.markerRemoved }) {
-+                    val directory = "${state.remoteRoot}/${operation.id}"
-+                    val script = "if [ -e ${quote(directory)} ] || [ -L ${quote(directory)} ]; then " +
-+                        "[ -d ${quote(directory)} ] && [ ! -L ${quote(directory)} ] && " +
-+                        "rm -f ${quote(directory + "/done")} ${quote(directory + "/done.pending")} && rmdir ${quote(directory)} || exit 121; fi; "
-+                    steps += script to { operation.markerRemoved = true }
++                for (operations in state.operations.filterNot { it.markerRemoved }.chunked(20)) {
++                    // List each owned directory once. Repeating its full path for every check
++                    // made ordinary multi-recording sessions require too many HDC round trips.
++                    val directories = operations.joinToString(" ") { quote("${state.remoteRoot}/${it.id}") }
++                    val script = "for __maestro_cleanup_dir in $directories; do " +
++                        "if [ -e \"\$__maestro_cleanup_dir\" ] || [ -L \"\$__maestro_cleanup_dir\" ]; then " +
++                        "[ -d \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] && " +
++                        "rm -f \"\$__maestro_cleanup_dir/done\" \"\$__maestro_cleanup_dir/done.pending\" && " +
++                        "rmdir \"\$__maestro_cleanup_dir\" || exit 121; fi; done; "
++                    steps += script to { operations.forEach { it.markerRemoved = true } }
 +                }
 +                val files = state.remoteRoot + "/files"
 +                val rootCleanup = "if [ -d ${quote(files)} ]; then rmdir ${quote(files)} || exit 121; fi; " +
@@ -11749,7 +11756,7 @@ index 0000000..93af213
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
-index 0000000..54fbf5b
+index 0000000..bf40a85
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 @@ -0,0 +1,248 @@
@@ -11985,7 +11992,7 @@ index 0000000..54fbf5b
 +                    if (scratchPresent) { status = 255; "[FAIL] file has exist. file:$remote" }
 +                    else { scratchPresent = true; exports++; "Table Name: Photos\n$remote" }
 +                }
-+                script.contains("stat") -> video.size.toString()
++                unquoted.contains("'stat' '-c'") -> video.size.toString()
 +                else -> error("Unexpected recovery command: $command")
 +            }
 +            val proof = Regex("[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f]{64}:[0-9a-f-]{36}").find(script)!!.value
@@ -12003,10 +12010,10 @@ index 0000000..54fbf5b
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..d630b40
+index 0000000..6995722
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,384 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -12140,15 +12147,36 @@ index 0000000..d630b40
 +        create().use { journal ->
 +            val remote = FakeRemote(file())
 +            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
-+            repeat(24) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            repeat(120) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
 +            journal.seal()
 +            remote.failCleanup = true
 +            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
 +            remote.failCleanup = false
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
-+            assertThat(remote.dispatched).isEqualTo(24)
++            assertThat(remote.dispatched).isEqualTo(120)
 +            assertThat(remote.cleanup.size).isGreaterThan(2)
 +            assertThat(remote.cleanup.all { it.length < 10 * 1024 }).isTrue()
++        }
++    }
++
++    @Test fun `normal recording sized session cleans explicit directories in few bounded calls`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            repeat(89) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            val state = mapper.readTree(file().toFile())
++            val owned = state["operations"].map { state["remoteRoot"].asText() + "/" + it["id"].asText() }
++            journal.seal()
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            assertThat(remote.cleanup.size).isAtMost(3)
++            assertThat(remote.cleanup.all { it.length < 10 * 1024 }).isTrue()
++            val cleanup = remote.cleanup.joinToString("\n")
++            owned.forEach { directory -> assertThat(Regex(Regex.escape(directory)).findAll(cleanup).count()).isEqualTo(1) }
++            assertThat(cleanup).doesNotContain("rm -r")
++            assertThat(cleanup).doesNotContain("*")
++            val after = mapper.readTree(file().toFile())
++            assertThat(after["operations"].all { it["markerRemoved"].asBoolean() }).isTrue()
++            assertThat(after["rootRemoved"].asBoolean()).isTrue()
 +        }
 +    }
 +
@@ -12162,6 +12190,35 @@ index 0000000..d630b40
 +            assertThat(remote.cleanup).isEmpty()
 +            remote.proofDelayMillis = 0
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++        }
++    }
++
++    @Test fun `reopened cleanup keeps only acknowledged batches and retries an unconfirmed later batch`() {
++        val remote = FakeRemote(file()).apply { failCleanupCall = 2 }
++        val hdc = HdcClient("fake", remote)
++        create().use { journal ->
++            val tracked = hdc.withRecoveryJournal(journal)
++            repeat(120) { tracked.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            journal.seal()
++            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
++            val state = mapper.readTree(file().toFile())
++            assertThat(remote.cleanup).hasSize(2)
++            val completed = state["operations"].filter { it["markerRemoved"].asBoolean() }
++            assertThat(completed.size).isGreaterThan(0)
++            assertThat(completed.size).isLessThan(120)
++            state["operations"].forEach { operation ->
++                assertThat(operation["markerRemoved"].asBoolean())
++                    .isEqualTo(remote.cleanup.first().contains(operation["id"].asText()))
++            }
++            assertThat(state["rootRemoved"].asBoolean()).isFalse()
++        }
++        val preserved = mapper.readTree(file().toFile())["operations"].filter { it["markerRemoved"].asBoolean() }.map { it["id"].asText() }
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            remote.failCleanupCall = null
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            val resumed = remote.cleanup.drop(2).joinToString("\n")
++            preserved.forEach { assertThat(resumed).doesNotContain(it) }
++            assertThat(remote.dispatched).isEqualTo(120)
 +        }
 +    }
 +
@@ -12313,6 +12370,7 @@ index 0000000..d630b40
 +        var remoteStatus = 0
 +        var output = "device output"
 +        var failCleanup = false
++        var failCleanupCall: Int? = null
 +        var proofDelayMillis = 0L
 +        val cleanup = mutableListOf<String>()
 +        private val mapper = jacksonObjectMapper()
@@ -12334,7 +12392,7 @@ index 0000000..d630b40
 +                return HdcCommandResult(0, if (!proofAvailable) "" else if (foreignProof) proof!!.replaceFirst(':', '-') else proof!!, "")
 +            }
 +            cleanup += script
-+            if (failCleanup) return HdcCommandResult(0, "", "")
++            if (failCleanup || cleanup.size == failCleanupCall) return HdcCommandResult(0, "", "")
 +            val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
 +            return HdcCommandResult(0, nonce, "")
 +        }
