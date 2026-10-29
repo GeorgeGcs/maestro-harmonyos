@@ -32,6 +32,10 @@ Windows PowerShell 5.1 受旧版 .NET 路径长度限制影响。仓库或输出
 | `Repeat` | 每台设备的计划轮数，默认 1 |
 | `Artifacts` | 输出根目录，默认 `artifacts/device-matrix`；每次调用再创建唯一子目录 |
 | `ProbeTimeoutSeconds` | 每条只读环境查询的超时，默认 10 秒 |
+| `RunTimeoutSeconds` | 每次调用运行入口的期限；默认 0 不主动设置期限，CI 应显式传有限值 |
+| `ReportPointerPath` | 新建机器可读指针，直接定位本次 matrix.json；已有文件会被拒绝 |
+| `ControlRecordDirectory` | 可选的新目录，用于每轮 runner 控制记录及独立 control-index.json；不能复用 |
+| `MatrixInvocationId` | 调用方预分配的 UUID，用于把 control-index 与外层持久预约对应；默认生成新 ID |
 
 ## 结果和证据
 
@@ -48,6 +52,10 @@ Windows PowerShell 5.1 受旧版 .NET 路径长度限制影响。仓库或输出
 - `running`、`pending`：过程状态。汇总在每轮前后写入；强制结束 PowerShell 时可能保留这些状态，应按未完成记录处理。
 
 每轮保留 `agentStatus`、`agentError`、`runResultPath`、`evidenceIndexPath`、`cleanup` 和 `effects`，字段来源见[智能体协议](agent-protocol.md)。设备清理未确认时，该设备后续计划轮次不继续执行；这类未执行项保留原因。已确认收尾的普通断言失败不会改写为成功。
+
+结果为 `cancelled` 时，即使清理完成，也停止该设备的剩余轮次。外层多场景计划需要继续传播这个停止条件，不能重新调用矩阵绕过它。
+
+启用控制记录后，全部轮次在第一次执行前登记为 `planned`，调用 runner 前原子写入 `launching`，调用返回后写入 `returned`。记录返回仅证明调用栈已返回，进程退出与设备清理仍需核对 runner 及原会话凭据。发生强制终止时保留最后状态；缺少控制记录不能推断没有启动。此索引是独立格式，不改 matrix v1 字段，也不会自行取得 CI 的跨作业预约。需要持久阻止后续作业时使用[CI 入口](ci.md)。
 
 汇总通过率的分母是全部计划轮次，未执行项不会被静默排除。每一轮的 `manualIntervention` 初始为 `unknown`，工具无法知道期间是否有人操作了手机，分析结果时需结合观察记录补充审查。脚本退出 0 表示全部计划轮次得到确认通过；其他情况退出 1。结果只覆盖实际测试的设备、版本和流程，不能据此推断未测场景或其他设备兼容。
 

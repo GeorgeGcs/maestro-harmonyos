@@ -8,7 +8,11 @@ param(
     [hashtable]$Env = @{},
     [Alias('ArtifactsRoot')][string]$Artifacts,
     [ValidateRange(1, 1000)][int]$Repeat = 1,
-    [ValidateRange(1, 60)][int]$ProbeTimeoutSeconds = 10
+    [ValidateRange(1, 60)][int]$ProbeTimeoutSeconds = 10,
+    [string]$ReportPointerPath,
+    [string]$ControlRecordDirectory,
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$MatrixInvocationId = [guid]::NewGuid().ToString(),
+    [ValidateRange(0, 86400)][int]$RunTimeoutSeconds = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,8 +23,35 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $report = $null
 $matrixDirectory = $null
 $matrixExit = 1
+$pointerPath = $null
+$controlDirectory = $null
+$controlIndex = $null
+$controlIndexPath = $null
 
 function Get-MatrixTimestamp { return [DateTimeOffset]::UtcNow.ToString('o') }
+
+function Assert-MatrixControlPath {
+    param([string]$Path)
+    for ($current = [IO.Path]::GetFullPath($Path); $current; $current = [IO.Path]::GetDirectoryName($current)) {
+        if ((Test-Path -LiteralPath $current) -and
+            (((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'Matrix control records must not follow links.'
+        }
+    }
+}
+
+function Write-MatrixControlIndex {
+    param([switch]$Initial)
+    Assert-MatrixControlPath $controlIndexPath
+    $temporary = $controlIndexPath + '.' + [guid]::NewGuid().ToString('N') + '.pending'
+    $bytes = $utf8.GetBytes(($controlIndex | ConvertTo-Json -Depth 12))
+    try {
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+        if ($Initial) { [IO.File]::Move($temporary, $controlIndexPath) }
+        else { [IO.File]::Replace($temporary, $controlIndexPath, [NullString]::Value) }
+    } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+}
 
 function ConvertTo-MatrixArgument {
     param([AllowEmptyString()][string]$Value)
@@ -221,6 +252,18 @@ function Write-MatrixReport {
 
 try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'This entry point currently supports Windows PowerShell only.' }
+    if ($PSBoundParameters.ContainsKey('ControlRecordDirectory')) {
+        if ([string]::IsNullOrWhiteSpace($ControlRecordDirectory)) { throw 'ControlRecordDirectory must not be blank.' }
+        $controlDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ControlRecordDirectory)
+        Assert-MatrixControlPath $controlDirectory
+        if (Test-Path -LiteralPath $controlDirectory) { throw 'ControlRecordDirectory already exists; each invocation needs a new directory.' }
+        $controlIndexPath = Join-Path $controlDirectory 'control-index.json'
+    }
+    if ($PSBoundParameters.ContainsKey('ReportPointerPath')) {
+        if ([string]::IsNullOrWhiteSpace($ReportPointerPath)) { throw 'ReportPointerPath must not be blank.' }
+        $pointerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPointerPath)
+        if (Test-Path -LiteralPath $pointerPath) { throw 'ReportPointerPath already exists; previous invocation pointers are never overwritten.' }
+    }
     $localConfig = Join-Path $projectRoot 'config.local.ps1'
     if (Test-Path -LiteralPath $localConfig -PathType Leaf) { . $localConfig }
     $flowItem = Get-Item -LiteralPath $FlowPath
@@ -275,6 +318,23 @@ try {
     }
     Write-Output ('Matrix artifacts: ' + $matrixDirectory)
     Write-MatrixReport
+    if ($controlDirectory) {
+        $null = [IO.Directory]::CreateDirectory($controlDirectory)
+        $controlIndex = [ordered]@{ protocol = 'maestro.harmonyos.control-index'; schemaVersion = 1; invocationId = $MatrixInvocationId; matrixRoot = $matrixDirectory; entries = @() }
+        foreach ($run in $report.runs) {
+            $controlIndex.entries += [ordered]@{ deviceId = $run.deviceId; runId = $run.runId; attemptId = $run.attemptId; attemptNo = $run.round; controlRecordPath = (Join-Path $controlDirectory ($run.attemptId + '.json')); dispatchState = 'planned' }
+        }
+        Write-MatrixControlIndex -Initial
+    }
+    if ($pointerPath) {
+        $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($pointerPath))
+        $staging = $pointerPath + '.' + [guid]::NewGuid().ToString('N') + '.pending'
+        try {
+            $pointer = [ordered]@{ protocol = 'maestro.harmonyos.matrix-pointer'; schemaVersion = 1; matrixDirectory = $matrixDirectory; reportPath = (Join-Path $matrixDirectory 'matrix.json') }
+            [IO.File]::WriteAllText($staging, ($pointer | ConvertTo-Json), $utf8)
+            [IO.File]::Move($staging, $pointerPath)
+        } finally { if (Test-Path -LiteralPath $staging -PathType Leaf) { [IO.File]::Delete($staging) } }
+    }
     foreach ($device in $report.devices) {
         $deviceUnavailable = $null
         foreach ($run in @($report.runs | Where-Object { $_.deviceKey -eq $device.key })) {
@@ -296,15 +356,26 @@ try {
             Write-MatrixReport
             $parameters = @{ FlowPath = $flowItem.FullName; BundleId = $BundleId; AbilityName = $AbilityName; DeviceId = $device.id; Env = $Env; Artifacts = $run.artifactDirectory; AgentRoot = $agentDirectory; RunId = $run.runId; AttemptId = $run.attemptId; AttemptNo = $run.round }
             if ($PSBoundParameters.ContainsKey('Module')) { $parameters.Module = $Module }
+            if ($RunTimeoutSeconds -gt 0) { $parameters.RunTimeoutSeconds = $RunTimeoutSeconds }
+            if ($controlIndex) {
+                $controlEntry = $controlIndex.entries | Where-Object { $_.attemptId -ceq $run.attemptId }
+                $parameters.ControlRecordPath = $controlEntry.controlRecordPath
+                $controlEntry.dispatchState = 'launching'
+                Write-MatrixControlIndex
+            }
             try {
                 $global:LASTEXITCODE = $null
                 & $runner @parameters *> $run.log
                 $run.cliExitCode = $LASTEXITCODE
+                if ($controlIndex) {
+                    $controlEntry.dispatchState = 'returned'
+                    Write-MatrixControlIndex
+                }
                 if ($null -eq $run.cliExitCode) { throw 'The runner did not report an exit code.' }
                 $agentResult = Read-MatrixAgentResult $run
                 $run.status = $agentResult.status
                 if ($null -ne $agentResult.error) { $run.reason = $agentResult.error.kind + '/' + $agentResult.error.code + ': ' + $agentResult.error.message }
-                if ($agentResult.cleanup.state -ne 'complete' -or $agentResult.status -eq 'unknown') {
+                if ($agentResult.cleanup.state -ne 'complete' -or $agentResult.status -in @('unknown', 'cancelled')) {
                     $deviceUnavailable = 'The previous attempt did not confirm safe handoff. Remaining rounds require device/session inspection and were not run.'
                 }
             } catch [OperationCanceledException] { throw } catch {

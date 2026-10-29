@@ -1,0 +1,168 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
+import org.gradle.api.GradleException
+
+// Optional local source for the exact official release, not a replacement binary build.
+// Both properties are explicit so the cache need not live inside the source checkout.
+String sha256(InputStream input) {
+    def digest = MessageDigest.getInstance('SHA-256')
+    input.withCloseable { stream ->
+        byte[] block = new byte[65536]
+        int count
+        while ((count = stream.read(block)) != -1) digest.update(block, 0, count)
+    }
+    digest.digest().encodeHex().toString()
+}
+
+Map<String, String> fileHashes(File directory) {
+    def result = [:]
+    Files.walk(directory.toPath()).withCloseable { paths ->
+        paths.forEach { file ->
+            if (Files.isSymbolicLink(file)) throw new GradleException('Generated resources must not contain links.')
+            if (!Files.isDirectory(file, LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) throw new GradleException('Unexpected generated resource entry.')
+                def relative = directory.toPath().relativize(file).toString().replace('\\', '/')
+                result[relative] = sha256(Files.newInputStream(file))
+            }
+        }
+    }
+    result
+}
+
+File requiredDirectoryProperty(String name) {
+    def value = System.getProperty(name)
+    if (!value || !new File(value).isAbsolute()) throw new GradleException("Specify -D${name}=<absolute directory>.")
+    def directory = new File(value).canonicalFile
+    if (!directory.isDirectory()) throw new GradleException("Directory does not exist: ${name}")
+    directory
+}
+
+def repository = requiredDirectoryProperty('maestro.harmonyosRepository')
+def cacheDirectory = requiredDirectoryProperty('maestro.simulatorCache')
+def resources = new JsonSlurper().parse(new File(repository, 'scripts/gradle/simulator-resources.lock.json'))
+def upstream = new JsonSlurper().parse(new File(repository, 'upstream.lock.json'))
+if (resources.schemaVersion != 1 || resources.upstreamCommit != '3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c' ||
+        upstream.commit != resources.upstreamCommit || resources.simulatorVersion != '37010dc7' ||
+        upstream.repository != 'https://github.com/mobile-dev-inc/Maestro.git' ||
+        new File(upstream.checkoutPath.toString()).isAbsolute()) {
+    throw new GradleException('The upstream/resource lock changed; review this init script with the new baseline.')
+}
+def version = resources.simulatorVersion.toString()
+def archives = resources.archives
+def expectedNames = [
+    darwin: "simulator-server-${version}-darwin-universal.tar.gz".toString(),
+    linux: "simulator-server-${version}-linux-x86_64.tar.gz".toString(),
+    windows: "simulator-server-${version}-windows-x86_64.zip".toString()
+]
+if (!(archives instanceof List) || archives.size() != 3 || archives.collectEntries { [(it.platform): it.name] } != expectedNames ||
+        resources.manifest.name != 'SHA256SUMS' || resources.manifest.sha256 != 'af22b3f2f4c548072f03f173ce9eb3433ab6c7f202d1f0ec4f391184f765c688') {
+    throw new GradleException('Unexpected simulator release files or manifest hash.')
+}
+
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    // -p may select a separate clean checkout. Its actual Git HEAD is checked below.
+    def expectedUpstream = root.projectDir.canonicalFile
+    def catalog = new File(root.projectDir, 'gradle/libs.versions.toml').getText('UTF-8')
+    if (!(catalog =~ /(?m)^simulatorServer\s*=\s*"37010dc7"\s*$/).find()) {
+        throw new GradleException('The target build requests a different simulator-server version.')
+    }
+    def cli = root.project(':maestro-cli')
+    def outputDirectory = cli.layout.buildDirectory.dir('generated/simulator-server').get().asFile.canonicalFile
+    def expectedDirectory = new File(expectedUpstream, 'maestro-cli/build/generated/simulator-server').absoluteFile
+    if (outputDirectory != expectedDirectory || !outputDirectory.toPath().startsWith(expectedUpstream.toPath())) {
+        throw new GradleException('Refusing to replace resources outside the expected generated directory.')
+    }
+    boolean preparedThisRun = false
+    Map<String, String> expectedFiles = [:]
+    def verifyOutput = {
+        if (!outputDirectory.isDirectory() || fileHashes(outputDirectory) != expectedFiles) {
+            throw new GradleException('Generated resource paths and hashes differ from the verified archive contents.')
+        }
+    }
+    def prepare = cli.tasks.register('prepareVerifiedSimulatorServerCache') {
+        // No outputs declaration: inputs and generated files are rechecked for every invocation.
+        doLast {
+            preparedThisRun = false
+            expectedFiles.clear()
+            def git = new ProcessBuilder('git', '-C', expectedUpstream.path, 'rev-parse', 'HEAD').redirectErrorStream(true).start()
+            try {
+                if (!git.waitFor(10, TimeUnit.SECONDS)) throw new GradleException('Git baseline check timed out.')
+                def head = new String(git.inputStream.readNBytes(4096), 'UTF-8').trim()
+                if (git.exitValue() != 0 || head != resources.upstreamCommit) throw new GradleException('Upstream HEAD does not match the pinned source commit.')
+            } finally {
+                if (git.isAlive()) git.destroyForcibly()
+                git.inputStream.close()
+            }
+            def checkFile = { reference ->
+                def file = new File(cacheDirectory, reference.name.toString())
+                if (!file.isFile() || file.length() != reference.bytes || !(reference.sha256 ==~ /[0-9a-f]{64}/) ||
+                        sha256(file.newInputStream()) != reference.sha256) {
+                    throw new GradleException("Missing or invalid official resource: ${reference.name}")
+                }
+                file
+            }
+            def sumsFile = checkFile(resources.manifest)
+            def sums = [:]
+            sumsFile.eachLine('UTF-8') { line ->
+                def match = line =~ /^([0-9a-fA-F]{64})\s+\*?([A-Za-z0-9][A-Za-z0-9._-]*)$/
+                if (!match.matches() || sums.containsKey(match[0][2])) throw new GradleException('Invalid or duplicate SHA256SUMS entry.')
+                sums[match[0][2]] = match[0][1].toLowerCase(Locale.ROOT)
+            }
+            def pinnedHashes = archives.collectEntries { [(it.name): it.sha256] }
+            if (sums != pinnedHashes) throw new GradleException('Official SHA256SUMS does not match the pinned archive set.')
+            def trees = [:]
+            archives.each { reference ->
+                def archive = checkFile(reference)
+                def platform = reference.platform.toString()
+                def tree = platform == 'windows' ? cli.zipTree(archive) : cli.tarTree(cli.resources.gzip(archive))
+                def seen = new HashSet<String>()
+                tree.visit { detail ->
+                    def relative = detail.relativePath.pathString
+                    if (relative && (relative.startsWith('/') || relative.contains('\\') || relative.contains(':') ||
+                            relative.split('/').any { it == '.' || it == '..' || it.isEmpty() })) {
+                        throw new GradleException('Unsafe path in verified resource archive.')
+                    }
+                    if (!detail.directory) {
+                        if (!relative || !seen.add(relative.toLowerCase(Locale.ROOT))) throw new GradleException('Duplicate archive path.')
+                        def key = "deps/simulator-server/${platform}/${relative}".toString()
+                        expectedFiles[key] = sha256(detail.open())
+                    }
+                }
+                def binary = "deps/simulator-server/${platform}/simulator-server${platform == 'windows' ? '.exe' : ''}".toString()
+                if (!expectedFiles.containsKey(binary)) throw new GradleException("Archive lacks the ${platform} executable.")
+                trees[platform] = tree
+            }
+            // Verify every archive before replacing only the checked generated resource tree.
+            if (outputDirectory.exists()) fileHashes(outputDirectory)
+            cli.delete(outputDirectory)
+            trees.each { platform, tree ->
+                cli.copy { from(tree); into(new File(outputDirectory, "deps/simulator-server/${platform}")) }
+            }
+            new File(outputDirectory, 'simulator-server-version.txt').setText(version, 'UTF-8')
+            expectedFiles['simulator-server-version.txt'] = sha256(new ByteArrayInputStream(version.getBytes('UTF-8')))
+            verifyOutput()
+            def reportDirectory = new File(cli.layout.buildDirectory.get().asFile, 'reports/simulator-cache')
+            Files.createDirectories(reportDirectory.toPath())
+            def record = [schemaVersion: 1, upstreamCommit: resources.upstreamCommit, simulatorVersion: version,
+                          releaseBaseUrl: resources.releaseBaseUrl, manifestSha256: resources.manifest.sha256,
+                          archiveSha256: pinnedHashes, generatedFiles: expectedFiles, generatedFileCount: expectedFiles.size()]
+            new File(reportDirectory, 'preparation.json').setText(JsonOutput.prettyPrint(JsonOutput.toJson(record)) + '\n', 'UTF-8')
+            preparedThisRun = true
+            logger.lifecycle("Verified official simulator resources and prepared ${expectedFiles.size()} files; cache left unchanged.")
+        }
+    }
+    cli.tasks.named('downloadSimulatorServer').configure {
+        dependsOn(prepare)
+        onlyIf {
+            if (!preparedThisRun) throw new GradleException('The resource cache was not verified in this invocation.')
+            verifyOutput()
+            logger.lifecycle('Using verified official release archives instead of the network download action.')
+            false
+        }
+    }
+}

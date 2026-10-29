@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+  "simulatorVersion": "37010dc7",
+  "releaseBaseUrl": "https://github.com/mobile-dev-inc/simulator-server-releases/releases/download/simulator-server-37010dc7",
+  "manifest": {
+    "name": "SHA256SUMS",
+    "bytes": 339,
+    "sha256": "af22b3f2f4c548072f03f173ce9eb3433ab6c7f202d1f0ec4f391184f765c688"
+  },
+  "archives": [
+    {
+      "platform": "darwin",
+      "name": "simulator-server-37010dc7-darwin-universal.tar.gz",
+      "bytes": 7487838,
+      "sha256": "2656d5acef36240336d513621a313561f57d9424748e5c3cdeedb73245b067ec"
+    },
+    {
+      "platform": "linux",
+      "name": "simulator-server-37010dc7-linux-x86_64.tar.gz",
+      "bytes": 53483507,
+      "sha256": "00fcabe51c2913bd8e07b183930e25d95e071c0057bc209ad0d27711454755c4"
+    },
+    {
+      "platform": "windows",
+      "name": "simulator-server-37010dc7-windows-x86_64.zip",
+      "bytes": 77794484,
+      "sha256": "b9d22177cbb79558f2b3a24c5b55e806d19c0c994f947730518ddab7a2994937"
+    }
+  ]
+}

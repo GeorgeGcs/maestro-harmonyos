@@ -10,7 +10,11 @@ param(
     [string]$AgentRoot,
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$RunId = [guid]::NewGuid().ToString(),
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$AttemptId = [guid]::NewGuid().ToString(),
-    [ValidateRange(1, 2147483647)][int]$AttemptNo = 1
+    [ValidateRange(1, 2147483647)][int]$AttemptNo = 1,
+    [ValidateRange(0, 604800)][int]$RunTimeoutSeconds = 0,
+    [ValidateRange(1, 300)][int]$TerminationWaitSeconds = 5,
+    [ValidateRange(1, 300)][int]$OutputDrainSeconds = 5,
+    [string]$ControlRecordPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +24,60 @@ $originalEnvironment = [Environment]::GetEnvironmentVariables('Process')
 $runProcess = $null
 $runExitCode = 1
 $invocation = $null
+$control = $null
+$controlPath = $null
+$controlCreated = $false
+$processIdentity = $null
+$processExitCode = $null
+$stdoutTask = $null
+$stderrTask = $null
+$stdoutLog = $null
+$stderrLog = $null
+
+function Write-RunnerControl {
+    param([switch]$Create)
+    $control.updatedAt = [DateTime]::UtcNow.ToString('o')
+    $temporary = Join-Path ([IO.Path]::GetDirectoryName($controlPath)) ('.' + [guid]::NewGuid().ToString('N') + '.pending')
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($control | ConvertTo-Json -Depth 12))
+    $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    try {
+        if ($Create) { [IO.File]::Move($temporary, $controlPath) }
+        else { [IO.File]::Replace($temporary, $controlPath, [NullString]::Value) }
+    } finally { if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) } }
+}
+
+function Assert-RunnerControlPath {
+    param([string]$Path)
+    $current = [IO.Path]::GetFullPath($Path)
+    while ($current) {
+        if ((Test-Path -LiteralPath $current) -and (((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'Runner control records must not follow file or directory links.'
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+}
+
+function Stop-RunnerProcess {
+    param([string]$Reason)
+    if ($null -eq $runProcess -or $runProcess.HasExited) { return }
+    if ($null -eq $processIdentity -or $runProcess.Id -ne $processIdentity.pid -or
+        $runProcess.StartTime.ToUniversalTime().Ticks -ne $processIdentity.startTimeTicks -or
+        -not [string]::Equals($runProcess.MainModule.FileName, $processIdentity.executable, [StringComparison]::OrdinalIgnoreCase)) {
+        throw ('The owned Java process identity could not be confirmed; no termination was sent. PID match=' + ($runProcess.Id -eq $processIdentity.pid) + ', start match=' + ($runProcess.StartTime.ToUniversalTime().Ticks -eq $processIdentity.startTimeTicks) + ', executable match=' + [string]::Equals($runProcess.MainModule.FileName, $processIdentity.executable, [StringComparison]::OrdinalIgnoreCase))
+    }
+    $control.stopReason = $Reason
+    $control.terminationRequested = $true
+    $control.terminationRequestedAt = [DateTime]::UtcNow.ToString('o')
+    $control.phase = 'stopping'
+    # Persist intent before Kill. A lost host never implies the device operation stopped.
+    try { Write-RunnerControl } catch { $control.error = 'Could not persist termination intent: ' + $_.Exception.Message }
+    $runProcess.Kill()
+    $control.processExitObserved = $runProcess.WaitForExit($TerminationWaitSeconds * 1000)
+    if ($control.processExitObserved) { $control.processExitCode = $runProcess.ExitCode }
+    $control.phase = 'unknown'
+    Write-RunnerControl
+}
 
 function ConvertTo-WindowsArgument {
     param([AllowEmptyString()][string]$Value)
@@ -59,6 +117,7 @@ function Get-JavaLauncherEncoding {
         $outputTask = $probe.StandardOutput.ReadToEndAsync()
         $errorTask = $probe.StandardError.ReadToEndAsync()
         if (-not $probe.WaitForExit(10000)) { throw 'Java version probe timed out.' }
+        if (-not $outputTask.Wait(1000) -or -not $errorTask.Wait(1000)) { throw 'Java version probe output did not close.' }
         $details = $outputTask.GetAwaiter().GetResult() + $errorTask.GetAwaiter().GetResult()
         $version = [regex]::Match($details, '(?m)^\s*java\.specification\.version\s*=\s*(\d+)\s*$')
         $encoding = [regex]::Match($details, '(?m)^\s*sun\.jnu\.encoding\s*=\s*(\S+)\s*$')
@@ -170,6 +229,31 @@ try {
         agentStatus = 'pending'; reason = $null
     }
     [IO.File]::WriteAllText((Join-Path $artifactDirectory 'invocation.json'), ($invocation | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    $controlPath = if ($ControlRecordPath) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ControlRecordPath) } else { Join-Path $artifactDirectory 'execution-control.json' }
+    $controlPath = [IO.Path]::GetFullPath($controlPath)
+    Assert-RunnerControlPath $controlPath
+    $null = [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($controlPath))
+    if ([IO.File]::Exists($controlPath)) { throw 'ControlRecordPath already exists; each launch must use a new record.' }
+    $argumentHasher = [Security.Cryptography.SHA256]::Create()
+    try { $argumentHash = ([BitConverter]::ToString($argumentHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($arguments | ConvertTo-Json -Compress))))).Replace('-', '').ToLowerInvariant() } finally { $argumentHasher.Dispose() }
+    $control = [ordered]@{
+        protocol = 'maestro.harmonyos.runner-control'; schemaVersion = 1
+        launchId = [guid]::NewGuid().ToString(); runId = $RunId; attemptId = $AttemptId; attemptNo = $AttemptNo
+        deviceId = $DeviceId; createdAt = [DateTime]::UtcNow.ToString('o'); updatedAt = $null; phase = 'launching'
+        artifactDirectory = $artifactDirectory; invocationPath = (Join-Path $artifactDirectory 'invocation.json'); runResultPath = $invocation.runResultPath
+        executable = [IO.Path]::GetFullPath($javaExecutable); argumentsSha256 = $argumentHash
+        process = $null; processExitObserved = $false; processExitCode = $null; wrapperExitCode = $null
+        runTimeoutSeconds = $RunTimeoutSeconds; terminationWaitSeconds = $TerminationWaitSeconds; outputDrainSeconds = $OutputDrainSeconds
+        terminationRequested = $false; terminationRequestedAt = $null; stopReason = $null
+        stdoutComplete = $false; stderrComplete = $false; agentStatus = 'pending'; error = $null
+        stdoutPath = (Join-Path $artifactDirectory 'stdout.log'); stderrPath = (Join-Path $artifactDirectory 'stderr.log')
+    }
+    Write-RunnerControl -Create
+    $controlCreated = $true
+    $stdoutLog = [IO.StreamWriter]::new($control.stdoutPath, $false, [Text.UTF8Encoding]::new($false))
+    $stderrLog = [IO.StreamWriter]::new($control.stderrPath, $false, [Text.UTF8Encoding]::new($false))
+    $stdoutLog.AutoFlush = $true
+    $stderrLog.AutoFlush = $true
     Write-Output ('Artifacts: ' + $artifactDirectory)
     $runProcess = [Diagnostics.Process]::new()
     $runProcess.StartInfo.FileName = $javaExecutable
@@ -187,36 +271,72 @@ try {
     $runProcess.StartInfo.CreateNoWindow = $true
     $runProcess.StartInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $null = $runProcess.Start()
+    # MainModule can still be null immediately after Start. Check it against this launch target when terminating.
+    $processIdentity = [ordered]@{ pid = $runProcess.Id; startTimeTicks = $runProcess.StartTime.ToUniversalTime().Ticks; executable = $control.executable }
+    $control.process = $processIdentity
+    $control.phase = 'running'
+    Write-RunnerControl
+    $runClock = [Diagnostics.Stopwatch]::StartNew()
+    $exitClock = $null
     $stdoutTask = $runProcess.StandardOutput.ReadLineAsync()
     $stderrTask = $runProcess.StandardError.ReadLineAsync()
-    while ($null -ne $stdoutTask -or $null -ne $stderrTask) {
+    while ($true) {
+        $outputWasReady = $false
         if ($null -ne $stdoutTask -and $stdoutTask.IsCompleted) {
+            $outputWasReady = $true
             $line = $stdoutTask.GetAwaiter().GetResult()
-            if ($null -eq $line) { $stdoutTask = $null } else {
+            if ($null -eq $line) { $stdoutTask = $null; $control.stdoutComplete = $true } else {
+                $stdoutLog.WriteLine($line)
                 Write-Output $line
                 $stdoutTask = $runProcess.StandardOutput.ReadLineAsync()
             }
         }
         if ($null -ne $stderrTask -and $stderrTask.IsCompleted) {
+            $outputWasReady = $true
             $line = $stderrTask.GetAwaiter().GetResult()
-            if ($null -eq $line) { $stderrTask = $null } else {
+            if ($null -eq $line) { $stderrTask = $null; $control.stderrComplete = $true } else {
+                $stderrLog.WriteLine($line)
                 [Console]::Error.WriteLine($line)
                 $stderrTask = $runProcess.StandardError.ReadLineAsync()
             }
         }
-        if ($null -ne $stdoutTask -or $null -ne $stderrTask) { Start-Sleep -Milliseconds 10 }
+        if ($runProcess.HasExited) {
+            if ($null -eq $exitClock) {
+                $exitClock = [Diagnostics.Stopwatch]::StartNew()
+                $processExitCode = $runProcess.ExitCode
+                $control.processExitObserved = $true
+                $control.processExitCode = $processExitCode
+            }
+            if ($null -eq $stdoutTask -and $null -eq $stderrTask) { break }
+            if ($exitClock.Elapsed.TotalSeconds -ge $OutputDrainSeconds) {
+                if (-not $control.stopReason) { $control.stopReason = 'output_drain_timeout' }
+                break
+            }
+        } elseif ($RunTimeoutSeconds -gt 0 -and $runClock.Elapsed.TotalSeconds -ge $RunTimeoutSeconds) {
+            Stop-RunnerProcess 'run_timeout'
+            if (-not $runProcess.HasExited) { break }
+        }
+        if (-not $outputWasReady) { Start-Sleep -Milliseconds 10 }
     }
-    $runProcess.WaitForExit()
-    $runExitCode = $runProcess.ExitCode
+    if ($null -ne $processExitCode) { $runExitCode = $processExitCode }
+    if ($control.stopReason -or -not $control.processExitObserved) { $runExitCode = 1 }
 } catch {
+    if ($null -ne $control) { $control.error = $_.Exception.Message }
     Write-Error -Message $_.Exception.Message -ErrorAction Continue
 } finally {
     if ($null -ne $runProcess) {
         try {
-            if (-not $runProcess.HasExited) { $runProcess.Kill(); $null = $runProcess.WaitForExit(5000) }
-        } catch { }
+            if (-not $runProcess.HasExited -and -not $control.terminationRequested) { Stop-RunnerProcess 'runner_error' }
+            if ($runProcess.HasExited -and $null -ne $control) {
+                $processExitCode = $runProcess.ExitCode
+                $control.processExitObserved = $true
+                $control.processExitCode = $processExitCode
+            }
+        } catch { if ($null -ne $control) { $control.error = $_.Exception.Message; $control.phase = 'unknown' } }
         $runProcess.Dispose()
     }
+    if ($null -ne $stdoutLog) { $stdoutLog.Dispose() }
+    if ($null -ne $stderrLog) { $stderrLog.Dispose() }
     if ($null -ne $invocation) {
         $invocation.cliExitCode = $runExitCode
         try {
@@ -232,6 +352,12 @@ try {
         }
         [IO.File]::WriteAllText((Join-Path $artifactDirectory 'invocation.json'), ($invocation | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
         Write-Output ('Agent result: ' + $invocation.runResultPath + ' (' + $invocation.agentStatus + ')')
+    }
+    if ($controlCreated) {
+        $control.wrapperExitCode = $runExitCode
+        $control.agentStatus = $invocation.agentStatus
+        $control.phase = if ($control.processExitObserved -and -not $control.stopReason -and -not $control.error) { 'exited' } else { 'unknown' }
+        try { Write-RunnerControl } catch { Write-Error -Message ('Could not persist runner control: ' + $_.Exception.Message) -ErrorAction Continue; $runExitCode = 1 }
     }
     $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
     foreach ($name in $currentEnvironment.Keys) {

@@ -1,3 +1,67 @@
+diff --git a/maestro-cli/mcp-viewer/package-lock.json b/maestro-cli/mcp-viewer/package-lock.json
+index c2ccec4..baefea6 100644
+--- a/maestro-cli/mcp-viewer/package-lock.json
++++ b/maestro-cli/mcp-viewer/package-lock.json
+@@ -233,9 +233,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -252,9 +249,6 @@
+       "cpu": [
+         "arm64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -271,9 +265,6 @@
+       "cpu": [
+         "ppc64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -290,9 +281,6 @@
+       "cpu": [
+         "s390x"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -309,9 +297,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "glibc"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
+@@ -328,9 +313,6 @@
+       "cpu": [
+         "x64"
+       ],
+-      "libc": [
+-        "musl"
+-      ],
+       "license": "MIT",
+       "optional": true,
+       "os": [
 diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
 index 8df1b2f..61fb3d4 100644
 --- a/maestro-cli/src/main/java/maestro/cli/App.kt
@@ -439,10 +503,10 @@ index f2f7bae..a13e0e6 100644
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
 new file mode 100644
-index 0000000..204fbc9
+index 0000000..0b0495b
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,399 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -785,6 +849,7 @@ index 0000000..204fbc9
 +            writeJson(directory.resolve("result.json"), result)
 +            val files = (listOf("input.json", "result.json", "evidence-index.json", "state.json", "registration.json") +
 +                (if (data["flow"] != null) listOf("flow.yaml") else emptyList()) +
++                listOfNotNull(artifacts()["junitPath"] as? String) +
 +                (artifacts()["manifestPaths"] as List<*>).filterIsInstance<String>().filter { it != "agent-manifest.json" })
 +                .distinct().filter { Files.isRegularFile(directory.resolve(it)) }
 +            writeJson(directory.resolve("agent-manifest.json"), mapOf(
@@ -2034,10 +2099,10 @@ index 0000000..f892702
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..f9982ba
+index 0000000..6a9efb4
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,314 @@
+@@ -0,0 +1,372 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -2048,6 +2113,11 @@ index 0000000..f9982ba
 +import maestro.orchestra.Orchestra
 +import maestro.orchestra.SourceInfo
 +import maestro.orchestra.debug.CommandOutcome
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceArtifacts
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.RetryExecutionEvent
 +import maestro.orchestra.debug.OrchestraListener
 +import maestro.orchestra.yaml.YamlCommandReader
 +import java.io.File
@@ -2122,6 +2192,9 @@ index 0000000..f9982ba
 +    inner class FlowObserver(private val flowFile: File, private val artifactsDir: Path, commands: List<MaestroCommand>) : OrchestraListener {
 +        private val active = IdentityHashMap<MaestroCommand, ArrayDeque<String>>()
 +        private val steps = linkedMapOf<Int, String>()
++        private val stepSources = linkedMapOf<String, Map<String, Any?>>()
++        internal val retryTrace = HarmonyOsRetryTrace(attempt.runId, attempt.attemptId,
++            flowFile.absolutePath, sourceHashes[flowFile.toPath().toAbsolutePath().normalize().toString()])
 +        private val failedSteps = linkedSetOf<String>()
 +        private var indexed = false
 +        private val sourceIndices = collectCommands(commands).mapNotNull { it.sourceInfo }.groupBy { it.path }.values
@@ -2161,7 +2234,48 @@ index 0000000..f9982ba
 +            val index = info?.let { sourceIndices[sourceKey(it)] } ?: commandIndex
 +            val id = attempt.startStep(sourcePath, index, commandName, mutating)
 +            active.getOrPut(cmd) { ArrayDeque() }.addLast(id)
++            stepSources[id] = mapOf("sourcePath" to sourcePath,
++                "sourceSha256" to info?.path?.let { sourceHashes[Path.of(it).toAbsolutePath().normalize().toString()] },
++                "commandIndex" to index, "commandName" to commandName, "sourceOffset" to info?.startOffset,
++                "sourceOrigin" to if (info == null) "generated" else "yaml",
++                "commandOptional" to (cmd.asCommand()?.optional == true),
++                "selectorOptional" to (cmd.elementSelector()?.optional == true))
 +        }
++
++        private inline fun observeTrace(block: () -> Unit) {
++            try { block() } catch (error: Throwable) { retryTrace.failed(error) }
++        }
++
++        override fun onExecutionTraceReady(artifacts: ExecutionTraceArtifacts) = retryTrace.ready(artifacts)
++
++        override fun onCommandExecutionStarted(cmd: MaestroCommand, context: ExecutionContext, depth: Int, event: ExecutionEvent) {
++            try { onCommandStart(cmd, context.executionSequence, depth) }
++            catch (error: Throwable) { retryTrace.failed(error); throw error }
++            observeTrace {
++                val id = checkNotNull(steps[context.executionSequence])
++                retryTrace.stepStarted(id, context, checkNotNull(stepSources[id]), event)
++            }
++        }
++
++        override fun onCommandExecutionFinished(cmd: MaestroCommand, context: ExecutionContext, outcome: CommandOutcome,
++            startedAt: Long, finishedAt: Long, event: ExecutionEvent) {
++            // Capture the existing identity before the legacy callback removes its active entry.
++            val id = steps[context.executionSequence]
++            try { onCommandFinished(cmd, outcome, startedAt, finishedAt) }
++            finally {
++                observeTrace { retryTrace.stepFinished(checkNotNull(id), context, outcome.javaClass.simpleName,
++                    (outcome as? CommandOutcome.Failed)?.error, event) }
++            }
++        }
++
++        override fun onCommandExecutionInterrupted(cmd: MaestroCommand, context: ExecutionContext, error: Throwable,
++            startedAt: Long, finishedAt: Long, event: ExecutionEvent) = observeTrace {
++            retryTrace.stepFinished(checkNotNull(steps[context.executionSequence]), context, "Interrupted", error, event)
++        }
++
++        override fun onRetryExecution(event: RetryExecutionEvent) = retryTrace.retry(event)
++
++        override fun onExecutionTraceEnd(end: ExecutionTraceEnd) = retryTrace.ended(end)
 +
 +        override fun onCommandStart(cmd: MaestroCommand, sequenceNumber: Int, depth: Int) = observe {
 +            steps[sequenceNumber] = checkNotNull(active[cmd]?.lastOrNull()) { "Command was not durably registered before dispatch." }
@@ -2181,7 +2295,15 @@ index 0000000..f9982ba
 +            }
 +        }
 +
-+        fun finished(result: Orchestra.FlowResult) = observe {
++        fun finished(result: Orchestra.FlowResult): Orchestra.FlowResult {
++            // Seal first: the v1 evidence hashes below must describe the final bytes.
++            retryTrace.seal(result.success)
++            val sealedResult = retryTrace.artifactManifest?.let { result.copy(artifactManifest = it) } ?: result
++            indexFinished(sealedResult)
++            return sealedResult
++        }
++
++        private fun indexFinished(result: Orchestra.FlowResult) = observe {
 +            completedFlows++
 +            if (!result.success) failedFlows++
 +            val captured = mutableMapOf<String, MutableSet<String>>()
@@ -2227,6 +2349,7 @@ index 0000000..f9982ba
 +        }
 +
 +        fun aborted(error: Throwable) {
++            retryTrace.seal(null, error)
 +            abortedFlows++
 +            if (error !== reportingFailure || failure == null) failure = error
 +            observe {
@@ -2846,6 +2969,261 @@ index 0000000..b5470de
 +    }
 +    return value.intValue()
 +}
+diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt
+new file mode 100644
+index 0000000..688bf76
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt
+@@ -0,0 +1,249 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.orchestra.ArtifactFormat
++import maestro.orchestra.ArtifactManifest
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceArtifacts
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.orchestra.debug.RetryExecutionFrame
++import maestro.utils.TempFileHandler
++import java.io.Writer
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.nio.file.StandardOpenOption
++import java.security.MessageDigest
++import java.util.UUID
++
++/** Optional evidence only. Its failures never enter the agent's strict reportingFailure path. */
++internal class HarmonyOsRetryTrace(
++    runId: String,
++    attemptId: String,
++    flowPath: String,
++    flowSha256: String?,
++    private val openWriter: (Path) -> Writer = {
++        Files.newBufferedWriter(it, Charsets.UTF_8, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
++    },
++) {
++    private val mapper = jacksonObjectMapper()
++    val flowExecutionId: String = UUID.randomUUID().toString()
++    private val identity = linkedMapOf<String, Any?>(
++        "protocol" to "maestro.harmonyos.retry-trace", "schemaVersion" to 1,
++        "runId" to runId, "attemptId" to attemptId, "flowExecutionId" to flowExecutionId,
++        "flowPath" to flowPath, "flowSha256" to flowSha256,
++    )
++    private data class Step(val id: String, val context: ExecutionContext, val fields: Map<String, Any?>, var ended: Boolean = false)
++    private data class Retry(val owner: Int, val parents: List<RetryExecutionFrame>, val optional: Boolean,
++        var lastTry: Int = 0, var activeTry: Int? = null, var ended: Boolean = false)
++    private val steps = linkedMapOf<Int, Step>()
++    private val stepIds = mutableSetOf<String>()
++    private val retries = linkedMapOf<String, Retry>()
++    private val outcomeCounts = linkedMapOf<String, Int>()
++    private val coverage = linkedMapOf<String, MutableList<Int>>()
++    private var artifacts: ExecutionTraceArtifacts? = null
++    private var tracePath: Path? = null
++    private var summaryPath: Path? = null
++    private var writer: Writer? = null
++    private var nextSequence = 0L
++    private var end: ExecutionTraceEnd? = null
++    private var sealed = false
++    private var retryUsed = false
++    private var optionalRetryUsed = false
++    var traceFailure: Throwable? = null
++        private set
++    var artifactManifest: ArtifactManifest? = null
++        private set
++
++    fun failed(error: Throwable) { if (traceFailure == null) traceFailure = error }
++
++    private inline fun record(block: () -> Unit) {
++        if (traceFailure != null || sealed) return
++        try { block() } catch (error: Throwable) { failed(error) }
++    }
++
++    fun ready(outputs: ExecutionTraceArtifacts) = record {
++        check(artifacts == null) { "Trace outputs were already allocated." }
++        artifacts = outputs
++        val trace = checkNotNull(outputs.allocate("retry-trace.jsonl", ArtifactFormat.TXT)) { "No artifacts bundle is available." }.toPath()
++        val summary = checkNotNull(outputs.allocate("retry-summary.json", ArtifactFormat.JSON)).toPath()
++        check(!Files.exists(trace) && !Files.exists(summary)) { "Trace outputs must not replace a previous run." }
++        tracePath = trace
++        summaryPath = summary
++        atomicSummary(summary, summary("incomplete", null, null))
++        writer = openWriter(trace)
++        append(identity + mapOf("event" to "traceStarted"))
++    }
++
++    fun stepStarted(id: String, context: ExecutionContext, fields: Map<String, Any?>, event: ExecutionEvent) = record {
++        check(context.executionSequence == steps.size) { "Execution sequence is missing or duplicated." }
++        check(stepIds.add(id)) { "An existing step ID was reused." }
++        context.parentExecutionSequence?.let { check(steps[it]?.ended == false) { "Parent command is not active." } }
++        val data = fields + mapOf("stepId" to id, "executionSequence" to context.executionSequence,
++            "parentExecutionSequence" to context.parentExecutionSequence,
++            "retryContext" to retryContextData(context.retryContext), "flowScopeOwner" to context.flowScopeOwner,
++            "phase" to context.phase, "optionalAncestorSequences" to context.optionalAncestorSequences)
++        steps[context.executionSequence] = Step(id, context, data)
++        event("stepStarted", event, data)
++    }
++
++    fun stepFinished(id: String, context: ExecutionContext, outcome: String, error: Throwable?, event: ExecutionEvent) = record {
++        val step = checkNotNull(steps[context.executionSequence]) { "Step completion has no start." }
++        check(step.id == id && step.context == context && !step.ended) { "Step completion does not match its execution." }
++        // Validate against the executor's current attempts, not a source-position heuristic.
++        retryContextData(context.retryContext)
++        step.ended = true
++        outcomeCounts[outcome] = outcomeCounts.getOrDefault(outcome, 0) + 1
++        coverage.getOrPut(outcome) { mutableListOf() }.add(context.executionSequence)
++        event(if (outcome == "Interrupted") "stepInterrupted" else "stepFinished", event,
++            step.fields + mapOf("outcome" to if (outcome == "Interrupted") null else outcome, "error" to errorInfo(error)))
++    }
++
++    fun retry(value: RetryExecutionEvent) = record {
++        val owner = checkNotNull(steps[value.commandSequence]) { "Retry has no registered command step." }
++        check(!owner.ended && owner.context.retryContext == value.parentContext) { "Retry owner/context does not match." }
++        val parents = retryContextData(value.parentContext)
++        when (value.kind) {
++            "retryBlockStarted" -> {
++                check(!retries.containsKey(value.invocationId)) { "Retry invocation was reused." }
++                retries[value.invocationId] = Retry(value.commandSequence, value.parentContext, value.optional)
++            }
++            "retryTryStarted" -> {
++                val retry = retryState(value)
++                val number = checkNotNull(value.tryNo)
++                check(retry.activeTry == null && number == retry.lastTry + 1) { "Retry attempt order does not match." }
++                retry.lastTry = number
++                retry.activeTry = number
++                if (number > 1) {
++                    retryUsed = true
++                    if (retry.optional) optionalRetryUsed = true
++                }
++            }
++            "retryTryFinished" -> {
++                val retry = retryState(value)
++                check(retry.activeTry == value.tryNo && value.tryNo != null) { "Retry completion has no active attempt." }
++                check(steps.values.none { !it.ended && it.context.retryContext.any { frame ->
++                    frame.invocationId == value.invocationId && frame.tryNo == value.tryNo
++                } }) { "Retry finished with unfinished child steps." }
++                retry.activeTry = null
++            }
++            "retryScheduled" -> {
++                val retry = retryState(value)
++                check(retry.activeTry == null && value.tryNo == retry.lastTry + 1) { "Retry schedule is out of order." }
++            }
++            "retryBlockFinished" -> {
++                val retry = retryState(value)
++                check(retry.activeTry == null) { "Retry block still has an active attempt." }
++                retry.ended = true
++            }
++            else -> error("Unknown retry event.")
++        }
++        event(value.kind, value.event, mapOf("retryInvocationId" to value.invocationId,
++            "retryCommandStepId" to owner.id, "executionSequence" to value.commandSequence,
++            "parentRetryInvocationId" to value.parentContext.lastOrNull()?.invocationId,
++            "parentTryNo" to value.parentContext.lastOrNull()?.tryNo, "retryContext" to parents,
++            "maxRetries" to value.maxRetries, "optional" to value.optional, "tryNo" to value.tryNo,
++            "outcome" to value.outcome, "error" to errorInfo(value.error)))
++    }
++
++    private fun retryState(value: RetryExecutionEvent): Retry = checkNotNull(retries[value.invocationId]).also {
++        check(!it.ended && it.owner == value.commandSequence && it.parents == value.parentContext && it.optional == value.optional)
++    }
++
++    private fun retryContextData(frames: List<RetryExecutionFrame>): List<Map<String, Any?>> = frames.mapIndexed { index, frame ->
++        val retry = checkNotNull(retries[frame.invocationId]) { "Retry frame has no start event." }
++        check(!retry.ended && retry.activeTry == frame.tryNo && retry.owner == frame.commandSequence &&
++            retry.parents == frames.take(index)) { "Retry frame is not the current attempt." }
++        mapOf("retryInvocationId" to frame.invocationId, "tryNo" to frame.tryNo,
++            "retryCommandStepId" to checkNotNull(steps[frame.commandSequence]).id)
++    }
++
++    fun ended(value: ExecutionTraceEnd) {
++        record {
++            check(end == null) { "Executor ended twice." }
++            event("flowFinished", value.event, mapOf("success" to value.success, "error" to errorInfo(value.error),
++                "expectedEventCount" to value.expectedEventCount, "lastExecutionSequence" to value.lastExecutionSequence))
++            end = value
++        }
++    }
++
++    /** Called after the real CLI executor has returned or thrown, outside listener dispatch. */
++    fun seal(success: Boolean?, failure: Throwable? = null) {
++        if (sealed) return
++        record {
++            val end = checkNotNull(end) { "Executor completion notification is missing." }
++            check(end.activeCommands == 0 && end.activeRetries == 0) { "Executor contexts were not released." }
++            check(steps.values.all { it.ended } && retries.values.all { it.ended && it.activeTry == null }) { "Trace has unfinished executions." }
++            check(end.lastExecutionSequence == steps.size - 1) { "Trace is missing executed steps." }
++            check(end.success == success) { "CLI and executor outcomes disagree." }
++            check(end.completionSequence == nextSequence && end.expectedEventCount == nextSequence + 1) { "Trace is missing events." }
++            event("traceCompleted", ExecutionEvent(end.completionSequence, end.event.elapsedNanos),
++                mapOf("expectedEventCount" to end.expectedEventCount))
++        }
++        try { writer?.close() } catch (error: Throwable) { failed(error) }
++        writer = null
++        val hash = try { tracePath?.takeIf { Files.isRegularFile(it) }?.let(::sha256) }
++            catch (error: Throwable) { failed(error); null }
++        sealed = true
++        val path = summaryPath ?: return
++        try {
++            atomicSummary(path, summary(if (traceFailure == null) "complete" else "incomplete", hash, success))
++            artifacts?.refreshManifest?.invoke()
++            artifactManifest = artifacts?.currentManifest?.invoke()
++        } catch (error: Throwable) {
++            failed(error)
++            // A failed final publication must not leave a complete summary behind.
++            runCatching {
++                atomicSummary(path, summary("incomplete", hash, success))
++                artifacts?.refreshManifest?.invoke()
++                artifactManifest = artifacts?.currentManifest?.invoke()
++            }
++        }
++    }
++
++    private fun event(name: String, event: ExecutionEvent, data: Map<String, Any?>) {
++        check(event.sequence == nextSequence) { "Trace event sequence is missing or duplicated." }
++        append(mapOf("event" to name, "sequence" to event.sequence, "elapsedNanos" to event.elapsedNanos,
++            "flowExecutionId" to flowExecutionId) + data)
++        nextSequence++
++    }
++
++    private fun append(data: Map<String, Any?>) {
++        val output = checkNotNull(writer) { "Trace writer is unavailable." }
++        output.write(mapper.writeValueAsString(data))
++        output.write("\n")
++        output.flush()
++    }
++
++    private fun summary(state: String, hash: String?, success: Boolean?) = identity + mapOf(
++        "state" to state, "traceCompleted" to (state == "complete"), "tracePath" to "retry-trace.jsonl",
++        "traceSha256" to hash, "eventCount" to nextSequence, "expectedEventCount" to end?.expectedEventCount,
++        "stepCount" to steps.size, "retryUsed" to if (state == "complete") retryUsed else null,
++        "optionalRetryUsed" to if (state == "complete") optionalRetryUsed else null,
++        "firstPassStatus" to when { state != "complete" -> "unknown"; success != true || retryUsed -> "not_passed"; else -> "passed" },
++        "outcomeCounts" to outcomeCounts, "coverageIndex" to coverage, "error" to errorInfo(traceFailure),
++    )
++
++    private fun atomicSummary(path: Path, document: Map<String, Any?>) {
++        TempFileHandler().use { scratch ->
++            val temporary = path.resolveSibling(path.fileName.toString() + "." + UUID.randomUUID() + ".tmp").toFile()
++            scratch.addFile(temporary)
++            Files.writeString(temporary.toPath(), mapper.writerWithDefaultPrettyPrinter().writeValueAsString(document),
++                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
++            Files.move(temporary.toPath(), path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++        }
++    }
++
++    private fun errorInfo(error: Throwable?) = error?.let { mapOf("class" to it.javaClass.name, "message" to it.message) }
++
++    private fun sha256(path: Path): String {
++        val digest = MessageDigest.getInstance("SHA-256")
++        Files.newInputStream(path).use { input ->
++            val buffer = ByteArray(8192)
++            while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
++        }
++        return digest.digest().joinToString("") { "%02x".format(it) }
++    }
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt b/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
 index 889a703..bc90232 100644
 --- a/maestro-cli/src/main/java/maestro/cli/mcp/McpMaestroSessionManager.kt
@@ -2859,7 +3237,7 @@ index 889a703..bc90232 100644
      }
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/runner/MaestroCommandRunner.kt b/maestro-cli/src/main/java/maestro/cli/runner/MaestroCommandRunner.kt
-index 83bf0a4..f93d3d9 100644
+index 83bf0a4..fb58906 100644
 --- a/maestro-cli/src/main/java/maestro/cli/runner/MaestroCommandRunner.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/runner/MaestroCommandRunner.kt
 @@ -20,6 +20,7 @@
@@ -2901,7 +3279,7 @@ index 83bf0a4..f93d3d9 100644
  
 -        return orchestra.runFlow(commands)
 +        return try {
-+            orchestra.runFlow(commands).also { agentObserver?.finished(it) }
++            orchestra.runFlow(commands).let { agentObserver?.finished(it) ?: it }
 +        } catch (error: Throwable) {
 +            agentObserver?.aborted(error)
 +            throw error
@@ -2938,7 +3316,7 @@ index ceab882..48cf6f9 100644
              }
          }
 diff --git a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
-index b79b107..5b826fc 100644
+index b79b107..7a38dd6 100644
 --- a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 @@ -1,6 +1,7 @@
@@ -2975,11 +3353,13 @@ index b79b107..5b826fc 100644
                      onCommandFailed = { _, _, _ -> Orchestra.ErrorResolution.FAIL },
                      onCommandGeneratedOutput = { command, defects, screenshot ->
                          logger.info("${shardPrefix}${command.description()} generated output")
-@@ -206,9 +210,11 @@ class TestSuiteInteractor(
+@@ -205,10 +209,12 @@ class TestSuiteInteractor(
+                     },
                  )
  
-                 val result = orchestra.runFlow(commands)
-+                agentObserver?.finished(result)
+-                val result = orchestra.runFlow(commands)
++                val execution = orchestra.runFlow(commands)
++                val result = agentObserver?.finished(execution) ?: execution
                  flowStatus = if (result.success) FlowStatus.SUCCESS else FlowStatus.ERROR
                  debugOutput = result.debugOutput
              } catch (e: Exception) {
@@ -2989,10 +3369,10 @@ index b79b107..5b826fc 100644
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..2819b91
+index 0000000..a4df5ed
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,462 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -3003,6 +3383,9 @@ index 0000000..2819b91
 +import maestro.cli.harmonyos.AgentProtocolException
 +import maestro.cli.harmonyos.HarmonyOsAgentProtocol
 +import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
++import maestro.harmonyos.hdc.RecordingResourceFailure
++import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.RecoveryIssue
 +import maestro.harmonyos.hdc.RecoveryReport
@@ -3054,19 +3437,18 @@ index 0000000..2819b91
 +    private fun finishOwned(closeFailure: Throwable?, hdc: HdcClient) {
 +        var report: RecoveryReport? = null
 +        var failure: Throwable? = null
-+        val closeError = closeFailure?.let(HarmonyOsAgentProtocol::error)
++        val closeError = closeFailure?.let { recordingCloseError(it, journal.recordings) }
 +        if (closeError != null) {
 +            // Persist independently before cleanup, so a host crash cannot erase this blocker.
 +            gate = gate.copy(closeFailure = closeError.toMap(), updatedAt = Instant.now().toString())
 +            writeGate(directory, gate)
-+        } else if (gate.unresolvedRecording) {
-+            // Only the real driver's successful close can confirm its long-lived recorder cleanup.
++        } else if (gate.unresolvedRecording && journal.recordings?.isComplete() == true) {
 +            gate = gate.copy(unresolvedRecording = false, updatedAt = Instant.now().toString())
 +            writeGate(directory, gate)
 +        }
 +        try {
 +            journal.seal()
-+            report = if (gate.requiresRecovery) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(10))
++            report = if (gate.requiresRecovery || gate.unresolvedRecording) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(10))
 +        } catch (error: Throwable) {
 +            failure = error
 +        } finally {
@@ -3080,6 +3462,7 @@ index 0000000..2819b91
 +        if (gate.requiresRecovery) issues += RecoveryIssue("EXPLICIT_RECOVERY_REQUIRED",
 +            gate.uncertainReason ?: "The caller reported uncertain cleanup; an explicit recovery check is required.")
 +        if (closeError != null) issues += RecoveryIssue("DRIVER_CLEANUP_FAILED", closeError.message)
++        if (gate.unresolvedRecording) issues += RecoveryIssue("RECORDING_CLEANUP_UNCONFIRMED", "Recording resources require explicit recovery.")
 +        if (failure != null) issues += RecoveryIssue("RECOVERY_JOURNAL_UNAVAILABLE", failure!!.message ?: failure!!.javaClass.simpleName)
 +        val effective = observed.copy(state = if (observed.state == "complete" && issues.isEmpty()) "complete" else "unknown",
 +            issues = issues.distinct())
@@ -3124,6 +3507,12 @@ index 0000000..2819b91
 +            }
 +            Files.createDirectory(ownerDirectory)
 +            val journal = HarmonyOSRecoveryJournal.create(ownerDirectory.resolve("recovery-journal.json"), deviceId, ownerId)
++            try {
++                if (requiresRecordingCleanup) journal.enableRecordingResources()
++            } catch (error: Throwable) {
++                try { journal.close() } catch (closeError: Throwable) { error.addSuppressed(closeError) }
++                throw error
++            }
 +            val gate = LeaseGate(deviceId, ownerId, "active", journal.path.toString(), Instant.now().toString(),
 +                unresolvedRecording = requiresRecordingCleanup)
 +            try { writeGate(directory, gate) } catch (error: Throwable) {
@@ -3184,29 +3573,72 @@ index 0000000..2819b91
 +            val journal = try { HarmonyOSRecoveryJournal.open(journalPath) } catch (error: Exception) {
 +                throw invalidMetadata("The recovery journal could not be opened; the device gate was retained.", gate.ownerId, error)
 +            }
++            val deadline = System.nanoTime() + timeout.toNanos()
++            fun remaining(): Duration {
++                val left = deadline - System.nanoTime()
++                if (left <= 0) throw HdcTimeoutException(timeout)
++                return Duration.ofNanos(left)
++            }
++            var resolvedGate = gate
 +            val observed = journal.use {
 +                if (journal.deviceId != deviceId || journal.ownerId != ownerId) {
 +                    throw invalidMetadata("The resource journal does not belong to the gated device session.", ownerId)
 +                }
-+                journal.recover(hdc, timeout)
++                val readiness = journal.recover(hdc, remaining(), cleanupResources = false)
++                val resources = journal.recordings
++                if (readiness.issues.any { it.code != "OWNED_RESOURCES_REMAIN" }) return@use readiness
++                val recordingIssues = resources?.recover(hdc, journal, remaining()).orEmpty().toMutableList()
++                if (resources != null && resources.isComplete() && !resources.verifyArchives(remaining())) {
++                    recordingIssues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "A preserved recording original is absent or changed.")
++                }
++                if (recordingIssues.isNotEmpty()) return@use journal.snapshot().let { current ->
++                    current.copy(state = "unknown", issues = (current.issues + recordingIssues).distinct())
++                }
++                if (resources?.isComplete() == true) {
++                    val closeResolved = resolvedRecordingFailure(gate.closeFailure, resources)
++                    resolvedGate = gate.copy(unresolvedRecording = false,
++                        closeFailure = if (closeResolved) null else gate.closeFailure)
++                }
++                journal.recover(hdc, remaining())
 +            }
 +            val issues = observed.issues.toMutableList()
 +            // A command completion record cannot resolve an unrelated driver/recording close failure.
-+            gate.closeFailure?.let { issues += RecoveryIssue("DRIVER_CLEANUP_FAILED",
++            resolvedGate.closeFailure?.let { issues += RecoveryIssue("DRIVER_CLEANUP_FAILED",
 +                it["message"] as? String ?: "The previous driver cleanup failure has no confirming recovery evidence.") }
-+            if (gate.unresolvedRecording) issues += RecoveryIssue("RECORDING_CLEANUP_UNCONFIRMED",
++            if (resolvedGate.unresolvedRecording) issues += RecoveryIssue("RECORDING_CLEANUP_UNCONFIRMED",
 +                "The previous owner enabled screen recording and never confirmed its driver cleanup.")
 +            val report = observed.copy(state = if (observed.state == "complete" && issues.isEmpty()) "complete" else "unknown",
 +                issues = issues.distinct())
-+            val outcome = writeReceipt(directory, gate, report, "recovery")
++            val outcome = writeReceipt(directory, resolvedGate, report, "recovery")
 +            // Receipt first, gate second: interruption can leave a block, never a false handoff.
-+            writeGate(directory, gate.copy(state = if (outcome.complete) "clean" else "quarantined",
++            writeGate(directory, resolvedGate.copy(state = if (outcome.complete) "clean" else "quarantined",
 +                requiresRecovery = !outcome.complete && gate.requiresRecovery,
 +                uncertainReason = if (outcome.complete) null else gate.uncertainReason,
 +                reportPath = outcome.reportPath.toString(), reportSha256 = outcome.sha256, updatedAt = Instant.now().toString()))
 +            outcome
 +        }
 +    }
++}
++
++private fun recordingCloseError(error: Throwable, resources: HarmonyOSRecordingResourceJournal?): AgentError {
++    val fingerprint = HarmonyOSRecordingResourceJournal.failureFingerprint(error)
++    val marker = error.suppressed.filterIsInstance<RecordingResourceFailure>().lastOrNull {
++        it.fingerprint == fingerprint && resources?.ownsFailure(it.recordingId, it.fingerprint) == true
++    }
++    if (marker != null) {
++        return AgentError("environment", "RECORDING_RESOURCE_CLEANUP_FAILED", error.message ?: error.javaClass.simpleName,
++            mapOf("recordingId" to marker.recordingId, "failureFingerprint" to marker.fingerprint))
++    }
++    return HarmonyOsAgentProtocol.error(error)
++}
++
++private fun resolvedRecordingFailure(failure: Map<String, Any?>?, resources: HarmonyOSRecordingResourceJournal): Boolean {
++    if (failure == null) return true
++    if (failure["code"] != "RECORDING_RESOURCE_CLEANUP_FAILED") return false
++    val details = failure["details"] as? Map<*, *> ?: return false
++    val id = details["recordingId"] as? String ?: return false
++    val fingerprint = details["failureFingerprint"] as? String ?: return false
++    return resources.resolvesFailure(id, fingerprint)
 +}
 +
 +private data class LeaseGate(
@@ -3301,12 +3733,23 @@ index 0000000..2819b91
 +    Files.createDirectories(receipts)
 +    require(receipts.toRealPath() == receipts) { "Recovery receipts cannot follow links." }
 +    val id = UUID.randomUUID().toString()
-+    val report = linkedMapOf<String, Any?>("schemaVersion" to 1, "recoveryId" to id, "deviceId" to gate.deviceId,
++    val recordingPath = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recording-resources.json")
++    val recordingEvidence = if (Files.exists(recordingPath, LinkOption.NOFOLLOW_LINKS)) {
++        require(Files.isRegularFile(recordingPath, LinkOption.NOFOLLOW_LINKS) && recordingPath.toRealPath() == recordingPath)
++        val bytes = Files.readAllBytes(recordingPath)
++        val snapshot = receipts.resolve("$id-recordings.json")
++        writeLeaseFile(snapshot, bytes, replace = false)
++        mapOf("path" to snapshot.toString(), "sha256" to digest(bytes))
++    } else null
++    val report = linkedMapOf<String, Any?>("schemaVersion" to if (recordingEvidence == null) 1 else 2, "recoveryId" to id, "deviceId" to gate.deviceId,
 +        "sessionId" to gate.ownerId, "observedAt" to Instant.now().toString(), "reason" to reason,
 +        "previousState" to gate.state, "previousReportPath" to gate.reportPath, "previousReportSha256" to gate.reportSha256,
 +        "requiresRecovery" to gate.requiresRecovery, "uncertainReason" to gate.uncertainReason,
 +        "unresolvedRecording" to gate.unresolvedRecording,
-+        "closeFailure" to gate.closeFailure).apply { putAll(recovery.toMap()) }
++        "closeFailure" to gate.closeFailure).apply {
++            putAll(recovery.toMap())
++            if (recordingEvidence != null) put("recordingResources", recordingEvidence)
++        }
 +    val path = receipts.resolve("$id.json")
 +    val bytes = leaseMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(report)
 +    writeLeaseFile(path, bytes, replace = false)
@@ -3322,18 +3765,33 @@ index 0000000..2819b91
 +        val bytes = path.toFile().readBytes()
 +        require(digest(bytes) == gate.reportSha256)
 +        val node = leaseMapper.readTree(bytes)
++        val receiptVersion = node.path("schemaVersion").let { require(it.isIntegralNumber && it.canConvertToInt()); it.intValue() }
++        require(receiptVersion in 1..2)
 +        require(node.isObject && node.fieldNames().asSequence().toSet() == setOf("schemaVersion", "recoveryId", "deviceId",
 +            "sessionId", "observedAt", "reason", "previousState", "previousReportPath", "previousReportSha256",
 +            "requiresRecovery", "uncertainReason", "unresolvedRecording", "closeFailure", "state", "operations",
-+            "pendingOperations", "temporaryFiles", "issues"))
++            "pendingOperations", "temporaryFiles", "issues") + if (receiptVersion == 2) setOf("recordingResources") else emptySet<String>())
 +        fun text(name: String): String = node[name].also { require(it.isTextual) }.asText()
 +        fun counter(name: String): Int = node[name].also {
 +            require(it.isIntegralNumber && it.canConvertToInt() && it.intValue() >= 0)
 +        }.intValue()
-+        require(counter("schemaVersion") == 1 && text("deviceId") == gate.deviceId &&
++        require(text("deviceId") == gate.deviceId &&
 +            text("sessionId") == gate.ownerId && text("state") == "complete")
 +        val receiptId = HarmonyOsAgentProtocol.uuid(text("recoveryId"), "recoveryId")
 +        require(path.fileName.toString() == "$receiptId.json")
++        if (receiptVersion == 2) {
++            val reference = node["recordingResources"]
++            require(reference.isObject && reference.fieldNames().asSequence().toSet() == setOf("path", "sha256") &&
++                reference["path"].isTextual && reference["sha256"].isTextual)
++            val snapshot = Path.of(reference["path"].asText()).toAbsolutePath().normalize()
++            require(snapshot == receipts.resolve("$receiptId-recordings.json") && snapshot.toRealPath() == snapshot &&
++                Files.isRegularFile(snapshot, LinkOption.NOFOLLOW_LINKS) && Files.size(snapshot) <= 4 * 1024 * 1024)
++            val snapshotBytes = Files.readAllBytes(snapshot)
++            require(digest(snapshotBytes) == reference["sha256"].asText())
++            val resources = leaseMapper.readTree(snapshotBytes)
++            require(resources.path("deviceId").asText() == gate.deviceId && resources.path("ownerId").asText() == gate.ownerId &&
++                resources.path("resources").isArray && resources["resources"].all { it.path("clean").isBoolean && it["clean"].booleanValue() })
++        }
 +        Instant.parse(text("observedAt"))
 +        require(text("reason") in setOf("session_close", "recovery"))
 +        require(text("previousState") in setOf("active", "quarantined", "clean"))
@@ -3379,10 +3837,10 @@ index 0000000..2819b91
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..8894a0a
+index 0000000..81f66e1
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,195 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -3465,6 +3923,11 @@ index 0000000..8894a0a
 +                null, "", "off" -> false
 +                "huawei-system" -> true
 +                else -> throw CliError("Unknown HarmonyOS recording backend '$backend'; use huawei-system or off.")
++            },
++            recordingRetainMedia = when (val retain = environment["MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA"]?.trim()) {
++                null, "", "false" -> false
++                "true" -> true
++                else -> throw CliError("Unknown recording retention value '$retain'; use true or false.")
 +            },
 +        )
 +
@@ -3610,10 +4073,10 @@ index cc05d69..714c609 100644
              )
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
 new file mode 100644
-index 0000000..f6a091b
+index 0000000..b7c2aef
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,236 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -3642,6 +4105,20 @@ index 0000000..f6a091b
 +class HarmonyOsAgentAttemptStoreTest {
 +    @TempDir lateinit var root: Path
 +    private val mapper = jacksonObjectMapper()
++
++    @Test fun `native junit is hashed in the finalized artifact manifest`() {
++        val attempt = register()
++        val report = attempt.directory.resolve("junit.xml")
++        Files.writeString(report, "<testsuites><testsuite tests=\"1\" failures=\"0\"/></testsuites>")
++        attempt.setJUnit(report)
++        attempt.finishSuccess()
++        val manifest = mapper.readTree(attempt.directory.resolve("agent-manifest.json").toFile())
++        val entry = manifest["files"].single { it["path"].asText() == "junit.xml" }
++        val expected = java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(report))
++            .joinToString("") { "%02x".format(it) }
++        assertThat(entry["sha256"].asText()).isEqualTo(expected)
++        assertThat(json(attempt.result())["data"]["artifacts"]["junitPath"].asText()).isEqualTo("junit.xml")
++    }
 +
 +    @Test fun `canonical registration rejects duplicate across store instances without replaying`() {
 +        val run = uuid()
@@ -5033,10 +5510,10 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..ada45e0
+index 0000000..2302ce4
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,363 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -5055,6 +5532,12 @@ index 0000000..ada45e0
 +import maestro.orchestra.debug.CommandDebugMetadata
 +import maestro.orchestra.debug.CommandOutcome
 +import maestro.orchestra.debug.FlowDebugOutput
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceArtifacts
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.orchestra.debug.RetryExecutionFrame
 +import maestro.orchestra.yaml.YamlCommandReader
 +import org.junit.jupiter.api.Test
 +import org.junit.jupiter.api.io.TempDir
@@ -5300,6 +5783,98 @@ index 0000000..ada45e0
 +            val entries = mapper.readTree(report.directory.resolve("evidence-index.json").toFile())["data"]["entries"]
 +            assertThat(Files.readAllBytes(report.directory.resolve(entries[0]["source"]["flow"].asText()))).isEqualTo(bytes)
 +        }
++    }
++
++    @Test
++    fun `retry trace binds existing step IDs to each execution and its own screenshot`() {
++        val source = directory.resolve("retry-source.yaml")
++        Files.writeString(source, "appId: org.example.fixture\n---\n- retry:\n    maxRetries: 1\n    commands:\n      - back\n")
++        val report = HarmonyOsCliAgentReport.create(directory.resolve("retry-agent"), null, null, 1,
++            "fixture-device", setOf(source.toFile()), emptyMap())
++        val commands = YamlCommandReader.readCommands(source)
++        val owner = commands.first { it.retryCommand != null }
++        val child = owner.retryCommand!!.commands.first { it.backPressCommand != null }
++        val bundle = Files.createDirectories(report.directory.resolve("flows/main"))
++        val observer = report.flow(source.toFile(), bundle, commands)
++        var refreshedManifest = ArtifactManifest()
++        observer.onExecutionTraceReady(ExecutionTraceArtifacts({ name, _ -> bundle.resolve(name).toFile() }, {
++            refreshedManifest = ArtifactManifest(listOf("retry-trace.jsonl", "retry-summary.json").map { name ->
++                ArtifactEntry(ArtifactKind.MAESTRO_LOG, ArtifactFormat.TXT, name, sizeBytes = Files.size(bundle.resolve(name)))
++            })
++            mapper.writeValue(bundle.resolve("manifest.json").toFile(), refreshedManifest)
++        }, { refreshedManifest }))
++        var sequence = 0L
++        fun event() = ExecutionEvent(sequence++, sequence * 100)
++        fun retry(kind: String, tryNo: Int? = null, outcome: String? = null) =
++            observer.onRetryExecution(RetryExecutionEvent(event(), kind, "retry", 0, emptyList(), 1, false, tryNo, outcome))
++        val parent = ExecutionContext(0, null, emptyList(), null, "body", emptyList())
++        observer.starting(owner)
++        observer.onCommandExecutionStarted(owner, parent, 0, event())
++        retry("retryBlockStarted")
++        val failed = MaestroException.AssertionFailure("first attempt", TreeNode(), "fixture")
++        for (tryNo in 1..2) {
++            retry("retryTryStarted", tryNo)
++            val context = ExecutionContext(tryNo, 0, listOf(RetryExecutionFrame("retry", 0, tryNo)), 0, "body", emptyList())
++            observer.starting(child)
++            observer.onCommandExecutionStarted(child, context, 1, event())
++            observer.onCommandExecutionFinished(child, context,
++                if (tryNo == 1) CommandOutcome.Failed(failed) else CommandOutcome.Completed, 1, 2, event())
++            retry("retryTryFinished", tryNo, if (tryNo == 1) "failed" else "completed")
++            if (tryNo == 1) retry("retryScheduled", 2)
++            Files.writeString(bundle.resolve("attempt-$tryNo.png"), "screenshot-$tryNo")
++        }
++        retry("retryBlockFinished", outcome = "completed")
++        observer.onCommandExecutionFinished(owner, parent, CommandOutcome.Completed, 1, 3, event())
++        val ending = event()
++        observer.onExecutionTraceEnd(ExecutionTraceEnd(ending, sequence, sequence + 1, 2, 0, 0, true, null))
++        val returned = observer.finished(Orchestra.FlowResult(true, FlowDebugOutput(executedSteps = (1..2).map { index ->
++            CommandDebugMetadata(sequenceNumber = index, artifacts = mutableListOf(
++                CommandArtifact(ArtifactKind.SCREENSHOT, "attempt-$index.png")))
++        }.toMutableList()), ArtifactManifest()))
++        report.finish(true)
++
++        assertThat(returned.artifactManifest.entries).hasSize(2)
++        returned.artifactManifest.entries.forEach { entry ->
++            assertThat(entry.sizeBytes).isEqualTo(Files.size(bundle.resolve(entry.relativePath)))
++        }
++        assertThat(returned.success).isTrue()
++
++        val summary = mapper.readTree(bundle.resolve("retry-summary.json").toFile())
++        assertThat(summary["state"].asText()).isEqualTo("complete")
++        assertThat(summary["firstPassStatus"].asText()).isEqualTo("not_passed")
++        val events = Files.readAllLines(bundle.resolve("retry-trace.jsonl")).map { mapper.readTree(it) }
++        val starts = events.filter { it["event"].asText() == "stepStarted" && it["executionSequence"].asInt() > 0 }
++        val entries = mapper.readTree(report.directory.resolve("evidence-index.json").toFile())["data"]["entries"]
++        starts.forEachIndexed { index, start ->
++            val entry = entries.single { it["stepId"].asText() == start["stepId"].asText() }
++            assertThat(entry["source"]["flow"].asText()).isEqualTo(start["sourcePath"].asText())
++            assertThat(start["retryContext"][0]["tryNo"].asInt()).isEqualTo(index + 1)
++            val screenshot = entry["evidence"].single { it["kind"].asText() == "screenshot" && it["state"].asText() == "available" }
++            assertThat(screenshot["path"].asText()).isEqualTo("flows/main/attempt-" + (index + 1) + ".png")
++        }
++        assertThat(starts.map { it["stepId"].asText() }.distinct()).hasSize(2)
++        assertThat(starts.map { it["sourcePath"].asText() }.distinct()).hasSize(1)
++        assertThat(mapper.readTree(report.directory.resolve("result.json").toFile())["data"]["status"].asText()).isEqualTo("passed")
++    }
++
++    @Test
++    fun `sidecar failure does not enter strict reporting failure or change a passed result`() {
++        val (report, source) = create()
++        val bundle = Files.createDirectories(report.directory.resolve("flows/trace-failure"))
++        val observer = report.flow(source.toFile(), bundle)
++        observer.onExecutionTraceReady(ExecutionTraceArtifacts({ name, _ -> bundle.resolve(name).toFile() }, {}))
++        observer.retryTrace.failed(java.io.IOException("sidecar only"))
++        val command = MaestroCommand(backPressCommand = BackPressCommand())
++        observer.starting(command)
++        observer.onCommandStart(command, 0)
++        observer.onCommandFinished(command, CommandOutcome.Completed, 1, 2)
++        observer.starting(command)
++        observer.onCommandStart(command, 1)
++        observer.onCommandFinished(command, CommandOutcome.Completed, 3, 4)
++        observer.finished(Orchestra.FlowResult(true, FlowDebugOutput(), ArtifactManifest()))
++        report.finish(true)
++        assertThat(mapper.readTree(bundle.resolve("retry-summary.json").toFile())["state"].asText()).isEqualTo("incomplete")
++        assertThat(mapper.readTree(report.directory.resolve("result.json").toFile())["data"]["status"].asText()).isEqualTo("passed")
 +    }
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt
@@ -5586,12 +6161,176 @@ index 0000000..002a0ab
 +        }
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt
+new file mode 100644
+index 0000000..7e8da31
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt
+@@ -0,0 +1,158 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceArtifacts
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.orchestra.debug.RetryExecutionFrame
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.IOException
++import java.io.Writer
++import java.nio.file.Files
++import java.nio.file.Path
++import java.security.MessageDigest
++
++class HarmonyOsRetryTraceTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++
++    private inner class Fixture(failOn: String? = null, failRefresh: Boolean = false) {
++        var sequence = 0L
++        val trace = HarmonyOsRetryTrace("run", "attempt", "main.yaml", "a".repeat(64)) { path ->
++            val delegate = Files.newBufferedWriter(path)
++            object : Writer() {
++                override fun write(chars: CharArray, offset: Int, length: Int) {
++                    val text = String(chars, offset, length)
++                    if (failOn != null && text.contains("\"event\":\"" + failOn + "\"")) throw IOException("injected trace failure")
++                    delegate.write(chars, offset, length)
++                }
++                override fun flush() = delegate.flush()
++                override fun close() = delegate.close()
++            }
++        }
++        init {
++            trace.ready(ExecutionTraceArtifacts({ name, _ -> directory.resolve(name).toFile() }, {
++                if (failRefresh) throw IOException("injected manifest failure")
++            }))
++        }
++        fun event() = ExecutionEvent(sequence++, sequence * 100)
++        fun context(index: Int, retry: List<RetryExecutionFrame> = emptyList()) =
++            ExecutionContext(index, if (retry.isEmpty()) null else 0, retry, null, "body", emptyList())
++        fun start(index: Int, retry: List<RetryExecutionFrame> = emptyList()) = context(index, retry).also {
++            trace.stepStarted("step-$index", it, mapOf("sourcePath" to "sources/a.yaml", "commandIndex" to 1), event())
++        }
++        fun finish(context: ExecutionContext, outcome: String = "Completed") =
++            trace.stepFinished("step-" + context.executionSequence, context, outcome, null, event())
++        fun retry(kind: String, tryNo: Int? = null, outcome: String? = null, optional: Boolean = false) =
++            trace.retry(RetryExecutionEvent(event(), kind, "retry-1", 0, emptyList(), 1, optional, tryNo, outcome))
++        fun seal(lastStep: Int, success: Boolean? = true) {
++            val ending = event()
++            trace.ended(ExecutionTraceEnd(ending, sequence, sequence + 1, lastStep, 0, 0, success, null))
++            trace.seal(success)
++        }
++        fun summary() = mapper.readTree(directory.resolve("retry-summary.json").toFile())
++        fun events() = Files.readAllLines(directory.resolve("retry-trace.jsonl")).map { mapper.readTree(it) }
++    }
++
++    @Test
++    fun `same source has separate steps and retry contexts with a verifiable sealed hash`() {
++        val fixture = Fixture()
++        val owner = fixture.start(0)
++        fixture.retry("retryBlockStarted", optional = true)
++        fixture.retry("retryTryStarted", 1, optional = true)
++        val first = fixture.start(1, listOf(RetryExecutionFrame("retry-1", 0, 1)))
++        fixture.finish(first, "Failed")
++        fixture.retry("retryTryFinished", 1, "failed", optional = true)
++        fixture.retry("retryScheduled", 2, optional = true)
++        fixture.retry("retryTryStarted", 2, optional = true)
++        val second = fixture.start(2, listOf(RetryExecutionFrame("retry-1", 0, 2)))
++        fixture.finish(second)
++        fixture.retry("retryTryFinished", 2, "completed", optional = true)
++        fixture.retry("retryBlockFinished", outcome = "completed", optional = true)
++        fixture.finish(owner)
++        fixture.seal(2)
++
++        val summary = fixture.summary()
++        assertThat(summary["state"].asText()).isEqualTo("complete")
++        assertThat(summary["firstPassStatus"].asText()).isEqualTo("not_passed")
++        assertThat(summary["optionalRetryUsed"].asBoolean()).isTrue()
++        val steps = fixture.events().filter { it["event"].asText() == "stepStarted" }.drop(1)
++        assertThat(steps.map { it["sourcePath"].asText() }.distinct()).hasSize(1)
++        assertThat(steps.map { it["stepId"].asText() }).containsExactly("step-1", "step-2").inOrder()
++        assertThat(steps.map { it["retryContext"][0]["tryNo"].asInt() }).containsExactly(1, 2).inOrder()
++        assertThat(steps.map { it["retryContext"][0]["retryCommandStepId"].asText() }).containsExactly("step-0", "step-0")
++        val hash = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(directory.resolve("retry-trace.jsonl")))
++            .joinToString("") { "%02x".format(it) }
++        assertThat(summary["traceSha256"].asText()).isEqualTo(hash)
++        assertThat(summary["eventCount"].asLong()).isEqualTo(summary["expectedEventCount"].asLong())
++    }
++
++    @Test
++    fun `warnings and skips remain distinct without inventing retries`() {
++        val fixture = Fixture()
++        fixture.finish(fixture.start(0), "Warned")
++        fixture.finish(fixture.start(1), "Skipped")
++        fixture.seal(1)
++        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("passed")
++        assertThat(fixture.summary()["outcomeCounts"]["Warned"].asInt()).isEqualTo(1)
++        assertThat(fixture.summary()["outcomeCounts"]["Skipped"].asInt()).isEqualTo(1)
++        assertThat(fixture.summary()["retryUsed"].asBoolean()).isFalse()
++    }
++
++    @Test
++    fun `missing completion notification never means zero retries`() {
++        val fixture = Fixture()
++        fixture.finish(fixture.start(0))
++        fixture.trace.seal(true)
++        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("unknown")
++        assertThat(fixture.summary()["retryUsed"].isNull).isTrue()
++        assertThat(fixture.events().any { it["event"].asText() == "traceCompleted" }).isFalse()
++    }
++
++    @Test
++    fun `a swallowed write failure is sticky even when the flow later passes`() {
++        val fixture = Fixture(failOn = "stepFinished")
++        fixture.finish(fixture.start(0))
++        val original = fixture.trace.traceFailure
++        fixture.seal(0)
++        assertThat(original).isInstanceOf(IOException::class.java)
++        assertThat(fixture.trace.traceFailure).isSameInstanceAs(original)
++        assertThat(fixture.summary()["state"].asText()).isEqualTo("incomplete")
++        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("unknown")
++        assertThat(fixture.events().any { it["event"].asText() == "traceCompleted" }).isFalse()
++    }
++
++    @Test
++    fun `missing engine event and reused step identity cannot seal complete`() {
++        val fixture = Fixture()
++        fixture.sequence++
++        fixture.start(0)
++        fixture.seal(0)
++        assertThat(fixture.summary()["state"].asText()).isEqualTo("incomplete")
++        assertThat(fixture.summary()["retryUsed"].isNull).isTrue()
++    }
++
++    @Test
++    fun `publication failure cannot leave a complete summary`() {
++        val fixture = Fixture(failRefresh = true)
++        fixture.finish(fixture.start(0))
++        fixture.seal(0)
++        assertThat(fixture.summary()["state"].asText()).isEqualTo("incomplete")
++        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("unknown")
++    }
++
++    @Test
++    fun `completed interruption records are complete evidence of an unsuccessful execution`() {
++        val fixture = Fixture()
++        fixture.finish(fixture.start(0), "Interrupted")
++        fixture.seal(0, null)
++        assertThat(fixture.summary()["state"].asText()).isEqualTo("complete")
++        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("not_passed")
++        val interrupted = fixture.events().single { it["event"].asText() == "stepInterrupted" }
++        assertThat(interrupted["outcome"].isNull).isTrue()
++    }
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 new file mode 100644
-index 0000000..6757568
+index 0000000..e9c8da9
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,381 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.node.ObjectNode
@@ -5603,6 +6342,7 @@ index 0000000..6757568
 +import maestro.cli.session.HarmonyOsSessionSupport
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.utils.TempFileHandler
 +import org.junit.jupiter.api.Test
 +import org.junit.jupiter.api.assertThrows
@@ -5610,6 +6350,7 @@ index 0000000..6757568
 +import java.nio.file.Path
 +import java.security.MessageDigest
 +import java.util.UUID
++import java.time.Duration
 +
 +class HarmonyOsSessionLeaseTest {
 +    private val mapper = jacksonObjectMapper()
@@ -5735,6 +6476,89 @@ index 0000000..6757568
 +        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
 +    }
 +
++    @Test fun `retained ended recording recovers through the existing gate and keeps immutable evidence`() = directory { root ->
++        val owner = uuid()
++        var uri = ""
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = true)
++            val recording = lease.journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++            recording.media(uri)
++            val raw = lease.journal.path.parent.resolve("test-original.mp4")
++            Files.writeString(raw, "raw original may fail decoding but is still preserved")
++            recording.archive(raw)
++            assertThat(assertThrows<AgentProtocolException> { lease.finish(null, noHdc) }.error.code)
++                .isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        }
++        val beforePath = Path.of(gate(root)["reportPath"].asText())
++        val before = Files.readAllBytes(beforePath)
++        val remote = RecordingRemote(uri, "raw original may fail decoding but is still preserved".toByteArray())
++        val outcome = HarmonyOsRecoverySupport.recover(device, owner, HdcClient("fake", remote), root)
++        assertThat(outcome.complete).isTrue()
++        assertThat(outcome.report["unresolvedRecording"]).isEqualTo(false)
++        assertThat(outcome.report["recordingResources"]).isNotNull()
++        assertThat(Files.readAllBytes(beforePath)).isEqualTo(before)
++        assertThat(remote.deletes).isEqualTo(1)
++        assertThat(gate(root)["unresolvedRecording"].booleanValue()).isFalse()
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root)).isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE)
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).sha256).isEqualTo(outcome.sha256)
++        normalClose(root, uuid())
++    }
++
++    @Test fun `only a fingerprinted recording close failure can be resolved by its resource evidence`() = directory { root ->
++        for (unrelated in listOf(false, true)) {
++            val folder = Files.createDirectory(root.resolve(if (unrelated) "mixed" else "recording"))
++            val owner = uuid()
++            var uri = ""
++            HarmonyOsSessionSupport.withDeviceLock(device, folder) {
++                val lease = HarmonyOsSessionLease.begin(device, owner, folder, requiresRecordingCleanup = true)
++                val resource = lease.journal.allocateRecording()
++                resource.starting(); resource.started(51); resource.stopping(); resource.ended()
++                uri = "file://media/Photo/123/VID_123/${resource.fileName}"
++                resource.media(uri)
++                val raw = lease.journal.path.parent.resolve("raw.mp4")
++                Files.writeString(raw, "raw"); resource.archive(raw)
++                val error = IllegalStateException("owned media delete failed")
++                resource.failed(error)
++                // A duration-limit error is attached by expire after close has already recorded its first failure.
++                error.addSuppressed(IllegalStateException("recording duration limit"))
++                resource.failed(error)
++                if (unrelated) error.addSuppressed(IllegalStateException("unrelated close error"))
++                assertThrows<AgentProtocolException> { lease.finish(error, noHdc) }
++            }
++            val recovered = HarmonyOsRecoverySupport.recover(device, owner, HdcClient("fake", RecordingRemote(uri)), folder)
++            assertThat(recovered.complete).isEqualTo(!unrelated)
++            if (unrelated) {
++                @Suppress("UNCHECKED_CAST") val issues = recovered.report["issues"] as List<Map<String, String>>
++                assertThat(issues.map { it["code"] }).contains("DRIVER_CLEANUP_FAILED")
++            } else {
++                assertThat(gate(folder)["closeFailure"].isNull).isTrue()
++                assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, folder).complete).isTrue()
++            }
++        }
++    }
++
++    @Test fun `recording recovery after the owner exits uses durable evidence instead of process memory`() = directory { root ->
++        val owner = uuid()
++        var uri = ""
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = true)
++            val resource = lease.journal.allocateRecording()
++            resource.starting(); resource.started(51); resource.stopping(); resource.ended()
++            uri = "file://media/Photo/123/VID_123/${resource.fileName}"
++            resource.media(uri)
++            val raw = lease.journal.path.parent.resolve("raw.mp4")
++            Files.writeString(raw, "original"); resource.archive(raw)
++            // Model process disappearance by releasing the journal lock without finishing the lease.
++            lease.journal.close()
++        }
++        assertThat(gate(root)["state"].asText()).isEqualTo("active")
++        val recovered = HarmonyOsRecoverySupport.recover(device, owner, HdcClient("fake", RecordingRemote(uri, "original".toByteArray())), root)
++        assertThat(recovered.complete).isTrue()
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).complete).isTrue()
++    }
++
 +    @Test fun `recovery cannot overlap a live owner or a CLI holding the same device lock`() = directory { root ->
 +        val owner = uuid()
 +        quarantine(root, owner)
@@ -5854,6 +6678,36 @@ index 0000000..6757568
 +    private fun gate(root: Path): ObjectNode = mapper.readTree(gatePath(root).toFile()) as ObjectNode
 +    private fun gatePath(root: Path): Path = root.resolve("${HarmonyOsSessionSupport.lockName(device)}.owner.json")
 +    private fun uuid(): String = UUID.randomUUID().toString()
++    private class RecordingRemote(private val uri: String, private val video: ByteArray = "raw".toByteArray()) : HdcCommandRunner {
++        var present = true
++        var deletes = 0
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            if (command.contains("recv") && command.contains("file")) {
++                Files.write(Path.of(command.last()), video)
++                return HdcCommandResult(0, "", "")
++            }
++            val script = command.last()
++            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
++            if (marker == null) {
++                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
++                return HdcCommandResult(0, nonce, "")
++            }
++            var status = 0
++            val output = when {
++                script.contains("hidumper") -> "PlayerDistributedService\n--ScreenCaptureServer--:\n--NextSection--\n"
++                script.contains("mediatool") && script.contains("query") -> if (present) "find 1 result\nuri\n\"$uri\"" else {
++                    status = 255; "find 0 result"
++                }
++                script.contains("mediatool") && script.contains("delete") -> { present = false; deletes++; "[SUCCESS] delete success." }
++                script.contains("mediatool") && script.contains("recv") -> "Table Name: Photos\n" +
++                    Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
++                script.contains("stat") -> video.size.toString()
++                else -> error("Unexpected command $command")
++            }
++            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)!!.value
++            return HdcCommandResult(0, "$output\n$marker$status\n\n$acknowledgement$status\n", "")
++        }
++    }
 +    private fun directory(block: (Path) -> Unit) = TempFileHandler().use { files ->
 +        block(files.createTempDirectory("harmonyos-lease-test").toPath())
 +    }
@@ -6722,10 +7576,10 @@ index 0000000..c709222
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..f8e301b
+index 0000000..a950816
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,41 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -6740,6 +7594,7 @@ index 0000000..f8e301b
 +    val recordingMaxDuration: Duration = Duration.ofMinutes(3),
 +    val recordingStopTimeout: Duration = Duration.ofSeconds(30),
 +    val recordingMaxBytes: Long = 512L * 1024 * 1024,
++    val recordingRetainMedia: Boolean = false,
 +) {
 +    init {
 +        for (timeout in listOf(commandTimeout, settleTimeout, pollInterval)) {
@@ -6755,6 +7610,7 @@ index 0000000..f8e301b
 +            "Recording stop timeout must be between 100 ms and 2 minutes"
 +        }
 +        require(recordingMaxBytes in 1024..(1024L * 1024 * 1024)) { "Recording size limit must be between 1 KiB and 1 GiB" }
++        require(!recordingRetainMedia || enableScreenRecording) { "Media retention requires explicitly enabled recording." }
 +        abilityName?.let { requireIdentifier(it, "Ability name") }
 +        moduleName?.let { requireIdentifier(it, "Module name") }
 +    }
@@ -6767,15 +7623,16 @@ index 0000000..f8e301b
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
 new file mode 100644
-index 0000000..d18f2f6
+index 0000000..f5e4605
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
-@@ -0,0 +1,390 @@
+@@ -0,0 +1,421 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
 +import maestro.utils.TempFileHandler
 +import okio.Buffer
 +import okio.Sink
@@ -6801,11 +7658,13 @@ index 0000000..d18f2f6
 +    private val device: HarmonyOSDevice,
 +    private val receiveFile: (String, Path, Duration) -> Unit,
 +    private val config: HarmonyOSDriverConfig,
++    private val recoveryJournal: HarmonyOSRecoveryJournal? = null,
 +) {
 +    fun start(out: Sink): ScreenRecording {
 +        check(config.enableScreenRecording) { "System screen recording must be explicitly enabled" }
++        check(!config.recordingRetainMedia || recoveryJournal?.recordings != null) { "Recording retention requires a persistent recording session." }
 +        if (!leases.add(deviceId)) throw HdcException("Another Maestro recording owns this device")
-+        val recording = Recording(out)
++        val recording = try { Recording(out) } catch (error: Throwable) { leases.remove(deviceId); throw error }
 +        try {
 +            recording.start()
 +            return recording
@@ -6816,8 +7675,9 @@ index 0000000..d18f2f6
 +    }
 +
 +    private inner class Recording(private val out: Sink) : ScreenRecording {
-+        private val fileName = "maestro-recording-${UUID.randomUUID().toString().replace("-", "")}.mp4"
-+        private val remotePath = "/data/local/tmp/$fileName"
++        private val resource = recoveryJournal?.allocateRecording()
++        private val fileName = resource?.fileName ?: "maestro-recording-${UUID.randomUUID().toString().replace("-", "")}.mp4"
++        private val remotePath = resource?.remotePath ?: "/data/local/tmp/$fileName"
 +        private val files = TempFileHandler()
 +        private var localDirectory: Path? = null
 +        private var localPath: Path? = null
@@ -6844,6 +7704,7 @@ index 0000000..d18f2f6
 +            if (query(budget) != null) throw HdcException("The generated recording name already exists")
 +            localDirectory = files.createTempDirectory("maestro-harmonyos-recording-").toPath()
 +            localPath = localDirectory!!.resolve(fileName)
++            resource?.starting()
 +            startSent = true
 +            aa(listOf("--ps", "CustomizedFileName", fileName), budget)
 +            startConfirmed = true
@@ -6854,6 +7715,7 @@ index 0000000..d18f2f6
 +                val pid = pids.singleOrNull()
 +                if (pid != null && captures == setOf(pid)) {
 +                    ownerPid = pid
++                    resource?.started(pid)
 +                    startedAt = Instant.now()
 +                    break
 +                }
@@ -6873,8 +7735,10 @@ index 0000000..d18f2f6
 +                try {
 +                    close()
 +                    failure = limit
++                    noteResourceFailure(limit)
 +                } catch (error: Throwable) {
 +                    error.addSuppressed(limit)
++                    noteResourceFailure(error)
 +                }
 +            }
 +        }
@@ -6904,6 +7768,7 @@ index 0000000..d18f2f6
 +            }
 +            failure = primary
 +            primary?.let(::addRecoveryHint)
++            primary?.let(::noteResourceFailure)
 +            primary?.let { throw it }
 +        }
 +
@@ -6920,6 +7785,7 @@ index 0000000..d18f2f6
 +                    val pid = pids.singleOrNull()
 +                    if (pid != null && captures == setOf(pid)) {
 +                        ownerPid = pid
++                        resource?.started(pid)
 +                        finish(budget)
 +                    } else {
 +                        original.addSuppressed(HdcException("Could not confirm ownership after recording start; check the device for $fileName"))
@@ -6933,31 +7799,42 @@ index 0000000..d18f2f6
 +            } finally {
 +                cleanup(original)
 +                if (startSent) addRecoveryHint(original)
++                noteResourceFailure(original)
 +                leases.remove(deviceId)
 +                if (interrupted || original is InterruptedException) Thread.currentThread().interrupt()
 +            }
 +        }
 +
 +        private fun finish(budget: Budget) {
++            if (resource != null) {
++                // Persistent recovery needs an observed end, not merely a readable MP4.
++                stopIfOwned(budget)
++                while (captureInstances(budget).isNotEmpty()) pause(budget)
++                resource.ended()
++            }
 +            var uri = query(budget)
 +            var complete = uri?.let { exportIfComplete(it, budget) } ?: false
 +            if (!complete) {
 +                // The system publishes an asset while it is still recording. Only a
 +                // finalized MP4, not URI presence alone, proves that it has finished.
-+                stopIfOwned(budget)
++                if (!stopSent) stopIfOwned(budget)
 +                while (!complete) {
 +                    pause(budget)
 +                    uri = query(budget)
 +                    complete = uri?.let { exportIfComplete(it, budget) } ?: false
 +                }
 +            }
++            resource?.media(checkNotNull(uri))
++            resource?.archive(checkNotNull(localPath), budget.remaining())
 +            copyToSink(budget)
++            if (config.recordingRetainMedia) return
 +            val ownedUri = checkNotNull(uri)
 +            val deletion = command(listOf("mediatool", "delete", ownedUri), budget)
 +            if (deletion.trim() != "[SUCCESS] delete success.") {
 +                throw HdcException("The recording was exported but mediatool did not confirm deletion: $deletion")
 +            }
 +            if (query(budget) != null) throw HdcException("The recording was exported but its media asset was not deleted: $ownedUri")
++            resource?.removed()
 +        }
 +
 +        private fun stopIfOwned(budget: Budget) {
@@ -6970,6 +7847,7 @@ index 0000000..d18f2f6
 +            if (pid in pids && captures == setOf(pid)) {
 +                // Set this before sending: a lost reply cannot cause a second toggle.
 +                check(!stopSent) { "A recording stop request has already been sent" }
++                resource?.stopping()
 +                stopSent = true
 +                aa(emptyList(), budget)
 +            }
@@ -7027,6 +7905,12 @@ index 0000000..d18f2f6
 +
 +        private fun addRecoveryHint(error: Throwable) {
 +            error.addSuppressed(HdcException("Recording may remain on the device. Recover only this session's file with: mediatool query $fileName -u"))
++        }
++
++        private fun noteResourceFailure(error: Throwable) {
++            try { resource?.failed(error) } catch (journalError: Throwable) {
++                if (journalError !== error) error.addSuppressed(journalError)
++            }
 +        }
 +
 +        private fun copyToSink(budget: Budget) {
@@ -7098,6 +7982,9 @@ index 0000000..d18f2f6
 +                try { Files.deleteIfExists(path) } catch (error: Exception) { record(error) }
 +            }
 +            try { files.close() } catch (error: Exception) { record(error) }
++            if (result == null && !config.recordingRetainMedia) {
++                try { resource?.cleaned() } catch (error: Exception) { record(error) }
++            }
 +            return result
 +        }
 +    }
@@ -7163,10 +8050,10 @@ index 0000000..d18f2f6
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..63a7570
+index 0000000..893d472
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,190 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -7209,7 +8096,7 @@ index 0000000..63a7570
 +    override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
 +        HarmonyOSSystemScreenRecorder(deviceId, this, { remote, local, timeout ->
 +            hdc.receiveFile(deviceId, remote, local, timeout)
-+        }, config).start(out)
++        }, config, hdc.recordingResources()).start(out)
 +
 +    override fun hierarchy(timeout: Duration): TreeNode {
 +        return HierarchyReader(
@@ -7232,7 +8119,9 @@ index 0000000..63a7570
 +        } catch (error: HdcCommandException) {
 +            // HDC's text heuristic can identify a remote tool's [FAIL] output as a
 +            // transport error. Only this invocation's final status proves it ran.
-+            if (error.result.exitCode != 0 || remoteStatus(error.result.stdout, marker) == null) throw error
++            val confirmedStatus = remoteStatus(error.result.stdout, marker)
++            if (confirmedStatus == null || error.result.exitCode != 0 &&
++                (error.confirmedRemoteExitCode != confirmedStatus || error.result.exitCode != confirmedStatus)) throw error
 +            transportFailure = error
 +            error.result
 +        }
@@ -7568,12 +8457,344 @@ index 0000000..b7ea2b2
 +
 +    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
+new file mode 100644
+index 0000000..91467d5
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
+@@ -0,0 +1,326 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.harmonyos.driver.HarmonyOSCommandException
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import maestro.utils.TempFileHandler
++import java.io.FileOutputStream
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++
++/** Long-lived recorder resources. The containing recovery journal and device lease own the lock. */
++class HarmonyOSRecordingResourceJournal private constructor(val path: Path, private val state: State) {
++    data class Archive(val name: String, val size: Long, val sha256: String)
++    data class Resource(
++        val id: String,
++        val fileName: String,
++        val remotePath: String,
++        var startRequested: Boolean = false,
++        var startAcknowledged: Boolean = false,
++        var ownerPid: Int? = null,
++        var stopRequested: Boolean = false,
++        var captureEnded: Boolean = false,
++        var uri: String? = null,
++        var archiveName: String? = null,
++        var archiveSize: Long? = null,
++        var archiveSha256: String? = null,
++        var mediaRemoved: Boolean = false,
++        var clean: Boolean = false,
++        var failureFingerprint: String? = null,
++        val archives: MutableList<Archive> = mutableListOf(),
++    )
++    data class State(val schemaVersion: Int = 1, val deviceId: String, val ownerId: String,
++        val generation: String, val remoteRoot: String, val resources: MutableList<Resource> = mutableListOf())
++
++    inner class Recording internal constructor(private val resource: Resource) {
++        val id get() = resource.id
++        val fileName get() = resource.fileName
++        val remotePath get() = resource.remotePath
++        fun starting() = update { check(!resource.startRequested); resource.startRequested = true }
++        fun started(pid: Int) = update { check(resource.startRequested && pid > 0); resource.startAcknowledged = true; resource.ownerPid = pid }
++        fun stopping() = update { check(!resource.stopRequested); resource.stopRequested = true }
++        fun ended() = update { check(resource.startAcknowledged); resource.captureEnded = true }
++        fun media(uri: String) = update {
++            require(mediaUri(resource.fileName, uri))
++            check(resource.uri == null || resource.uri == uri) { "Recording media identity changed." }
++            resource.uri = uri
++        }
++        fun archive(source: Path, timeout: Duration = Duration.ofSeconds(30)) = archiveResource(resource, source, deadline(timeout))
++        fun removed() = update { check(resource.captureEnded && resource.archiveName != null); resource.mediaRemoved = true }
++        fun cleaned() = update { check(!resource.startRequested || resource.mediaRemoved); resource.clean = true }
++        fun failed(error: Throwable) {
++            val fingerprint = failureFingerprint(error)
++            update { resource.failureFingerprint = fingerprint }
++            error.addSuppressed(RecordingResourceFailure(resource.id, fingerprint))
++        }
++    }
++
++    @Synchronized fun register(remotePath: String): Recording {
++        require(remotePath.matches(Regex(Regex.escape(state.remoteRoot) + "/files/recording-[0-9a-f-]{36}\\.mp4")))
++        val id = UUID.randomUUID().toString()
++        val resource = Resource(id, "maestro-recording-${id.replace("-", "")}.mp4", remotePath)
++        state.resources += resource
++        persist()
++        return Recording(resource)
++    }
++
++    @Synchronized fun isComplete(): Boolean = state.resources.all { it.clean }
++    @Synchronized fun hasResources(): Boolean = state.resources.isNotEmpty()
++    @Synchronized fun resolvesFailure(id: String, fingerprint: String): Boolean =
++        state.resources.any { it.id == id && it.clean && it.failureFingerprint == fingerprint }
++    @Synchronized fun ownsFailure(id: String, fingerprint: String): Boolean =
++        state.resources.any { it.id == id && it.failureFingerprint == fingerprint }
++
++    /** G0 only: never toggles a recorder. Capture completion must already have durable evidence. */
++    @Synchronized fun recover(hdc: HdcClient, journal: HarmonyOSRecoveryJournal, timeout: Duration): List<RecoveryIssue> {
++        val deadline = System.nanoTime() + timeout.toNanos()
++        fun remaining(): Duration {
++            val left = deadline - System.nanoTime()
++            if (left <= 0) throw HdcTimeoutException(timeout)
++            return Duration.ofNanos(left)
++        }
++        val recoveryClient = hdc.forResourceRecovery(journal)
++        val device = HdcHarmonyOSDevice(state.deviceId, recoveryClient)
++        val issues = mutableListOf<RecoveryIssue>()
++        for (resource in state.resources.filterNot { it.clean }) {
++            try {
++                if (!resource.startRequested) { resource.clean = true; persist(); continue }
++                if (!resource.startAcknowledged || !resource.captureEnded || resource.ownerPid == null) {
++                    issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} has no confirmed capture end; recovery never sends a stop toggle.")
++                    continue
++                }
++                if (!capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isEmpty()) {
++                    issues += RecoveryIssue("RECORDING_CAPTURE_ACTIVE", "A capture is active; retained recording recovery was deferred.")
++                    continue
++                }
++                // G0 requires a durable byte-for-byte archive made before retention or deletion.
++                // An absent or changed archive cannot authorize deletion of the only device copy.
++                if (!archiveValid(resource, deadline)) {
++                    issues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "Recording ${resource.id} has no intact retained original.")
++                    continue
++                }
++                val uri = query(device, resource, remaining())
++                if (uri != null) {
++                    check(uri == resource.uri) { "The retained recording URI changed." }
++                    val unchanged = TempFileHandler().use { temporary ->
++                        val local = temporary.createTempDirectory("maestro-recording-recovery-").toPath().resolve(resource.fileName)
++                        val exported = device.execute(listOf("mediatool", "recv", uri, resource.remotePath), remaining())
++                        check(exported.lineSequence().map(String::trim).filter(String::isNotEmpty).toList() ==
++                            listOf("Table Name: Photos", resource.remotePath)) { "Recording export was not confirmed." }
++                        val before = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
++                        require(before in 0..MAX_ARCHIVE_BYTES) { "Recording exceeds the recovery byte limit." }
++                        recoveryClient.receiveFile(state.deviceId, resource.remotePath, local, remaining())
++                        val after = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
++                        require(Files.isRegularFile(local, LinkOption.NOFOLLOW_LINKS) && Files.size(local) <= MAX_ARCHIVE_BYTES)
++                        val hash = digest(local, deadline)
++                        val matches = before == after && Files.size(local) == before &&
++                            before == resource.archiveSize && hash == resource.archiveSha256
++                        if (!matches) archiveResource(resource, local, deadline)
++                        matches
++                    }
++                    if (!unchanged) {
++                        issues += RecoveryIssue("RECORDING_MEDIA_CHANGED", "The retained media differs from its archive; both versions were kept and the device original was not deleted.")
++                        continue
++                    }
++                    check(query(device, resource, remaining()) == uri) { "Recording media identity changed during comparison." }
++                    check(capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isEmpty()) { "A capture started during media comparison." }
++                    val deletion = device.execute(listOf("mediatool", "delete", uri), remaining())
++                    check(deletion.trim() == "[SUCCESS] delete success.") { "Media deletion was not acknowledged." }
++                    check(query(device, resource, remaining()) == null) { "Retained recording media still exists." }
++                }
++                resource.mediaRemoved = true
++                persist()
++                // Remote scratch remains in the ordinary journal until the final cleanup phase.
++                resource.clean = true
++                persist()
++            } catch (error: Exception) {
++                if (error is InterruptedException) Thread.currentThread().interrupt()
++                issues += RecoveryIssue("RECORDING_RECOVERY_UNCONFIRMED", error.message ?: error.javaClass.simpleName)
++            }
++        }
++        return issues
++    }
++
++    @Synchronized fun verifyArchives(timeout: Duration = Duration.ofSeconds(30)): Boolean {
++        val deadline = deadline(timeout)
++        return state.resources.all { !it.startRequested || archiveValid(it, deadline) }
++    }
++
++    private fun query(device: HdcHarmonyOSDevice, resource: Resource, timeout: Duration): String? {
++        val output = try { device.execute(listOf("mediatool", "query", resource.fileName, "-u"), timeout) }
++        catch (error: HarmonyOSCommandException) {
++            if (error.remoteExitCode == 255 && error.stdout.trim() == "find 0 result" && error.stderr.isEmpty()) return null
++            throw error
++        }
++        val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
++        if (lines == listOf("find 0 result")) return null
++        check(lines.size == 3 && lines[0] == "find 1 result" && lines[1] == "uri" &&
++            lines[2].startsWith('"') && lines[2].endsWith('"')) { "Recording media query is ambiguous." }
++        return lines[2].substring(1, lines[2].length - 1).also { check(mediaUri(resource.fileName, it)) }
++    }
++
++    @Synchronized private fun archiveResource(resource: Resource, source: Path, deadline: Long) {
++        check(resource.captureEnded && resource.uri != null) { "Capture end and media identity must precede archival." }
++        require(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS))
++        val archives = path.parent.resolve("recording-originals")
++        Files.createDirectories(archives)
++        require(archives.toRealPath() == archives)
++        val destination = archives.resolve("${resource.id}-${UUID.randomUUID()}.mp4")
++        val originalSize = Files.size(source)
++        require(originalSize <= MAX_ARCHIVE_BYTES) { "Recording archive exceeds the byte limit." }
++        // Retained originals belong to the durable recovery owner, never to a temporary file handler.
++        Files.newInputStream(source, LinkOption.NOFOLLOW_LINKS).use { input ->
++            FileOutputStream(destination.toFile()).use { output ->
++                val buffer = ByteArray(65536)
++                var copied = 0L
++                while (true) {
++                    checkDeadline(deadline)
++                    val count = input.read(buffer)
++                    if (count < 0) break
++                    copied += count
++                    check(copied <= originalSize && copied <= MAX_ARCHIVE_BYTES) { "Recording changed during archival." }
++                    output.write(buffer, 0, count)
++                }
++                output.fd.sync()
++            }
++        }
++        check(Files.size(destination) == originalSize && Files.size(source) == originalSize)
++        val hash = digest(destination, deadline)
++        check(hash == digest(source, deadline)) { "Recording changed while preserving its original." }
++        resource.archiveName = destination.fileName.toString()
++        resource.archiveSize = originalSize
++        resource.archiveSha256 = hash
++        resource.archives += Archive(destination.fileName.toString(), originalSize, hash)
++        persist()
++    }
++
++    private fun archiveValid(resource: Resource, deadline: Long = deadline(Duration.ofSeconds(30))): Boolean {
++        val name = resource.archiveName ?: return false
++        val archives = path.parent.resolve("recording-originals")
++        return try {
++            require(resource.archives.lastOrNull() == Archive(name, resource.archiveSize!!, resource.archiveSha256!!))
++            archives.toRealPath() == archives && resource.archives.all { archive ->
++                require(archive.name.matches(Regex("${Regex.escape(resource.id)}-[0-9a-f-]{36}\\.mp4")))
++                val file = archives.resolve(archive.name)
++                Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) && file.toRealPath() == file &&
++                    Files.size(file) == archive.size && digest(file, deadline) == archive.sha256
++            }
++        } catch (_: Exception) { false }
++    }
++
++    @Synchronized private fun update(action: () -> Unit) { action(); persist() }
++    private fun persist() {
++        require(path.parent.toRealPath() == path.parent && !Files.isSymbolicLink(path))
++        val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
++        try {
++            FileOutputStream(staging.toFile()).use { output -> output.write(mapper.writeValueAsBytes(state)); output.fd.sync() }
++            Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++        } finally { Files.deleteIfExists(staging) }
++    }
++
++    companion object {
++        private val mapper = jacksonObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
++        fun create(path: Path, deviceId: String, ownerId: String, generation: String, remoteRoot: String): HarmonyOSRecordingResourceJournal {
++            require(!Files.exists(path, LinkOption.NOFOLLOW_LINKS))
++            return HarmonyOSRecordingResourceJournal(path, State(deviceId = deviceId, ownerId = ownerId,
++                generation = generation, remoteRoot = remoteRoot)).also { it.persist() }
++        }
++        fun open(path: Path, deviceId: String, ownerId: String, generation: String, remoteRoot: String): HarmonyOSRecordingResourceJournal {
++            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path && Files.size(path) <= 4 * 1024 * 1024)
++            val tree = mapper.readTree(path.toFile())
++            require(tree.fieldNames().asSequence().toSet() == setOf("schemaVersion", "deviceId", "ownerId", "generation", "remoteRoot", "resources"))
++            require(tree["schemaVersion"].isIntegralNumber && tree["schemaVersion"].intValue() == 1 && tree["resources"].isArray)
++            require(listOf("deviceId", "ownerId", "generation", "remoteRoot").all { tree[it].isTextual })
++            tree["resources"].forEach { node ->
++                require(node.fieldNames().asSequence().toSet() == setOf("id", "fileName", "remotePath", "startRequested", "startAcknowledged",
++                    "ownerPid", "stopRequested", "captureEnded", "uri", "archiveName", "archiveSize", "archiveSha256", "mediaRemoved", "clean", "failureFingerprint", "archives"))
++                require(listOf("startRequested", "startAcknowledged", "stopRequested", "captureEnded", "mediaRemoved", "clean").all { node[it].isBoolean })
++                require(listOf("id", "fileName", "remotePath").all { node[it].isTextual })
++                require(listOf("uri", "archiveName", "archiveSha256", "failureFingerprint").all { node[it].isNull || node[it].isTextual })
++                require(node["ownerPid"].isNull || node["ownerPid"].isIntegralNumber && node["ownerPid"].canConvertToInt() && node["ownerPid"].intValue() > 0)
++                require(node["archiveSize"].isNull || node["archiveSize"].isIntegralNumber && node["archiveSize"].canConvertToLong() && node["archiveSize"].longValue() >= 0)
++                require(node["archives"].isArray)
++                node["archives"].forEach { archive ->
++                    require(archive.fieldNames().asSequence().toSet() == setOf("name", "size", "sha256") &&
++                        archive["name"].isTextual && archive["sha256"].isTextual && archive["size"].isIntegralNumber &&
++                        archive["size"].canConvertToLong() && archive["size"].longValue() in 0..MAX_ARCHIVE_BYTES)
++                }
++            }
++            val state = mapper.treeToValue(tree, State::class.java)
++            require(state.deviceId == deviceId && state.ownerId == ownerId && state.generation == generation && state.remoteRoot == remoteRoot)
++            require(state.resources.map { it.id }.distinct().size == state.resources.size)
++            state.resources.forEach { r ->
++                require(UUID.fromString(r.id).toString() == r.id && r.fileName == "maestro-recording-${r.id.replace("-", "")}.mp4")
++                require(r.remotePath.matches(Regex(Regex.escape(remoteRoot) + "/files/recording-[0-9a-f-]{36}\\.mp4")))
++                require(!r.startAcknowledged || r.startRequested && r.ownerPid != null)
++                require(!r.captureEnded || r.startAcknowledged)
++                require(!r.stopRequested || r.startAcknowledged)
++                require(r.uri == null || mediaUri(r.fileName, r.uri!!))
++                require(!r.mediaRemoved || r.captureEnded && r.archiveName != null)
++                require(!r.clean || !r.startRequested || r.mediaRemoved)
++                require((r.archiveName == null) == (r.archiveSize == null) && (r.archiveName == null) == (r.archiveSha256 == null))
++                require(r.archiveSha256 == null || r.archiveSha256!!.matches(Regex("[0-9a-f]{64}")))
++                require(r.failureFingerprint == null || r.failureFingerprint!!.matches(Regex("[0-9a-f]{64}")))
++                require(r.archives.all { it.name.matches(Regex("${Regex.escape(r.id)}-[0-9a-f-]{36}\\.mp4")) && it.sha256.matches(Regex("[0-9a-f]{64}")) })
++                require(r.archives.map { it.name }.distinct().size == r.archives.size)
++                require(r.archiveName == null && r.archives.isEmpty() || r.archives.lastOrNull() == Archive(r.archiveName!!, r.archiveSize!!, r.archiveSha256!!))
++            }
++            return HarmonyOSRecordingResourceJournal(path, state)
++        }
++        fun capturePids(output: String): Set<Int> {
++            val marker = "--ScreenCaptureServer--:"
++            check(output.contains("PlayerDistributedService") && output.split(marker).size == 2) { "Capture status is unrecognized." }
++            val tail = output.substringAfter(marker)
++            val end = Regex("(?m)^-{2,}[A-Za-z]").find(tail) ?: error("Capture status is incomplete.")
++            val entries = tail.substring(0, end.range.first)
++            val pattern = Regex("-----#[0-9]+: pid = ([0-9]+)-----")
++            check(pattern.replace(entries, "").isBlank()) { "Capture status is ambiguous." }
++            return pattern.findAll(entries).map { it.groupValues[1].toInt().also { pid -> check(pid > 0) } }.toSet()
++        }
++        private fun mediaUri(name: String, uri: String) = uri.matches(Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/${Regex.escape(name)}"))
++        private const val MAX_ARCHIVE_BYTES = 1024L * 1024 * 1024
++        private fun deadline(timeout: Duration): Long {
++            require(timeout > Duration.ZERO)
++            return System.nanoTime() + timeout.toNanos()
++        }
++        private fun checkDeadline(deadline: Long) {
++            if (Thread.currentThread().isInterrupted) throw InterruptedException("Recording archival interrupted")
++            if (System.nanoTime() >= deadline) throw HdcException("Recording archive or hash exceeded the shared operation deadline.")
++        }
++        private fun digest(file: Path, deadline: Long): String {
++            val hash = MessageDigest.getInstance("SHA-256")
++            Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS).use { input ->
++                val buffer = ByteArray(65536)
++                var bytes = 0L
++                while (true) {
++                    checkDeadline(deadline)
++                    val count = input.read(buffer)
++                    if (count < 0) break
++                    bytes += count
++                    require(bytes <= MAX_ARCHIVE_BYTES) { "Recording archive exceeds the byte limit." }
++                    hash.update(buffer, 0, count)
++                }
++            }
++            return hash.digest().joinToString("") { "%02x".format(it) }
++        }
++        fun failureFingerprint(error: Throwable): String {
++            fun describe(e: Throwable, depth: Int): String = if (depth >= 8) "depth-limit" else buildString {
++                append(e.javaClass.name).append(':').append(e.message).append('\n')
++                e.cause?.let { append(describe(it, depth + 1)) }
++                e.suppressed.filterNot { it is RecordingResourceFailure }.forEach { append(describe(it, depth + 1)) }
++            }
++            return MessageDigest.getInstance("SHA-256").digest(describe(error, 0).toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
++        }
++    }
++}
++
++class RecordingResourceFailure(val recordingId: String, val fingerprint: String) :
++    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..79dfed2
+index 0000000..02883a1
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,396 @@
+@@ -0,0 +1,416 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7620,6 +8841,21 @@ index 0000000..79dfed2
 +    val ownerId: String get() = state.ownerId
 +    private var activeCalls = 0
 +    private var closed = false
++    var recordings: HarmonyOSRecordingResourceJournal? = null
++        private set
++
++    @Synchronized fun enableRecordingResources(): HarmonyOSRecordingResourceJournal {
++        requireDispatch()
++        check(recordings == null)
++        return HarmonyOSRecordingResourceJournal.create(path.resolveSibling("recording-resources.json"),
++            state.deviceId, state.ownerId, state.generation, state.remoteRoot).also { recordings = it }
++    }
++
++    @Synchronized fun allocateRecording(): HarmonyOSRecordingResourceJournal.Recording {
++        requireDispatch()
++        val resources = checkNotNull(recordings) { "Recording resources were not initialized by the session owner." }
++        return resources.register(allocateTemporaryFile("recording", "mp4"))
++    }
 +
 +    data class Operation(
 +        val id: String,
@@ -7658,7 +8894,7 @@ index 0000000..79dfed2
 +    @Synchronized fun snapshot(): RecoveryReport = report()
 +
 +    @Synchronized internal fun allocateTemporaryFile(kind: String, extension: String): String {
-+        require(kind.matches(Regex("[a-z]+")) && extension.matches(Regex("[a-z]+")))
++        require(kind.matches(Regex("[a-z]+")) && extension.matches(Regex("[a-z][a-z0-9]*")))
 +        requireDispatch()
 +        val remote = "${state.remoteRoot}/files/$kind-${UUID.randomUUID()}.$extension"
 +        state.temporaryFiles += remote
@@ -7673,9 +8909,9 @@ index 0000000..79dfed2
 +        persist()
 +    }
 +
-+    internal fun shell(arguments: List<String>, recoverable: Boolean, execute: (List<String>) -> HdcCommandResult): HdcCommandResult {
++    internal fun shell(arguments: List<String>, recoverable: Boolean, allowSealed: Boolean = false, execute: (List<String>) -> HdcCommandResult): HdcCommandResult {
 +        val operation = synchronized(this) {
-+            requireDispatch()
++            if (allowSealed) { ensureOpen(); check(state.sealed && recoverable) } else requireDispatch()
 +            Operation(UUID.randomUUID().toString(), UUID.randomUUID().toString(), hash(mapper.writeValueAsBytes(arguments)), recoverable)
 +                .also { state.rootRemoved = false; state.operations += it; persist() }
 +        }
@@ -7709,7 +8945,7 @@ index 0000000..79dfed2
 +            synchronized(this) { operation.completed = true; persist() }
 +            val original = result.copy(exitCode = if (result.exitCode == 0) completedStatus else result.exitCode,
 +                stdout = result.stdout.substring(0, checkNotNull(completion).range.first))
-+            if (error != null || completedStatus != 0) throw HdcCommandException(original)
++            if (error != null || completedStatus != 0) throw HdcCommandException(original, confirmedRemoteExitCode = completedStatus)
 +            return original
 +        }
 +        if (error != null) throw error
@@ -7740,14 +8976,13 @@ index 0000000..79dfed2
 +    }
 +
 +    /** Requires the caller's exclusive device lease. Does not issue input, launch, or retry commands. */
-+    @Synchronized fun recover(hdc: HdcClient, timeout: Duration = Duration.ofSeconds(10)): RecoveryReport {
++    @Synchronized fun recover(hdc: HdcClient, timeout: Duration = Duration.ofSeconds(10), cleanupResources: Boolean = true): RecoveryReport {
 +        ensureOpen()
 +        require(timeout > Duration.ZERO && timeout <= Duration.ofMinutes(1))
 +        if (!state.sealed || activeCalls != 0) return report()
 +        if (state.operations.isEmpty() && state.rootRemoved && state.hostCalls.all { it.stopped }) {
 +            // Allocating a path is local bookkeeping; no remote directory is created before shell dispatch.
-+            state.temporaryFiles.clear()
-+            persist()
++            if (cleanupResources) { state.temporaryFiles.clear(); persist() }
 +            return report()
 +        }
 +        val deadline = System.nanoTime() + timeout.toNanos()
@@ -7786,6 +9021,7 @@ index 0000000..79dfed2
 +                } else problems += RecoveryIssue("REMOTE_COMPLETION_UNCONFIRMED", "The command-specific completion proof is absent or invalid.")
 +            }
 +            if (state.operations.any { !it.completed }) return report(problems)
++            if (!cleanupResources) return report(problems)
 +            // Completion evidence is durable before deleting any remote proof or owned file.
 +            // Bounded batches stay below native command-line limits. They remove only explicit
 +            // owned paths and share the caller's deadline. A partial cleanup remains retryable.
@@ -7843,7 +9079,7 @@ index 0000000..79dfed2
 +    private fun safeRootPrefix(): String = "[ ! -L ${quote(state.remoteRoot)} ] && [ ! -L ${quote(state.remoteRoot + "/files")} ] || exit 121; "
 +    private fun proof(operation: Operation): String = "${state.generation}:${state.ownerId}:${operation.id}:${operation.sha256}:${operation.token}"
 +    private fun requireOwnedFile(remote: String) {
-+        require(remote.matches(Regex(Regex.escape(state.remoteRoot) + "/files/[a-z]+-[0-9a-f-]{36}\\.[a-z]+"))) { "Resource does not belong to this session." }
++        require(remote.matches(Regex(Regex.escape(state.remoteRoot) + "/files/[a-z]+-[0-9a-f-]{36}\\.[a-z][a-z0-9]*"))) { "Resource does not belong to this session." }
 +    }
 +    private fun report(extra: List<RecoveryIssue> = emptyList()): RecoveryReport {
 +        val issues = extra.toMutableList()
@@ -7923,6 +9159,11 @@ index 0000000..79dfed2
 +            state.sealed = true
 +            HarmonyOSRecoveryJournal(file, state, channel, lock).also { journal ->
 +                state.temporaryFiles.forEach(journal::requireOwnedFile)
++                val recordingsPath = file.resolveSibling("recording-resources.json")
++                if (Files.exists(recordingsPath, LinkOption.NOFOLLOW_LINKS)) {
++                    journal.recordings = HarmonyOSRecordingResourceJournal.open(recordingsPath, state.deviceId,
++                        state.ownerId, state.generation, state.remoteRoot)
++                }
 +                journal.persist()
 +            }
 +        }
@@ -7972,16 +9213,16 @@ index 0000000..79dfed2
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..cfdcb12
+index 0000000..a554bdc
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,180 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
 +import java.time.Duration
 +
-+class HdcCommandException(val result: HdcCommandResult) :
++class HdcCommandException(val result: HdcCommandResult, val confirmedRemoteExitCode: Int? = null) :
 +    HdcException("HDC command failed (exit ${result.exitCode}): ${diagnostic(result)}") {
 +    companion object {
 +        private fun diagnostic(result: HdcCommandResult): String =
@@ -7997,6 +9238,7 @@ index 0000000..cfdcb12
 +    private val runner: HdcCommandRunner = ProcessHdcCommandRunner(),
 +    private val commandTimeout: Duration = Duration.ofSeconds(10),
 +    private val recoveryJournal: HarmonyOSRecoveryJournal? = null,
++    private val resourceRecovery: Boolean = false,
 +) {
 +    init {
 +        require(executablePath.isNotBlank() && '\u0000' !in executablePath) { "A valid HDC executable is required" }
@@ -8005,6 +9247,11 @@ index 0000000..cfdcb12
 +
 +    fun withRecoveryJournal(journal: HarmonyOSRecoveryJournal): HdcClient =
 +        HdcClient(executablePath, runner, commandTimeout, journal)
++
++    internal fun forResourceRecovery(journal: HarmonyOSRecoveryJournal): HdcClient =
++        HdcClient(executablePath, runner, commandTimeout, journal, resourceRecovery = true)
++
++    internal fun recordingResources(): HarmonyOSRecoveryJournal? = recoveryJournal
 +
 +    internal fun allocateTemporaryFile(kind: String, extension: String): String =
 +        recoveryJournal?.allocateTemporaryFile(kind, extension)
@@ -8056,6 +9303,10 @@ index 0000000..cfdcb12
 +        val journal = recoveryJournal
 +        if (journal != null) {
 +            require(journal.deviceId == deviceId) { "Recovery journal belongs to another target." }
++            if (resourceRecovery) {
++                require(finite) { "Resource recovery accepts only declared finite commands." }
++                return journal.shell(arguments, finite, allowSealed = true) { wrapped -> rawShell(deviceId, wrapped, timeout, true, allowSealed = true) }
++            }
 +            return journal.shell(arguments, finite) { wrapped -> rawShell(deviceId, wrapped, timeout, true) }
 +        }
 +        return rawShell(deviceId, arguments, timeout, false)
@@ -8069,9 +9320,9 @@ index 0000000..cfdcb12
 +        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true)
 +    }
 +
-+    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean): HdcCommandResult {
++    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean, allowSealed: Boolean = false): HdcCommandResult {
 +        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
-+        return execute(listOf("-t", deviceId, "shell", command), timeout, trackHost)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, trackHost, allowSealed = allowSealed)
 +    }
 +
 +    fun receiveFile(
@@ -8085,7 +9336,7 @@ index 0000000..cfdcb12
 +            "An absolute device file path is required"
 +        }
 +        recoveryJournal?.let { require(it.deviceId == deviceId) { "Recovery journal belongs to another target." } }
-+        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null)
++        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null, allowSealed = resourceRecovery)
 +    }
 +
 +    private fun execute(arguments: List<String>, timeout: Duration, trackHost: Boolean = false,
@@ -8104,7 +9355,18 @@ index 0000000..cfdcb12
 +        internal fun finiteCommand(arguments: List<String>): Boolean =
 +            (arguments.firstOrNull() == "uitest" && arguments.getOrNull(1) in setOf("dumpLayout", "screenCap", "uiInput")) ||
 +                (arguments.firstOrNull() == "aa" && arguments.getOrNull(1) in setOf("start", "force-stop")) ||
-+                (arguments.take(2) == listOf("rm", "-f") && arguments.size == 3)
++                (arguments.take(2) == listOf("rm", "-f") && arguments.size == 3) ||
++                (arguments == listOf("ps", "-ef")) ||
++                (arguments == listOf("hidumper", "-s", "3002", "-a", "-h")) ||
++                (arguments == listOf("bm", "dump", "-n", "com.huawei.hmos.screenrecorder")) ||
++                (arguments.take(3) == listOf("stat", "-c", "%s") && arguments.size == 4 && recordingScratch(arguments[3])) ||
++                (arguments.take(2) == listOf("mediatool", "query") && arguments.size == 4 &&
++                    arguments[2].matches(Regex("maestro-recording-[0-9a-f]{32}\\.mp4")) && arguments[3] == "-u") ||
++                (arguments.take(2) == listOf("mediatool", "delete") && arguments.size == 3 && recordingMedia(arguments[2])) ||
++                (arguments.take(2) == listOf("mediatool", "recv") && arguments.size == 4 && recordingMedia(arguments[2]) && recordingScratch(arguments[3]))
++
++        private fun recordingScratch(value: String) = value.matches(Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4"))
++        private fun recordingMedia(value: String) = value.matches(Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-[0-9a-f]{32}\\.mp4"))
 +        private val deviceIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")
 +        private val diagnosticTokens = setOf("error", "fail", "failed", "failure", "warning", "warn", "usage", "help", "hdc")
 +        private val hdcFailurePattern = Regex("(?im)^\\s*(?:\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
@@ -9314,16 +10576,21 @@ index 0000000..db63669
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..d567b46
+index 0000000..bbf63b9
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,572 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
 +import maestro.TreeNode
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
++import maestro.harmonyos.hdc.RecordingResourceFailure
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.utils.TempFileHandler
 +import okio.Buffer
 +import okio.Sink
 +import okio.Timeout
@@ -9721,6 +10988,63 @@ index 0000000..d567b46
 +    private fun recorder(device: Device, config: HarmonyOSDriverConfig = config(), id: String = UUID.randomUUID().toString()) =
 +        HarmonyOSSystemScreenRecorder(id, device, device::receive, config)
 +
++    @Test fun `retention records dispatch before commands and preserves an original after stopping`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("recording-retention-test").toPath()
++        val id = "fixture-device"
++        HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()).use { journal ->
++            val resources = journal.enableRecordingResources()
++            val mapper = jacksonObjectMapper()
++            val device = Device().apply { sessionScratch = true }
++            device.response = { arguments ->
++                if (arguments.first() == "aa") {
++                    val entry = mapper.readTree(resources.path.toFile())["resources"][0]
++                    assertThat(entry[if (arguments.contains("--ps")) "startRequested" else "stopRequested"].booleanValue()).isTrue()
++                }
++                null
++            }
++            val sink = RecordingSink()
++            val recorder = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                config().copy(recordingRetainMedia = true, recordingStopTimeout = Duration.ofSeconds(3)), journal)
++            recorder.start(sink).close()
++            assertThat(device.stops).isEqualTo(1)
++            assertThat(device.deletes).isEmpty()
++            assertThat(sink.flushed).isTrue()
++            assertThat(resources.isComplete()).isFalse()
++            assertThat(resources.verifyArchives()).isTrue()
++            val entry = mapper.readTree(resources.path.toFile())["resources"][0]
++            assertThat(entry["captureEnded"].booleanValue()).isTrue()
++            assertThat(entry["uri"].asText()).isEqualTo(device.uri)
++            val archive = directory.resolve("recording-originals").resolve(entry["archiveName"].asText())
++            assertThat(Files.readAllBytes(archive)).isEqualTo(device.video)
++        }
++    }
++
++    @Test fun `retention cannot start outside a durable recording session`() {
++        val device = Device()
++        assertThrows(IllegalStateException::class.java) { recorder(device, config().copy(recordingRetainMedia = true)).start(Buffer()) }
++        assertThat(device.commands).isEmpty()
++    }
++
++    @Test fun `duration error is attributable after the recorder has stopped and archived`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("recording-expiry-test").toPath()
++        val id = "expiry-device"
++        HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()).use { journal ->
++            val resources = journal.enableRecordingResources()
++            val device = Device().apply { sessionScratch = true }
++            val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                config().copy(recordingMaxDuration = Duration.ofSeconds(1), recordingStopTimeout = Duration.ofSeconds(3)), journal).start(Buffer())
++            assertThat(device.deleted.await(5, TimeUnit.SECONDS)).isTrue()
++            val failure = assertThrows(HdcException::class.java) { recording.close() }
++            assertThat(failure.message).contains("1 second limit")
++            val marker = failure.suppressed.filterIsInstance<RecordingResourceFailure>().last()
++            assertThat(marker.fingerprint).isEqualTo(HarmonyOSRecordingResourceJournal.failureFingerprint(failure))
++            assertThat(resources.ownsFailure(marker.recordingId, marker.fingerprint)).isTrue()
++            assertThat(resources.isComplete()).isTrue()
++            assertThat(resources.verifyArchives()).isTrue()
++            assertThat(device.stops).isEqualTo(1)
++        }
++    }
++
 +    private fun config() = HarmonyOSDriverConfig(
 +        enableScreenRecording = true,
 +        pollInterval = Duration.ofMillis(1),
@@ -9750,6 +11074,7 @@ index 0000000..d567b46
 +        var video = Mp4RecordingValidatorTest.minimalVideoRecording()
 +        var localPath: Path? = null
 +        var receiveFailure: Throwable? = null
++        var sessionScratch = false
 +        var response: (List<String>) -> String? = { null }
 +        val commands = mutableListOf<List<String>>()
 +        val deletes = mutableListOf<String>()
@@ -9793,7 +11118,7 @@ index 0000000..d567b46
 +                    }
 +                    "recv" -> {
 +                        assertThat(arguments[2]).isEqualTo(uri)
-+                        assertThat(arguments[3]).isEqualTo("/data/local/tmp/$fileName")
++                        checkRemote(arguments[3])
 +                        "Table Name: Photos\n${arguments[3]}\n"
 +                    }
 +                    "delete" -> {
@@ -9811,7 +11136,7 @@ index 0000000..d567b46
 +        }
 +
 +        fun receive(remote: String, path: Path, timeout: Duration) {
-+            assertThat(remote).isEqualTo("/data/local/tmp/$fileName")
++            checkRemote(remote)
 +            assertThat(timeout.isNegative || timeout.isZero).isFalse()
 +            receives++
 +            localPath = path
@@ -9819,15 +11144,20 @@ index 0000000..d567b46
 +            Files.write(path, video)
 +        }
 +
-+        fun finishExternally() { finished = true }
++        private fun checkRemote(remote: String) {
++            if (sessionScratch) assertThat(remote).matches("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4")
++            else assertThat(remote).isEqualTo("/data/local/tmp/$fileName")
++        }
++
++        fun finishExternally() { finished = true; capturePids = emptySet() }
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
 new file mode 100644
-index 0000000..a984a85
+index 0000000..4be6f3a
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
-@@ -0,0 +1,223 @@
+@@ -0,0 +1,259 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -9836,13 +11166,49 @@ index 0000000..a984a85
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
 +import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.utils.TempFileHandler
 +import org.junit.jupiter.api.Assertions.assertThrows
 +import org.junit.jupiter.api.Test
 +import java.nio.file.Files
 +import java.nio.file.Path
 +import java.time.Duration
++import java.util.UUID
 +
 +class HdcHarmonyOSDeviceTest {
++    @Test fun `a tracked remote proof does not hide a different host exit failure`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("tracked-host-failure-test").toPath()
++        HarmonyOSRecoveryJournal.create(directory.resolve("journal.json"), "fixture-device", UUID.randomUUID().toString()).use { journal ->
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(command.last())!!.value
++                HdcCommandResult(9, "find 0 result\n${marker(command)}255\n\n${acknowledgement}255\n", "host failure")
++            }).withRecoveryJournal(journal)
++            val error = assertThrows(HdcCommandException::class.java) {
++                HdcHarmonyOSDevice("fixture-device", hdc).execute(listOf("mediatool", "query", "example", "-u"), TIMEOUT)
++            }
++            assertThat(error.result.exitCode).isEqualTo(9)
++            assertThat(error.confirmedRemoteExitCode).isEqualTo(255)
++        }
++    }
++
++    @Test fun `tracked remote no-match exit retains its device meaning after completion proof`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("tracked-media-query-test").toPath()
++        HarmonyOSRecoveryJournal.create(directory.resolve("journal.json"), "fixture-device", UUID.randomUUID().toString()).use { journal ->
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(command.last())!!.value
++                HdcCommandResult(0, "find 0 result\n${marker(command)}255\n\n${acknowledgement}255\n", "")
++            }).withRecoveryJournal(journal)
++            val error = assertThrows(HarmonyOSCommandException::class.java) {
++                HdcHarmonyOSDevice("fixture-device", hdc).execute(
++                    listOf("mediatool", "query", "maestro-recording-${UUID.randomUUID().toString().replace("-", "")}.mp4", "-u"), TIMEOUT)
++            }
++            assertThat(error.remoteExitCode).isEqualTo(255)
++            assertThat(error.stdout).isEqualTo("find 0 result")
++            assertThat((error.cause as HdcCommandException).confirmedRemoteExitCode).isEqualTo(255)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(0)
++        }
++    }
++
 +    @Test
 +    fun `remote failure is detected even when HDC exits zero`() {
 +        var calls = 0
@@ -10271,12 +11637,221 @@ index 0000000..93af213
 +            else int(bytes.size + 8) + type.toByteArray() + bytes
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
+new file mode 100644
+index 0000000..a6b03d3
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
+@@ -0,0 +1,203 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import org.junit.jupiter.api.io.TempDir
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++
++class HarmonyOSRecordingResourceJournalTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private fun create() = HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString())
++
++    @Test fun `completed retained media is removed after restart with its original unchanged`() {
++        val journal = create()
++        val resources = journal.enableRecordingResources()
++        val recording = journal.allocateRecording()
++        recording.starting()
++        recording.started(51)
++        recording.stopping()
++        recording.ended()
++        val uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++        recording.media(uri)
++        val original = directory.resolve("original.mp4")
++        val bytes = "even an invalid video must keep its raw bytes".toByteArray()
++        Files.write(original, bytes)
++        recording.archive(original)
++        journal.close()
++        val remote = MediaRemote(uri).apply { video = bytes }
++        HarmonyOSRecoveryJournal.open(journal.path).use { reopened ->
++            val loaded = checkNotNull(reopened.recordings)
++            assertThat(loaded.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(1))).isEmpty()
++            assertThat(loaded.isComplete()).isTrue()
++            assertThat(loaded.verifyArchives()).isTrue()
++            assertThat(remote.deleted).containsExactly(uri)
++            assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
++            assertThat(loaded.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(1))).isEmpty()
++            assertThat(remote.deleted).hasSize(1)
++        }
++        val archive = Files.list(directory.resolve("recording-originals")).use { it.findFirst().orElseThrow() }
++        assertThat(Files.readAllBytes(archive)).isEqualTo(bytes)
++    }
++
++    @Test fun `absent capture end cannot be inferred from an idle device`() {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting()
++            recording.started(51)
++            journal.seal()
++            val noQuery = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device mutation or query is needed") })
++            assertThat(resources.recover(noQuery, journal, Duration.ofSeconds(1)).map { it.code }).contains("RECORDING_CAPTURE_UNCONFIRMED")
++            assertThat(resources.isComplete()).isFalse()
++        }
++    }
++
++    @Test fun `active capture corrupted archive or changed URI cannot delete media`() {
++        for (scenario in listOf("active", "archive", "uri")) {
++            val root = Files.createDirectory(directory.resolve(scenario))
++            HarmonyOSRecoveryJournal.create(root.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString()).use { journal ->
++                val resources = journal.enableRecordingResources()
++                val recording = journal.allocateRecording()
++                recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++                val uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++                recording.media(uri)
++                val original = root.resolve("raw.mp4")
++                Files.writeString(original, "original bytes")
++                recording.archive(original)
++                if (scenario == "archive") {
++                    Files.list(root.resolve("recording-originals")).use { Files.writeString(it.findFirst().orElseThrow(), "changed") }
++                }
++                val remote = MediaRemote(if (scenario == "uri") uri.replace("/123/", "/999/") else uri)
++                remote.active = scenario == "active"
++                journal.seal()
++                assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(1))).isNotEmpty()
++                assertThat(resources.isComplete()).isFalse()
++                assertThat(remote.deleted).isEmpty()
++            }
++        }
++    }
++
++    @Test fun `failed delete acknowledgement can be reconciled without another delete`() {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            val uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++            recording.media(uri)
++            val raw = directory.resolve("raw.mp4")
++            Files.writeString(raw, "raw"); recording.archive(raw)
++            val remote = MediaRemote(uri).apply { loseDeleteReply = true }
++            journal.seal()
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(1))).isNotEmpty()
++            assertThat(resources.isComplete()).isFalse()
++            assertThat(journal.recover(HdcClient("fake", remote), cleanupResources = false).pendingOperations).isEqualTo(0)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(1))).isEmpty()
++            assertThat(remote.deleted).containsExactly(uri)
++        }
++    }
++
++    @Test fun `changed source keeps both originals and needs a later stable comparison before deletion`() {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            val uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++            recording.media(uri)
++            val raw = directory.resolve("raw.mp4")
++            Files.writeString(raw, "first bytes"); recording.archive(raw)
++            val remote = MediaRemote(uri).apply { video = "later finalized bytes".toByteArray() }
++            journal.seal()
++            val result = resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(2))
++            assertThat(result.map { it.code }).contains("RECORDING_MEDIA_CHANGED")
++            assertThat(remote.deleted).isEmpty()
++            assertThat(resources.isComplete()).isFalse()
++            val archives = mapper.readTree(resources.path.toFile())["resources"][0]["archives"]
++            assertThat(archives.size()).isEqualTo(2)
++            val bytes = archives.map { Files.readString(directory.resolve("recording-originals").resolve(it["name"].asText())) }
++            assertThat(bytes).containsExactly("first bytes", "later finalized bytes")
++            assertThat(journal.recover(HdcClient("fake", remote), cleanupResources = false).pendingOperations).isEqualTo(0)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(2))).isEmpty()
++            assertThat(remote.deleted).containsExactly(uri)
++        }
++    }
++
++    @Test fun `stop intent survives reopening and never permits a second dispatch`() {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping()
++            assertThat(mapper.readTree(resources.path.toFile())["resources"][0]["stopRequested"].booleanValue()).isTrue()
++            assertThrows<IllegalStateException> { recording.stopping() }
++        }
++        HarmonyOSRecoveryJournal.open(directory.resolve("recovery-journal.json")).use { journal ->
++            val noQuery = HdcClient("fake", HdcCommandRunner { _, _ -> error("No toggle") })
++            assertThat(journal.recordings!!.recover(noQuery, journal, Duration.ofSeconds(1))).isNotEmpty()
++        }
++    }
++
++    @Test fun `missing required recording fields and foreign ownership fail closed`() {
++        create().use { it.enableRecordingResources() }
++        val file = directory.resolve("recording-resources.json")
++        val valid = Files.readString(file)
++        for (invalid in listOf(valid.replace("\"schemaVersion\":1,", ""), valid.replace("\"deviceId\":\"device\"", "\"deviceId\":\"other\""))) {
++            Files.writeString(file, invalid)
++            assertThrows<Exception> { HarmonyOSRecoveryJournal.open(directory.resolve("recovery-journal.json")) }
++        }
++    }
++
++    private class MediaRemote(private val uri: String) : HdcCommandRunner {
++        var active = false
++        var present = true
++        var loseDeleteReply = false
++        var video = "raw".toByteArray()
++        val deleted = mutableListOf<String>()
++        val commands = mutableListOf<String>()
++        private val proofs = mutableMapOf<String, String>()
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            if (command.contains("recv") && command.contains("file")) {
++                Files.write(Path.of(command.last()), video)
++                return HdcCommandResult(0, "", "")
++            }
++            val script = command.last()
++            commands += script
++            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
++            if (marker == null) {
++                if (script.contains("cat ")) {
++                    val proof = proofs.entries.single { script.contains("/${it.key}/done") }.value
++                    return HdcCommandResult(0, proof, "")
++                }
++                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
++                return HdcCommandResult(0, nonce, "")
++            }
++            var status = 0
++            val output = when {
++                script.contains("hidumper") -> "PlayerDistributedService\n--ScreenCaptureServer--:" +
++                    (if (active) "-----#0: pid = 51-----\n" else "") + "\n--NextSection--\n"
++                script.contains("mediatool") && script.contains("query") -> if (present) "find 1 result\nuri\n\"$uri\"" else {
++                    status = 255; "find 0 result"
++                }
++                script.contains("mediatool") && script.contains("delete") -> {
++                    deleted += uri; present = false
++                    "[SUCCESS] delete success."
++                }
++                script.contains("mediatool") && script.contains("recv") -> "Table Name: Photos\n" +
++                    Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
++                script.contains("stat") -> video.size.toString()
++                else -> error("Unexpected recovery command: $command")
++            }
++            val proof = Regex("[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f]{64}:[0-9a-f-]{36}").find(script)!!.value
++            proofs[proof.split(':')[2]] = "$proof:$status"
++            if (loseDeleteReply && script.contains("mediatool") && script.contains("delete")) {
++                loseDeleteReply = false; throw HdcException("Delete response lost")
++            }
++            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)!!.value
++            return HdcCommandResult(0, "$output\n$marker$status\n\n$acknowledgement$status\n", "")
++        }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..8529ef9
+index 0000000..d630b40
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,333 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -10342,6 +11917,22 @@ index 0000000..8529ef9
 +            remote.foreignProof = false
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
 +            assertThat(remote.dispatched).isEqualTo(1)
++        }
++    }
++
++    @Test fun `completion assessment preserves owned files until resource recovery approves cleanup`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            val path = hdc.allocateTemporaryFile("recording", "mp4")
++            hdc.shell("fixture-target", listOf("uitest", "dumpLayout", "-p", path))
++            journal.seal()
++            val observed = journal.recover(hdc, cleanupResources = false)
++            assertThat(observed.pendingOperations).isEqualTo(0)
++            assertThat(observed.temporaryFiles).isEqualTo(1)
++            assertThat(remote.cleanup).isEmpty()
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            assertThat(remote.cleanup.single()).contains(path)
 +        }
 +    }
 +
@@ -11605,7 +13196,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..f421508 100644
+index c388689..b4ec944 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -36,6 +36,7 @@ import maestro.Maestro
@@ -11616,7 +13207,91 @@ index c388689..f421508 100644
  import maestro.Point
  import maestro.ScreenRecording
  import maestro.UiElement
-@@ -256,38 +257,43 @@ class Orchestra(
+@@ -52,6 +53,12 @@ import maestro.orchestra.debug.ArtifactsGenerator
+ import maestro.orchestra.debug.BundleLayout
+ import maestro.orchestra.debug.ArtifactCollector
+ import maestro.orchestra.debug.CommandOutcome
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceArtifacts
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.orchestra.debug.RetryExecutionFrame
+ import maestro.orchestra.debug.FlowDebugOutput
+ import maestro.orchestra.debug.OrchestraListener
+ import maestro.orchestra.debug.startScreenRecordingInto
+@@ -83,6 +90,8 @@ import java.nio.file.Path
+ import java.nio.file.Files
+ import java.nio.file.Paths
+ import java.util.logging.Filter
++import java.util.Collections
++import java.util.UUID
+ import kotlin.coroutines.coroutineContext
+ import java.time.LocalDateTime
+ import java.time.format.DateTimeFormatter
+@@ -194,6 +203,19 @@ class Orchestra(
+     // equality, so two identical commands would collide as map keys.
+     private val commandStartTimes = mutableMapOf<Int, Long>()
+ 
++    private data class ExecutingCommand(
++        val command: MaestroCommand,
++        val context: ExecutionContext,
++        var terminal: Boolean = false,
++    )
++    private val executingCommands = ArrayDeque<ExecutingCommand>()
++    private val retryFrames = ArrayDeque<RetryExecutionFrame>()
++    private var traceSequence = 0L
++    private val traceStartedNanos = System.nanoTime()
++
++    private fun traceEvent() = ExecutionEvent(traceSequence++, System.nanoTime() - traceStartedNanos)
++    private fun <T> immutable(values: Collection<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
++
+     data class FlowResult(
+         val success: Boolean,
+         val debugOutput: FlowDebugOutput,
+@@ -223,6 +245,23 @@ class Orchestra(
+     }
+ 
+     suspend fun runFlow(commands: List<MaestroCommand>): FlowResult {
++        var result: FlowResult? = null
++        var failure: Throwable? = null
++        try {
++            return runObservedFlow(commands).also { result = it }
++        } catch (error: Throwable) {
++            failure = error
++            throw error
++        } finally {
++            val event = traceEvent()
++            val completionSequence = traceSequence++
++            val end = ExecutionTraceEnd(event, completionSequence, traceSequence,
++                commandSequenceCounter - 1, executingCommands.size, retryFrames.size, result?.success, failure)
++            dispatch("onExecutionTraceEnd") { it.onExecutionTraceEnd(end) }
++        }
++    }
++
++    private suspend fun runObservedFlow(commands: List<MaestroCommand>): FlowResult {
+         val flowStartMs = System.currentTimeMillis()
+         timeMsOfLastInteraction = System.currentTimeMillis()
+ 
+@@ -233,6 +272,9 @@ class Orchestra(
+ 
+         onFlowStart(commands)
+         dispatch("onFlowStart") { it.onFlowStart() }
++        val traceArtifacts = ExecutionTraceArtifacts(artifactsGenerator::allocateFlowLog,
++            artifactsGenerator::refreshManifest, { artifactsGenerator.artifactManifest })
++        dispatch("onExecutionTraceReady") { it.onExecutionTraceReady(traceArtifacts) }
+ 
+         var flowSuccess = false
+         var exception: Throwable? = null
+@@ -248,6 +290,7 @@ class Orchestra(
+                     commands = it,
+                     config = config,
+                     shouldReinitJsEngine = false,
++                    phase = "onFlowStart",
+                 )
+             } ?: true
+ 
+@@ -256,38 +299,44 @@ class Orchestra(
                      commands = filteredCommands,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -11664,6 +13339,7 @@ index c388689..f421508 100644
 +                                commands = it,
 +                                config = config,
 +                                shouldReinitJsEngine = false,
++                                phase = "onFlowComplete",
 +                            )
 +                        } catch (e: CancellationException) {
 +                            // Cancellation takes precedence over flow and cleanup failures.
@@ -11686,7 +13362,7 @@ index c388689..f421508 100644
              }
  
              jsEngine.close()
-@@ -297,6 +303,8 @@ class Orchestra(
+@@ -297,6 +346,8 @@ class Orchestra(
  
              dispatch("onFlowEnd") { it.onFlowEnd() }
  
@@ -11695,7 +13371,7 @@ index c388689..f421508 100644
              // A failed flow whose app crashed failed because of the crash. This is the one place the
              // crash is raised; the failing command's own error rides along.
              val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
-@@ -314,6 +322,18 @@ class Orchestra(
+@@ -314,10 +365,24 @@ class Orchestra(
          }
      }
  
@@ -11714,7 +13390,213 @@ index c388689..f421508 100644
      private suspend fun executeCommands(
          commands: List<MaestroCommand>,
          config: MaestroConfig? = null,
-@@ -1337,9 +1357,12 @@ class Orchestra(
+         shouldReinitJsEngine: Boolean = true,
++        phase: String = "body",
++        scopeOwner: Int? = executingCommands.lastOrNull()?.context?.executionSequence,
+     ): Boolean {
+         if (shouldReinitJsEngine) {
+             initJsEngine(config)
+@@ -333,11 +398,7 @@ class Orchestra(
+                 // Check for pause before executing each command
+                 flowController.waitIfPaused()
+ 
+-                onCommandStart(index, command)
+-                val sequenceNumber = commandSequenceCounter++
+-                val startedAt = System.currentTimeMillis()
+-                commandStartTimes[sequenceNumber] = startedAt
+-                dispatch("onCommandStart") { it.onCommandStart(command, sequenceNumber, subflowDepth) }
++                observeCommand(index, command, phase, scopeOwner) { sequenceNumber ->
+ 
+                 jsEngine.onLogMessage { msg ->
+                     val metadata = getMetadata(command)
+@@ -402,6 +463,7 @@ class Orchestra(
+                 } finally {
+                     insights.unregisterListener(callback)
+                 }
++                }
+             }
+         return true
+     }
+@@ -989,29 +1051,60 @@ class Orchestra(
+ 
+     private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
+         val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
++        val invocationId = UUID.randomUUID().toString()
++        val owner = executingCommands.last().context.executionSequence
++        val parents = immutable(retryFrames)
++        fun emit(kind: String, tryNo: Int? = null, outcome: String? = null, error: Throwable? = null) {
++            val event = RetryExecutionEvent(traceEvent(), kind, invocationId, owner, parents,
++                maxRetries, command.optional, tryNo, outcome, error)
++            dispatch("onRetryExecution") { it.onRetryExecution(event) }
++        }
++        emit("retryBlockStarted")
+ 
+         // Retry is intended for flaky test-level failures — element not found, assertion
+         // failures, etc. — which all surface as MaestroException. Anything else (driver
+         // transport failures, JS evaluation bugs, CancellationException) propagates naturally.
+-        var attempt = 0
+-        while (attempt <= maxRetries) {
+-            try {
+-                return runSubFlow(command.commands, config, command.config)
+-            } catch (exception: MaestroException) {
+-                if (attempt == maxRetries) {
+-                    logger.error("Max retries ($maxRetries) reached. Commands failed.", exception)
+-                    throw exception
++        var blockOutcome = "completed"
++        var blockError: Throwable? = null
++        try {
++            var attempt = 0
++            while (attempt <= maxRetries) {
++                val tryNo = attempt + 1
++                try {
++                    retryFrames.addLast(RetryExecutionFrame(invocationId, owner, tryNo))
++                    emit("retryTryStarted", tryNo)
++                    try {
++                        return runSubFlow(command.commands, config, command.config).also {
++                            emit("retryTryFinished", tryNo, "completed")
++                        }
++                    } catch (error: Throwable) {
++                        emit("retryTryFinished", tryNo,
++                            if (error is MaestroException) "failed" else "interrupted", error)
++                        throw error
++                    } finally {
++                        retryFrames.removeLast()
++                    }
++                } catch (exception: MaestroException) {
++                    if (attempt == maxRetries) {
++                        logger.error("Max retries ($maxRetries) reached. Commands failed.", exception)
++                        throw exception
++                    }
++                    emit("retryScheduled", tryNo + 1)
++                    val message =
++                        "Retrying the commands due to an error: ${exception.message} while execution (Attempt ${attempt + 1})"
++                    logger.error("Attempt ${attempt + 1} failed for retry command", exception)
++                    insights.report(Insight(message = message, Insight.Level.WARNING))
+                 }
+-
+-                val message =
+-                    "Retrying the commands due to an error: ${exception.message} while execution (Attempt ${attempt + 1})"
+-                logger.error("Attempt ${attempt + 1} failed for retry command", exception)
+-                insights.report(Insight(message = message, Insight.Level.WARNING))
++                attempt++
+             }
+-            attempt++
++            return false
++        } catch (error: Throwable) {
++            blockOutcome = if (error is MaestroException) "failed" else "interrupted"
++            blockError = error
++            throw error
++        } finally {
++            emit("retryBlockFinished", outcome = blockOutcome, error = blockError)
+         }
+-
+-        return false
+     }
+ 
+     private fun updateMetadata(rawCommand: MaestroCommand, metadata: CommandMetadata) {
+@@ -1042,8 +1135,45 @@ class Orchestra(
+     ) {
+         val finishedAt = System.currentTimeMillis()
+         val startedAt = commandStartTimes.remove(sequenceNumber) ?: finishedAt
+-        dispatch("onCommandFinished") {
+-            it.onCommandFinished(command, outcome, startedAt, finishedAt)
++        val frame = executingCommands.last { it.context.executionSequence == sequenceNumber }
++        frame.terminal = true
++        val event = traceEvent()
++        dispatch("onCommandExecutionFinished") {
++            it.onCommandExecutionFinished(command, frame.context, outcome, startedAt, finishedAt, event)
++        }
++    }
++
++    private suspend inline fun <T> observeCommand(
++        index: Int, command: MaestroCommand, phase: String, scopeOwner: Int?, block: (Int) -> T,
++    ): T {
++        // This strict registration stays before device dispatch and listener isolation.
++        onCommandStart(index, command)
++        val sequence = commandSequenceCounter++
++        val context = ExecutionContext(sequence, executingCommands.lastOrNull()?.context?.executionSequence,
++            immutable(retryFrames), scopeOwner, phase, immutable(executingCommands.filter {
++                it.command.asCommand()?.optional == true || it.command.elementSelector()?.optional == true
++            }.map { it.context.executionSequence }))
++        val frame = ExecutingCommand(command, context)
++        executingCommands.addLast(frame)
++        val startedAt = System.currentTimeMillis()
++        commandStartTimes[sequence] = startedAt
++        try {
++            val event = traceEvent()
++            dispatch("onCommandExecutionStarted") { it.onCommandExecutionStarted(command, context, subflowDepth, event) }
++            return block(sequence)
++        } catch (error: Throwable) {
++            if (!frame.terminal) {
++                frame.terminal = true
++                commandStartTimes.remove(sequence)
++                val event = traceEvent()
++                val finishedAt = System.currentTimeMillis()
++                dispatch("onCommandExecutionInterrupted") {
++                    it.onCommandExecutionInterrupted(command, context, error, startedAt, finishedAt, event)
++                }
++            }
++            throw error
++        } finally {
++            executingCommands.removeLast()
+         }
+     }
+ 
+@@ -1144,7 +1274,10 @@ class Orchestra(
+         return true
+     }
+ 
+-    private suspend fun executeSubflowCommands(commands: List<MaestroCommand>, config: MaestroConfig?): Boolean {
++    private suspend fun executeSubflowCommands(
++        commands: List<MaestroCommand>, config: MaestroConfig?, phase: String = "body",
++        scopeOwner: Int? = executingCommands.lastOrNull()?.context?.executionSequence,
++    ): Boolean {
+         jsEngine.enterScope()
+         subflowDepth++
+ 
+@@ -1152,13 +1285,8 @@ class Orchestra(
+             commands
+                 .mapIndexed { index, command ->
+                     yield()
+-                    onCommandStart(index, command)
+-                    val sequenceNumber = commandSequenceCounter++
+-                    val startedAt = System.currentTimeMillis()
+-                    commandStartTimes[sequenceNumber] = startedAt
+-                    dispatch("onCommandStart") { it.onCommandStart(command, sequenceNumber, subflowDepth) }
+-
+-                    return@mapIndexed try {
++                    observeCommand(index, command, phase, scopeOwner) { sequenceNumber ->
++                    try {
+                         try {
+                             // Script evaluation is part of running the command, so keep it inside the
+                             // guarded block: a parse error (e.g. a bad numeric field) then reports a
+@@ -1205,6 +1333,7 @@ class Orchestra(
+                             }
+                         }
+                     }
++                    }
+                 }
+                 .any { it }
+         } finally {
+@@ -1229,7 +1358,7 @@ class Orchestra(
+             val onCompleteSuccess: Boolean
+             try {
+                 val onStartSuccess = subflowConfig?.onFlowStart?.commands?.let {
+-                    executeSubflowCommands(it, config)
++                    executeSubflowCommands(it, config, phase = "onFlowStart")
+                 } ?: true
+ 
+                 if (onStartSuccess) {
+@@ -1242,7 +1371,7 @@ class Orchestra(
+             } finally {
+                 onCompleteSuccess = if (currentCoroutineContext().isActive) {
+                     subflowConfig?.onFlowComplete?.commands?.let {
+-                        executeSubflowCommands(it, config)
++                        executeSubflowCommands(it, config, phase = "onFlowComplete")
+                     } ?: true
+                 } else {
+                     true
+@@ -1337,9 +1466,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -11730,6 +13612,16 @@ index c388689..f421508 100644
  
          maestro.launchApp(
              appId = command.appId,
+@@ -1871,7 +2003,8 @@ class Orchestra(
+             executeCommands(
+                 commands = it,
+                 config = config,
+-                shouldReinitJsEngine = false
++                shouldReinitJsEngine = false,
++                phase = "setup",
+             )
+         }
+     }
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt b/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt
 index d02ae86..7cca459 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/validation/AppValidator.kt
@@ -11742,6 +13634,119 @@ index d02ae86..7cca459 100644
          }
      }
  }
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
+index 821f3b4..38ddd40 100644
+--- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
+@@ -122,6 +122,18 @@ internal class ArtifactsGenerator(
+         )
+     }
+ 
++    /** Listener outputs share the same bundle and manifest as core artifacts. */
++    fun allocateFlowLog(path: String, format: ArtifactFormat): File? =
++        collector?.allocate(ArtifactKind.MAESTRO_LOG, format, path)
++
++    /** A CLI observer may seal its logs after runFlow returns or throws. */
++    fun refreshManifest() {
++        val collector = collector ?: return
++        val directory = artifactsDir ?: return
++        artifactManifest = collector.manifest()
++        TestOutputWriter.saveManifest(directory, artifactManifest)
++    }
++
+     /**
+      * The running assertScreenshot's diff, named from the step like its screenshot and hierarchy, so
+      * two failing assertions never share a file. Null when no bundle is produced.
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ExecutionTrace.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ExecutionTrace.kt
+new file mode 100644
+index 0000000..592c911
+--- /dev/null
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ExecutionTrace.kt
+@@ -0,0 +1,51 @@
++package maestro.orchestra.debug
++
++import maestro.orchestra.ArtifactFormat
++import maestro.orchestra.ArtifactManifest
++import java.io.File
++
++/** Values are snapshots of the executor, never a listener-maintained execution stack. */
++data class RetryExecutionFrame(val invocationId: String, val commandSequence: Int, val tryNo: Int)
++
++data class ExecutionContext(
++    val executionSequence: Int,
++    val parentExecutionSequence: Int?,
++    val retryContext: List<RetryExecutionFrame>,
++    val flowScopeOwner: Int?,
++    val phase: String,
++    val optionalAncestorSequences: List<Int>,
++)
++
++data class ExecutionEvent(val sequence: Long, val elapsedNanos: Long)
++
++data class RetryExecutionEvent(
++    val event: ExecutionEvent,
++    val kind: String,
++    val invocationId: String,
++    val commandSequence: Int,
++    val parentContext: List<RetryExecutionFrame>,
++    val maxRetries: Int,
++    val optional: Boolean,
++    val tryNo: Int? = null,
++    val outcome: String? = null,
++    val error: Throwable? = null,
++)
++
++data class ExecutionTraceEnd(
++    val event: ExecutionEvent,
++    /** Reserved by the executor for the writer's completion marker. */
++    val completionSequence: Long,
++    val expectedEventCount: Long,
++    val lastExecutionSequence: Int,
++    val activeCommands: Int,
++    val activeRetries: Int,
++    val success: Boolean?,
++    val error: Throwable?,
++)
++
++/** Allocates only flow-level log outputs in the generator-owned bundle. */
++class ExecutionTraceArtifacts(
++    val allocate: (String, ArtifactFormat) -> File?,
++    val refreshManifest: () -> Unit,
++    val currentManifest: () -> ArtifactManifest? = { null },
++)
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/OrchestraListener.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/OrchestraListener.kt
+index fd49b2f..8c1c1b7 100644
+--- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/OrchestraListener.kt
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/OrchestraListener.kt
+@@ -12,6 +12,28 @@ interface OrchestraListener {
+ 
+     fun onFlowStart() = Unit
+ 
++    fun onExecutionTraceReady(artifacts: ExecutionTraceArtifacts) = Unit
++
++    /** Default forwarding preserves the old listener contract, once per event. */
++    fun onCommandExecutionStarted(
++        cmd: MaestroCommand, context: ExecutionContext, depth: Int, event: ExecutionEvent,
++    ) = onCommandStart(cmd, context.executionSequence, depth)
++
++    fun onCommandExecutionFinished(
++        cmd: MaestroCommand, context: ExecutionContext, outcome: CommandOutcome,
++        startedAt: Long, finishedAt: Long, event: ExecutionEvent,
++    ) = onCommandFinished(cmd, outcome, startedAt, finishedAt)
++
++    /** A propagated cancellation/connection failure has no fabricated CommandOutcome. */
++    fun onCommandExecutionInterrupted(
++        cmd: MaestroCommand, context: ExecutionContext, error: Throwable,
++        startedAt: Long, finishedAt: Long, event: ExecutionEvent,
++    ) = Unit
++
++    fun onRetryExecution(event: RetryExecutionEvent) = Unit
++
++    fun onExecutionTraceEnd(end: ExecutionTraceEnd) = Unit
++
+     /**
+      * @param sequenceNumber monotonic across the whole flow, nested commands included.
+      * @param depth nesting level: 0 at the flow top, +1 per runFlow/repeat/retry.
 diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
 index 70bcfdb..59dd568 100644
 --- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ScreenRecordingOutput.kt
@@ -11904,6 +13909,20 @@ index fa610d7..9aa9b59 100644
 -}
 \ No newline at end of file
 +}
+diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
+index 8d7ac96..bb6cbf8 100644
+--- a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
++++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
+@@ -65,6 +65,9 @@ class OrchestraListenerDispatchTest {
+             widthGrid = 100,
+             heightGrid = 200,
+         )
++        // Match Maestro's ownership of the supplied sink, including on Windows where
++        // an open file prevents the temporary artifact directory from being removed.
++        coEvery { takeScreenshot(any<Sink>(), any(), any()) } answers { firstArg<Sink>().close() }
+         pressKeyThrows?.let { coEvery { pressKey(any(), any()) } throws it }
+         openLinkThrows?.let { coEvery { openLink(any(), any(), any(), any()) } throws it }
+     }
 diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
 new file mode 100644
 index 0000000..7a5c15a
@@ -12485,6 +14504,100 @@ index 0000000..c60d840
 +        val commandFailures: List<Throwable>,
 +    )
 +}
+diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRetryTraceIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRetryTraceIntegrationTest.kt
+new file mode 100644
+index 0000000..5037c3c
+--- /dev/null
++++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRetryTraceIntegrationTest.kt
+@@ -0,0 +1,88 @@
++package maestro.harmonyos
++
++import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.runBlocking
++import maestro.Maestro
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSCommandException
++import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.hdc.HdcClient
++import maestro.orchestra.Orchestra
++import maestro.orchestra.debug.OrchestraListener
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.orchestra.yaml.YamlCommandReader
++import maestro.utils.FileAccessScope
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.nio.file.Files
++import java.time.Duration
++
++/** Real HarmonyOSDriver and standard YAML, with only HDC replaced by an in-process fixture. */
++class HarmonyOSRetryTraceIntegrationTest {
++    @Test
++    fun `standard retry recovers a deterministic assertion failure after actual HarmonyOS actions`() {
++        val device = SimulatedHarmonyOSDevice()
++        val events = mutableListOf<RetryExecutionEvent>()
++        withFlow(device, events) { orchestra, commands ->
++            assertThat(runBlocking { orchestra.runFlow(commands) }.success).isTrue()
++        }
++        assertThat(device.tapCount).isEqualTo(2)
++        assertThat(device.launchedApps).hasSize(2)
++        assertThat(events.filter { it.kind == "retryTryStarted" }.map { it.tryNo }).containsExactly(1, 2).inOrder()
++        assertThat(events.filter { it.kind == "retryTryFinished" }.map { it.outcome }).containsExactly("failed", "completed").inOrder()
++        assertThat(device.remoteFiles).isEmpty()
++    }
++
++    @Test
++    fun `HDC command failure is retained and does not replay the retry block`() {
++        val device = SimulatedHarmonyOSDevice(rejectTap = true)
++        val events = mutableListOf<RetryExecutionEvent>()
++        withFlow(device, events) { orchestra, commands ->
++            assertThrows<HarmonyOSCommandException> { runBlocking { orchestra.runFlow(commands) } }
++        }
++        assertThat(device.tapCount).isEqualTo(1)
++        assertThat(device.launchedApps).hasSize(1)
++        assertThat(events.filter { it.kind == "retryTryStarted" }).hasSize(1)
++        assertThat(events.any { it.kind == "retryScheduled" }).isFalse()
++        assertThat(events.last().outcome).isEqualTo("interrupted")
++    }
++
++    private fun withFlow(device: SimulatedHarmonyOSDevice, events: MutableList<RetryExecutionEvent>,
++        block: (Orchestra, List<maestro.orchestra.MaestroCommand>) -> Unit) {
++        TempFileHandler().use { temporary ->
++            val root = temporary.createTempDirectory("harmonyos-retry-").toPath()
++            val workspace = Files.createDirectory(root.resolve("workspace"))
++            val artifacts = Files.createDirectory(root.resolve("artifacts"))
++            val source = workspace.resolve("retry.yaml")
++            Files.writeString(source, """
++                appId: org.example.harmonyos.flowfixture
++                ---
++                - evalScript: ${'$'}{output.retryAttempt = 0}
++                - retry:
++                    maxRetries: 2
++                    commands:
++                      - launchApp
++                      - tapOn:
++                          id: open-form
++                          retryTapIfNoChange: false
++                      - assertVisible: 姓名
++                      - assertTrue: ${'$'}{++output.retryAttempt > 1}
++            """.trimIndent())
++            val scope = FileAccessScope.under(workspace)
++            val commands = YamlCommandReader.readCommands(source, scope)
++            val driver = HarmonyOSDriver(deviceId = SimulatedHarmonyOSDevice.DEVICE_ID,
++                hdc = HdcClient(executablePath = "simulated-hdc", runner = device),
++                config = HarmonyOSDriverConfig(abilityName = "EntryAbility", commandTimeout = Duration.ofSeconds(2),
++                    settleTimeout = Duration.ofMillis(250), pollInterval = Duration.ofMillis(1)))
++            driver.open()
++            Maestro(driver).use { maestro ->
++                val observer = object : OrchestraListener {
++                    override fun onRetryExecution(event: RetryExecutionEvent) { events += event }
++                }
++                block(Orchestra(maestro, artifactsDir = artifacts, lookupTimeoutMs = 0, optionalLookupTimeoutMs = 0,
++                    scope = scope, listeners = listOf(observer)), commands)
++            }
++        }
++    }
++}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
 new file mode 100644
 index 0000000..234a60f
@@ -12753,6 +14866,202 @@ index 0000000..234a60f
 +        const val DEVICE_ID = "simulated-harmonyos-device"
 +        const val WIDTH = 400
 +        const val HEIGHT = 800
++    }
++}
+diff --git a/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt
+new file mode 100644
+index 0000000..9e0e445
+--- /dev/null
++++ b/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt
+@@ -0,0 +1,190 @@
++package maestro.test
++
++import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.runBlocking
++import maestro.DeviceUnreachableException
++import maestro.Maestro
++import maestro.MaestroException
++import maestro.orchestra.ApplyConfigurationCommand
++import maestro.orchestra.BackPressCommand
++import maestro.orchestra.EvalScriptCommand
++import maestro.orchestra.MaestroCommand
++import maestro.orchestra.MaestroConfig
++import maestro.orchestra.MaestroOnFlowComplete
++import maestro.orchestra.MaestroOnFlowStart
++import maestro.orchestra.Orchestra
++import maestro.orchestra.RetryCommand
++import maestro.orchestra.debug.CommandOutcome
++import maestro.orchestra.debug.ExecutionContext
++import maestro.orchestra.debug.ExecutionEvent
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.OrchestraListener
++import maestro.orchestra.debug.RetryExecutionEvent
++import maestro.test.drivers.FakeDriver
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++
++/** Exercises the real executor and Maestro; only the device boundary is fake. */
++class RetryTraceIntegrationTest {
++    private class Recorder : OrchestraListener {
++        data class Step(val command: MaestroCommand, val context: ExecutionContext)
++        val started = mutableListOf<Step>()
++        val finished = mutableListOf<Pair<ExecutionContext, CommandOutcome>>()
++        val interrupted = mutableListOf<Pair<ExecutionContext, Throwable>>()
++        val retries = mutableListOf<RetryExecutionEvent>()
++        val sequences = mutableListOf<Long>()
++        var end: ExecutionTraceEnd? = null
++        var legacyStarts = 0
++        var legacyFinishes = 0
++        override fun onCommandStart(cmd: MaestroCommand, sequenceNumber: Int, depth: Int) { legacyStarts++ }
++        override fun onCommandFinished(cmd: MaestroCommand, outcome: CommandOutcome, startedAt: Long, finishedAt: Long) { legacyFinishes++ }
++        override fun onCommandExecutionStarted(cmd: MaestroCommand, context: ExecutionContext, depth: Int, event: ExecutionEvent) {
++            started += Step(cmd, context)
++            sequences += event.sequence
++            super.onCommandExecutionStarted(cmd, context, depth, event)
++        }
++        override fun onCommandExecutionFinished(cmd: MaestroCommand, context: ExecutionContext, outcome: CommandOutcome,
++            startedAt: Long, finishedAt: Long, event: ExecutionEvent) {
++            finished += context to outcome
++            sequences += event.sequence
++            super.onCommandExecutionFinished(cmd, context, outcome, startedAt, finishedAt, event)
++        }
++        override fun onCommandExecutionInterrupted(cmd: MaestroCommand, context: ExecutionContext, error: Throwable,
++            startedAt: Long, finishedAt: Long, event: ExecutionEvent) {
++            interrupted += context to error
++            sequences += event.sequence
++        }
++        override fun onRetryExecution(event: RetryExecutionEvent) { retries += event; sequences += event.event.sequence }
++        override fun onExecutionTraceEnd(end: ExecutionTraceEnd) { this.end = end; sequences += end.event.sequence }
++        fun assertClosed() {
++            assertThat(end!!.activeCommands).isEqualTo(0)
++            assertThat(end!!.activeRetries).isEqualTo(0)
++            assertThat(sequences).containsExactlyElementsIn((0L until end!!.completionSequence).toList()).inOrder()
++            assertThat(end!!.expectedEventCount).isEqualTo(sequences.size + 1L)
++            assertThat(legacyStarts).isEqualTo(started.size)
++            assertThat(legacyFinishes).isEqualTo(finished.size)
++            assertThat(started.size).isEqualTo(finished.size + interrupted.size)
++        }
++    }
++
++    private fun back() = MaestroCommand(backPressCommand = BackPressCommand())
++    private fun script(value: String) = MaestroCommand(evalScriptCommand = EvalScriptCommand(value))
++    private fun retry(commands: List<MaestroCommand>, limit: String = "1", config: MaestroConfig? = null) =
++        MaestroCommand(retryCommand = RetryCommand(limit, commands, config))
++
++    private fun run(driver: FakeDriver, commands: List<MaestroCommand>, observer: Recorder,
++        other: OrchestraListener? = null): Orchestra.FlowResult {
++        driver.open()
++        return Maestro(driver).use { maestro ->
++            runBlocking { Orchestra(maestro, lookupTimeoutMs = 0, optionalLookupTimeoutMs = 0,
++                listeners = listOfNotNull(other, observer)).runFlow(commands) }
++        }
++    }
++
++    @Test
++    fun `nested retries keep immutable contexts and create a new inner invocation on outer retry`() {
++        val leaf = back()
++        var calls = 0
++        val driver = object : FakeDriver() {
++            override fun backPress() {
++                if (++calls == 1) throw MaestroException.UnableToLaunchApp("first attempt")
++                super.backPress()
++            }
++        }
++        val recorder = Recorder()
++        val inner = retry(listOf(leaf), "0")
++        val outer = retry(listOf(inner))
++        val tail = script("1")
++        assertThat(run(driver, listOf(outer, tail), recorder).success).isTrue()
++
++        val leaves = recorder.started.filter { it.command === leaf }
++        assertThat(leaves).hasSize(2)
++        assertThat(leaves.map { it.context.executionSequence }.distinct()).hasSize(2)
++        assertThat(leaves.map { it.context.retryContext.map { frame -> frame.tryNo } })
++            .containsExactly(listOf(1, 1), listOf(2, 1)).inOrder()
++        assertThat(leaves.map { it.context.retryContext.first().invocationId }.distinct()).hasSize(1)
++        assertThat(leaves.map { it.context.retryContext.last().invocationId }.distinct()).hasSize(2)
++        assertThat(recorder.started.single { it.command === outer }.context.retryContext).isEmpty()
++        assertThat(recorder.started.single { it.command === tail }.context.retryContext).isEmpty()
++        assertThrows<UnsupportedOperationException> {
++            (leaves.first().context.retryContext as MutableList<*>).clear()
++        }
++        recorder.assertClosed()
++    }
++
++    @Test
++    fun `subflow hooks stay inside their attempt and top level completion is outside retry`() {
++        val start = script("1")
++        val complete = script("2")
++        val topComplete = script("3")
++        val leaf = back()
++        var calls = 0
++        val driver = object : FakeDriver() {
++            override fun backPress() {
++                if (++calls == 1) throw MaestroException.UnableToLaunchApp("recover")
++                super.backPress()
++            }
++        }
++        val recorder = Recorder()
++        val config = MaestroConfig(onFlowStart = MaestroOnFlowStart(listOf(start)),
++            onFlowComplete = MaestroOnFlowComplete(listOf(complete)))
++        val top = MaestroCommand(applyConfigurationCommand = ApplyConfigurationCommand(
++            MaestroConfig(onFlowComplete = MaestroOnFlowComplete(listOf(topComplete)))))
++        assertThat(run(driver, listOf(top, retry(listOf(leaf), config = config)), recorder).success).isTrue()
++        for ((command, phase) in listOf(start to "onFlowStart", complete to "onFlowComplete")) {
++            val hooks = recorder.started.filter { it.command === command }
++            assertThat(hooks.map { it.context.phase }).containsExactly(phase, phase)
++            assertThat(hooks.map { it.context.retryContext.single().tryNo }).containsExactly(1, 2).inOrder()
++        }
++        assertThat(recorder.started.single { it.command === topComplete }.context.retryContext).isEmpty()
++        recorder.assertClosed()
++    }
++
++    @Test
++    fun `cancellation and connection loss close contexts without retrying or fabricating Failed`() {
++        for (failure in listOf(CancellationException("cancelled"), DeviceUnreachableException("back", RuntimeException("lost")))) {
++            var calls = 0
++            val driver = object : FakeDriver() {
++                override fun backPress() { calls++; throw failure }
++            }
++            val recorder = Recorder()
++            val thrown = assertThrows<Throwable> { run(driver, listOf(retry(listOf(back()), "3")), recorder) }
++            // Coroutine stack-trace recovery may copy CancellationException at an IO boundary.
++            assertThat(thrown.javaClass).isEqualTo(failure.javaClass)
++            assertThat(generateSequence(thrown) { it.cause }.take(16).any { it === failure }).isTrue()
++            assertThat(calls).isEqualTo(1)
++            assertThat(recorder.retries.filter { it.kind == "retryTryStarted" }).hasSize(1)
++            assertThat(recorder.interrupted).hasSize(2)
++            assertThat(recorder.finished).isEmpty()
++            recorder.assertClosed()
++        }
++    }
++
++    @Test
++    fun `listener failures cannot corrupt executor context or prevent other observers receiving events`() {
++        val thrower = object : OrchestraListener {
++            override fun onCommandExecutionStarted(cmd: MaestroCommand, context: ExecutionContext, depth: Int, event: ExecutionEvent) {
++                throw IllegalStateException("observer failed")
++            }
++            override fun onRetryExecution(event: RetryExecutionEvent) { throw IllegalStateException("observer failed") }
++        }
++        val recorder = Recorder()
++        assertThat(run(FakeDriver(), listOf(retry(listOf(back())), back()), recorder, thrower).success).isTrue()
++        assertThat(recorder.started.last().context.retryContext).isEmpty()
++        recorder.assertClosed()
++    }
++
++    @Test
++    fun `exhausted retry reports every actual attempt and original failure`() {
++        val failure = MaestroException.UnableToLaunchApp("exhausted")
++        val driver = object : FakeDriver() { override fun backPress() { throw failure } }
++        val recorder = Recorder()
++        assertThat(assertThrows<MaestroException.UnableToLaunchApp> {
++            run(driver, listOf(retry(listOf(back()), "2")), recorder)
++        }).isSameInstanceAs(failure)
++        assertThat(recorder.retries.filter { it.kind == "retryTryStarted" }.map { it.tryNo }).containsExactly(1, 2, 3).inOrder()
++        assertThat(recorder.retries.last().outcome).isEqualTo("failed")
++        recorder.assertClosed()
 +    }
 +}
 diff --git a/maestro-test/src/test/resources/harmonyos/README.md b/maestro-test/src/test/resources/harmonyos/README.md

@@ -17,7 +17,7 @@ function Assert-Test { param([bool]$Condition, [string]$Message) if (-not $Condi
 function Write-TestFile { param([string]$Path, [string]$Text) [IO.File]::WriteAllText($Path, $Text, $utf8) }
 
 function Invoke-Fixture {
-    param([string]$Scenario, [string[]]$Targets = @('fixture-a', 'fixture-b'), [int]$Rounds = 1)
+    param([string]$Scenario, [string[]]$Targets = @('fixture-a', 'fixture-b'), [int]$Rounds = 1, [hashtable]$Extra = @{})
     Write-TestFile $stateFile (@{ scenario = $Scenario; discoveries = 0; calls = @() } | ConvertTo-Json -Depth 8)
     $env:MATRIX_FIXTURE_STATE = $stateFile
     $arguments = @{
@@ -25,6 +25,7 @@ function Invoke-Fixture {
         DeviceIds = $Targets; Repeat = $Rounds; Artifacts = $outputDirectory
         Env = @{ INPUT_TEXT = $inputText; EMPTY = '' }
     }
+    foreach ($key in $Extra.Keys) { $arguments[$key] = $Extra[$key] }
     $savedPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -96,9 +97,15 @@ function Invoke-MatrixNative {
 '@
     Write-TestFile (Join-Path $fixture 'config.local.ps1') $configuration
     $runnerFixture = @'
-param([string]$FlowPath, [string]$BundleId, [string]$AbilityName, [string]$Module, [string]$DeviceId, [hashtable]$Env, [string]$Artifacts, [string]$AgentRoot, [string]$RunId, [string]$AttemptId, [int]$AttemptNo)
+param([string]$FlowPath, [string]$BundleId, [string]$AbilityName, [string]$Module, [string]$DeviceId, [hashtable]$Env, [string]$Artifacts, [string]$AgentRoot, [string]$RunId, [string]$AttemptId, [int]$AttemptNo, [int]$RunTimeoutSeconds, [string]$ControlRecordPath)
 $state = Get-Content -LiteralPath $env:MATRIX_FIXTURE_STATE -Raw -Encoding UTF8 | ConvertFrom-Json
-$state.calls = @($state.calls) + @([ordered]@{ device = $DeviceId; flow = $FlowPath; bundle = $BundleId; ability = $AbilityName; module = $Module; env = $Env; artifacts = $Artifacts })
+$state.calls = @($state.calls) + @([ordered]@{ device = $DeviceId; flow = $FlowPath; bundle = $BundleId; ability = $AbilityName; module = $Module; env = $Env; artifacts = $Artifacts; runTimeoutSeconds = $RunTimeoutSeconds })
+if ($ControlRecordPath) {
+    $index = Get-Content -LiteralPath (Join-Path (Split-Path -Parent $ControlRecordPath) 'control-index.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $entry = @($index.entries | Where-Object { $_.attemptId -ceq $AttemptId })
+    if ($entry.Count -ne 1 -or $entry[0].dispatchState -ne 'launching' -or $entry[0].controlRecordPath -cne $ControlRecordPath) { throw 'Runner started without a matching durable launch intent.' }
+    $state.calls[-1].Add('controlRecordPath', $ControlRecordPath)
+}
 [IO.File]::WriteAllText($env:MATRIX_FIXTURE_STATE, ($state | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
 if ($state.scenario -eq 'cancel') { throw [OperationCanceledException]::new('fixture cancelled') }
 $resultDirectory = Join-Path $AgentRoot ('runs/' + $RunId + '/' + $AttemptId)
@@ -194,11 +201,40 @@ exit $exitCode
     }
     $passed++
 
-    foreach ($scenario in @('cleanup-unknown', 'cleanup-failed', 'unknown', 'missing-result')) {
+    foreach ($scenario in @('cleanup-unknown', 'cleanup-failed', 'unknown', 'missing-result', 'cancelled')) {
         $result = Invoke-Fixture $scenario -Targets @('fixture-a') -Rounds 3
         Assert-Test ($result.ExitCode -eq 1 -and $result.State.calls.Count -eq 1 -and $result.Report.summary.notRun -eq 2) 'A device was reused before safe handoff was confirmed.'
         Assert-Test ($result.Report.runs[1].reason -match 'not run') 'The handoff block was not explained.'
     }
+    $passed++
+
+    $pointerFile = Join-Path $testRoot 'pointers/selected.json'
+    $result = Invoke-Fixture 'pass' -Targets @('fixture-a') -Extra @{ ReportPointerPath = $pointerFile; RunTimeoutSeconds = 17 }
+    $pointer = Get-Content -LiteralPath $pointerFile -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($result.ExitCode -eq 0 -and $pointer.protocol -eq 'maestro.harmonyos.matrix-pointer' -and $pointer.schemaVersion -eq 1) 'Machine-readable report pointer was not published.'
+    Assert-Test ($pointer.reportPath -ceq (Join-Path $result.Directory 'matrix.json') -and $pointer.matrixDirectory -ceq $result.Directory) 'Pointer selected another invocation.'
+    Assert-Test ($result.State.calls[0].runTimeoutSeconds -eq 17) 'The explicit invocation timeout was not forwarded.'
+    $pointerHash = (Get-FileHash -LiteralPath $pointerFile -Algorithm SHA256).Hash
+    $reused = Invoke-Fixture 'pass' -Targets @('fixture-a') -Extra @{ ReportPointerPath = $pointerFile }
+    Assert-Test ($reused.ExitCode -ne 0 -and $reused.State.calls.Count -eq 0 -and $reused.State.discoveries -eq 0) 'Reusing a pointer reached device operations.'
+    Assert-Test ((Get-FileHash -LiteralPath $pointerFile -Algorithm SHA256).Hash -ceq $pointerHash) 'An earlier invocation pointer was overwritten.'
+    $passed++
+
+    $controls = Join-Path $testRoot 'controls'
+    $invocationId = [guid]::NewGuid().ToString()
+    $result = Invoke-Fixture 'cleanup-unknown' -Targets @('fixture-a') -Rounds 3 -Extra @{ ControlRecordDirectory = $controls; MatrixInvocationId = $invocationId }
+    $indexPath = Join-Path $controls 'control-index.json'
+    $index = Get-Content -LiteralPath $indexPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($index.protocol -eq 'maestro.harmonyos.control-index' -and $index.schemaVersion -eq 1 -and $index.invocationId -ceq $invocationId -and $index.matrixRoot -ceq $result.Directory) 'Control index identity differs.'
+    Assert-Test ($index.entries.Count -eq 3 -and $index.entries[0].dispatchState -eq 'returned' -and $index.entries[1].dispatchState -eq 'planned' -and $index.entries[2].dispatchState -eq 'planned') 'Control index lost an unstarted slot or launch state.'
+    Assert-Test ($result.State.calls.Count -eq 1 -and $index.entries[0].controlRecordPath -ceq $result.State.calls[0].controlRecordPath -and $index.entries[0].attemptId -ceq $result.Report.runs[0].attemptId) 'Runner control identity was not forwarded.'
+    $indexHash = (Get-FileHash -LiteralPath $indexPath).Hash
+    $reused = Invoke-Fixture 'pass' -Targets @('fixture-a') -Extra @{ ControlRecordDirectory = $controls }
+    Assert-Test ($reused.ExitCode -ne 0 -and $reused.State.calls.Count -eq 0 -and $reused.State.discoveries -eq 0 -and (Get-FileHash -LiteralPath $indexPath).Hash -ceq $indexHash) 'Reusing a control directory reached device operations or changed its index.'
+    $interruptedControls = Join-Path $testRoot 'interrupted-controls'
+    $result = Invoke-Fixture 'cancel' -Targets @('fixture-a') -Rounds 2 -Extra @{ ControlRecordDirectory = $interruptedControls }
+    $index = Get-Content -LiteralPath (Join-Path $interruptedControls 'control-index.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($result.ExitCode -ne 0 -and $index.entries[0].dispatchState -eq 'launching' -and $index.entries[1].dispatchState -eq 'planned') 'An interrupted dispatch was falsely marked returned.'
     $passed++
 
     $result = Invoke-Fixture 'pass' -Targets @('fixture-a', 'fixture-a')

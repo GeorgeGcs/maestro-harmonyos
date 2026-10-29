@@ -137,6 +137,8 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 
 视频写入运行目录中的 `startRecording/`。本地写入及刷新成功后才删除手机上的本次唯一视频；导出失败会保留该视频供恢复。普通失败和取消会尝试收尾，强制结束 Java 进程或设备断连时仍可能需要手动停止系统录屏。
 
+需要检查每帧是否可解码，使用 `scripts/verify-recording.ps1`。需要对照手机原件时，可启用默认关闭的保留媒体选项，并通过原会话的恢复入口核对后解除占用。具体命令、原件位置与恢复条件见[录屏检查与恢复](recording-diagnostics.md)。
+
 ## 批量执行与报告
 
 同一设备可以顺序执行多个 Flow。使用已有参数配置后，向 CLI 传入多个 YAML 或流程目录，并选择 JUnit 报告：

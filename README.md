@@ -29,6 +29,10 @@ VSCode 的“操作录制”记录通过插件发出的动作，不监听手机�
 | 使用或开发 VSCode 插件 | [插件说明](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md) |
 | 接入智能体或自动化调用方 | [调用协议](docs/agent-protocol.md)、[可运行的 Node.js 示例](examples/agent-client/README.md)：环境查询、结果、证据和取消恢复；需重新构建本仓库 CLI |
 | 按多台设备或多轮执行同一流程 | [逐台验证说明](docs/device-matrix.md) |
+| 冻结场景、核对覆盖并分开统计首次与最终成功 | [重复验证计划](docs/validation-plan.md) |
+| 接入专用 Windows CI 主机 | [CI 入口与设备占用](docs/ci.md) |
+| 检查录屏及恢复保留的媒体 | [录屏检查与恢复](docs/recording-diagnostics.md) |
+| 排查源码构建与资源下载 | [构建复现说明](docs/build-reproducibility.md) |
 | 为项目贡献代码 | [贡献说明](CONTRIBUTING.md)、[主机测试说明](host-tests/README.md) |
 
 当前使用方式是从源码构建包含适配补丁的 CLI，再按需打包安装 VSIX。普通 Maestro 安装包不能替代本项目构建出的鸿蒙版本；VSIX 本身也不包含 Java、HDC 或 CLI。
@@ -75,7 +79,7 @@ upstream.lock.json      上游来源与固定提交
 - 智能体 v2 接口及公开客户端在同一设备完成取消、跨进程阻止接管、凭证据恢复和 CLI 接管；截图后的桥接进程退出恢复也通过。
 - 可选 Huawei 系统录屏已验证正常流程和失败收尾；短视频曾出现尾部解码错误，原因尚未查明，仍默认关闭。
 
-以上使用本地演示应用。新版执行底座另完成连续 3 轮启动、断言、截图与释放的短测；第二台真机、其他系统版本和长期稳定性测试尚未完成。详细证据及首次失败记录见 [10-28 进展](docs/progress/2026-10-28.md)、[10-29 进展](docs/progress/2026-10-29.md)；功能范围见[环境参考](docs/setup.md#已实现与限制)。
+以上使用本地演示应用。新版执行底座另完成连续 3 轮启动、断言、截图与释放的短测；第二台真机、其他系统版本和长期稳定性测试尚未完成。重试证据、保留录屏恢复、通用 CI 入口及隔离构建的新增结果见 [10-30 进展](docs/progress/2026-10-30.md)；前期记录见 [10-28 进展](docs/progress/2026-10-28.md)、[10-29 进展](docs/progress/2026-10-29.md)。功能范围见[环境参考](docs/setup.md#已实现与限制)。
 
 目前没有 HAP 安装、权限修改、清除应用数据、Studio/MCP、多设备分片和云端运行支持。每个 CLI 会话只操作一台本机 HDC 设备，逐台验证脚本依次建立这些会话。
 

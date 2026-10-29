@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $runnerScript = Join-Path $projectRoot 'scripts/run-harmonyos.ps1'
 $testParent = Join-Path $projectRoot 'artifacts/runner-tests'
-$testRoot = Join-Path $testParent ([Guid]::NewGuid().ToString('N'))
+$testRoot = Join-Path $testParent ([Guid]::NewGuid().ToString('N').Substring(0, 12))
 $savedEnvironment = [Environment]::GetEnvironmentVariables('Process')
 $utf8 = [Text.UTF8Encoding]::new($false)
 $passed = 0
@@ -61,6 +61,7 @@ import java.util.Base64;
 import java.util.List;
 public class AppKt {
     public static void main(String[] args) throws Exception {
+        if (args.length == 1 && args[0].equals("--hold-pipes")) { Thread.sleep(5000); return; }
         List<String> values = new ArrayList<>();
         for (String key : List.of("MAESTRO_HARMONYOS_ABILITY", "MAESTRO_HARMONYOS_MODULE", "RUNNER_CONFIG_MARKER")) {
             values.add(System.getenv().getOrDefault(key, ""));
@@ -71,6 +72,18 @@ public class AppKt {
         Path capture = Path.of(System.getenv("RUNNER_CAPTURE_FILE"));
         Files.write(capture, lines, StandardCharsets.UTF_8);
         Files.writeString(capture.resolveSibling("launcher-charset.txt"), System.getProperty("sun.jnu.encoding"), StandardCharsets.UTF_8);
+        String mode = System.getenv().getOrDefault("RUNNER_CAPTURE_MODE", "normal");
+        if (mode.equals("burst")) { for (int i=0; i<15000; i++) System.out.println("fixture-line-"+i); }
+        if (mode.equals("hang") || mode.equals("closed-streams")) {
+            System.out.println("before-wait"); System.err.println("fixture-diagnostic");
+            if (mode.equals("closed-streams")) { System.out.close(); System.err.close(); }
+            Thread.sleep(10000);
+        }
+        if (mode.equals("tail")) {
+            Process child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java.exe").toString(),
+                "-classpath", System.getProperty("java.class.path"), "maestro.cli.AppKt", "--hold-pipes").inheritIO().start();
+            Files.writeString(capture.resolveSibling("pipe-child.txt"), Long.toString(child.pid()), StandardCharsets.UTF_8);
+        }
         System.exit(Integer.parseInt(System.getenv().getOrDefault("RUNNER_CAPTURE_EXIT", "0")));
     }
 }
@@ -127,6 +140,57 @@ $env:RUNNER_CONFIG_MARKER = 'loaded'
     $invocation = Get-Content -LiteralPath (Join-Path $firstArtifacts 'invocation.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-Test ($invocation.agentStatus -eq 'unknown' -and $invocation.cliExitCode -eq 0) 'Missing typed results were treated as confirmed success.'
     Assert-Test ($invocation.runId -ceq $captured[21] -and $invocation.attemptId -ceq $captured[23]) 'Invocation identifiers changed before CLI launch.'
+    $passed++
+
+    $parameters.RunTimeoutSeconds = 1
+    $parameters.TerminationWaitSeconds = 1
+    $parameters.OutputDrainSeconds = 1
+    foreach ($mode in @('hang', 'closed-streams')) {
+        $env:RUNNER_CAPTURE_MODE = $mode
+        $timer = [Diagnostics.Stopwatch]::StartNew()
+        & $fixtureRunner @parameters | Out-Null
+        Assert-Test ($LASTEXITCODE -ne 0 -and $timer.Elapsed.TotalSeconds -lt 8) ('The runner did not bound ' + $mode)
+        $capture = Read-Capture $capturePath
+        $record = Get-Content -LiteralPath (Join-Path $capture[9] 'execution-control.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Test ($record.phase -eq 'unknown' -and $record.stopReason -eq 'run_timeout' -and $record.terminationRequested -eq $true) 'Hard termination was not recorded as uncertain.'
+        Assert-Test ($record.processExitObserved -eq $true -and $null -ne $record.processExitCode -and $record.process.startTimeTicks -gt 0) 'The real process identity and exit were not preserved.'
+        Assert-Test ((Get-Content -LiteralPath $record.stdoutPath -Raw) -match 'before-wait') 'Standard output was not retained.'
+        Assert-Test ((Get-Content -LiteralPath $record.stderrPath -Raw) -match 'fixture-diagnostic') 'Standard error was not retained.'
+        $passed++
+    }
+    $env:RUNNER_CAPTURE_MODE = 'tail'
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    & $fixtureRunner @parameters | Out-Null
+    Assert-Test ($LASTEXITCODE -ne 0 -and $timer.Elapsed.TotalSeconds -lt 5) 'A descendant holding output pipes blocked the runner.'
+    $capture = Read-Capture $capturePath
+    $record = Get-Content -LiteralPath (Join-Path $capture[9] 'execution-control.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($record.processExitCode -eq 0 -and $record.wrapperExitCode -ne 0 -and $record.stopReason -eq 'output_drain_timeout' -and $record.terminationRequested -eq $false) 'Output loss rewrote the real zero process exit.'
+    $childProcess = [Diagnostics.Process]::GetProcessById([int](Get-Content -LiteralPath (Join-Path $fixtureRoot 'pipe-child.txt')))
+    try { Assert-Test (-not $childProcess.HasExited) 'The runner terminated a process other than its owned Java process.'; $null = $childProcess.WaitForExit(7000) } finally { $childProcess.Dispose() }
+    $passed++
+    $env:RUNNER_CAPTURE_MODE = 'burst'
+    $parameters.RunTimeoutSeconds = 15
+    $parameters.OutputDrainSeconds = 5
+    & $fixtureRunner @parameters | Out-Null
+    Assert-Test ($LASTEXITCODE -eq 0) 'Buffered output was throttled into a false timeout.'
+    $capture = Read-Capture $capturePath
+    $record = Get-Content -LiteralPath (Join-Path $capture[9] 'execution-control.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($record.phase -eq 'exited' -and $record.stdoutComplete -eq $true -and [IO.File]::ReadAllLines($record.stdoutPath).Length -eq 15000) 'The output burst was not completely retained.'
+    $passed++
+    Remove-Item -LiteralPath Env:RUNNER_CAPTURE_MODE
+    $parameters.Remove('RunTimeoutSeconds'); $parameters.Remove('TerminationWaitSeconds'); $parameters.Remove('OutputDrainSeconds')
+
+    $parameters.ControlRecordPath = Join-Path $fixtureRoot 'explicit control record.json'
+    & $fixtureRunner @parameters | Out-Null
+    Assert-Test ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $parameters.ControlRecordPath)) 'An explicit control record path was not written.'
+    $controlHash = (Get-FileHash -LiteralPath $parameters.ControlRecordPath -Algorithm SHA256).Hash
+    Remove-Item -LiteralPath $capturePath -Force
+    $savedPreference = $ErrorActionPreference
+    try { $ErrorActionPreference = 'Continue'; & $fixtureRunner @parameters 2>$null | Out-Null; $duplicateControlExit = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $savedPreference }
+    Assert-Test ($duplicateControlExit -ne 0 -and -not (Test-Path -LiteralPath $capturePath)) 'Reusing a control path started another executor.'
+    Assert-Test ((Get-FileHash -LiteralPath $parameters.ControlRecordPath -Algorithm SHA256).Hash -eq $controlHash) 'A refused launch changed an existing control record.'
+    $parameters.Remove('ControlRecordPath')
     $passed++
 
     Assert-Test ($env:MAESTRO_HARMONYOS_ABILITY -ceq 'caller-ability') 'Ability environment was not restored.'
