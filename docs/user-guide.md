@@ -283,10 +283,12 @@ try {
 
 ## 自动化调用方读取结果
 
-`run-harmonyos.ps1` 默认生成[智能体协议 v1](agent-protocol.md)的运行摘要和证据索引。控制台会输出 `Agent result:`，本次调用目录的 `invocation.json` 同时保存结果路径和原 CLI 退出码。结果登记默认放在 `Artifacts/agent/runs/<runId>/<attemptId>/`；使用 `AgentRoot` 可以指定另一处稳定目录。保持同一登记根，重复提交相同尝试才会被识别并拒绝。
+`run-harmonyos.ps1` 默认生成[智能体协议](agent-protocol.md)的 v1 运行摘要和证据索引。桥接协议增加 v2 恢复接口后，磁盘上的这两类文件仍使用 v1。控制台会输出 `Agent result:`，本次调用目录的 `invocation.json` 同时保存结果路径和原 CLI 退出码。结果登记默认放在 `Artifacts/agent/runs/<runId>/<attemptId>/`；使用 `AgentRoot` 可以指定另一处稳定目录。保持同一登记根，重复提交相同尝试才会被识别并拒绝。
 
 摘要的 `status` 区分通过、失败、环境阻塞、取消和未知；`error.kind/code` 给出错误分类。`failedStepId` 对应 `evidence-index.json` 中的步骤，截图、布局、日志和命令记录都有实际路径或明确的缺失说明。先保留这次结果，再决定是否重试；重试使用新 `AttemptId`，同一任务的 `AttemptNo` 递增。修改 Flow、设备或配置时使用新的 `RunId`。
 
-调用方需要交互控制设备时，使用桥接的 `agent.describe/preflight` 查询能力与条件，再连接并操作。取消回执只表示请求已收到，必须等会话 `handoffReady=true` 后才启动另一个执行入口。手机端命令或清理无法确认时会保留未知状态，不能自动当作安全接管。完整请求顺序、字段和本版边界见[协议接入说明](agent-protocol.md#9-接入当前实现)。
+调用方需要交互控制设备时，可从[完整 Node 客户端示例](../examples/agent-client/README.md)开始。它无需安装 npm 依赖，演示预检、可见断言、截图、证据核对、取消释放及可选 CLI 接管。设备、应用、Ability 和输出目录均须显式传入；预检未知时默认停止，人工确认后才能通过 `--allow-unknown` 显式允许。
+
+桥接默认 v1 的十个方法保持兼容。需要恢复时，第一条 `agent.*` 请求使用 `agent.describe {schemaVersion:2}`，版本固定后不能切换。取消回执只表示请求已收到；会话必须释放并确认 `handoffReady=true` 才能启动另一个入口。若清理未知，按旧会话标识调用 `agent.recover` 并核对独立审计报告；恢复不改写原尝试结论。新版 CLI 和桥接会保留未确认会话的持久记录并阻止接管，不能通过删除记录规避。完整请求顺序、跨进程恢复和适用边界见[协议接入说明](agent-protocol.md#9-接入当前实现)与[恢复约定](agent-protocol.md#51-v2-受控恢复)。
 
 提问题时提供本仓提交、构建方式、主机与设备系统版本、最小 YAML、实际退出码和脱敏日志。不要直接附设备序列号、真实账号、签名文件或私人页面截图。参与开发前阅读[贡献说明](../CONTRIBUTING.md)和[开发设计](development-design.md)。新增内容按 [Apache-2.0](../LICENSE) 开源，上游和第三方声明见 [THIRD_PARTY.md](../THIRD_PARTY.md)。

@@ -843,10 +843,10 @@ index 0000000..204fbc9
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
 new file mode 100644
-index 0000000..9b3e948
+index 0000000..1ed614a
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,203 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -946,6 +946,7 @@ index 0000000..9b3e948
 +        when (lock) {
 +            HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE -> check("deviceLock", "passed", "DEVICE_LOCK_AVAILABLE", "The lock was available at observation time; this is not a reservation.")
 +            HarmonyOsSessionSupport.DeviceLockStatus.BUSY -> check("deviceLock", "failed", "DEVICE_BUSY", "Another local Maestro session owns this target.")
++            HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED -> check("deviceLock", "failed", "DEVICE_RECOVERY_REQUIRED", "A prior session has not confirmed cleanup. Recover that session before device operations.")
 +            HarmonyOsSessionSupport.DeviceLockStatus.UNKNOWN -> check("deviceLock", "unknown", "PRECONDITION_UNKNOWN", "Device lock availability was not confirmed.")
 +        }
 +        // Do not compete with a running session, or issue shell probes for an offline target.
@@ -1051,10 +1052,10 @@ index 0000000..9b3e948
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt
 new file mode 100644
-index 0000000..655690a
+index 0000000..1180d4a
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt
-@@ -0,0 +1,504 @@
+@@ -0,0 +1,601 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.core.type.TypeReference
@@ -1080,6 +1081,10 @@ index 0000000..655690a
 +    private val stores = linkedMapOf<String, HarmonyOsAgentAttemptStore>()
 +    private var current: Session? = null
 +    private var stopping = false
++    @Volatile private var schemaVersion = 1
++    private var versionFixed = false
++    private var recovering = false
++    private var recoveryRevision = 0L
 +    private val queries = Executors.newSingleThreadExecutor { task ->
 +        Thread(task, "maestro-agent-readonly").apply { isDaemon = true }
 +    }
@@ -1100,6 +1105,7 @@ index 0000000..655690a
 +        var operation: Job? = null
 +        var releaseRequested = false
 +        var uncertainResources = false
++        var cleanupPersistenceError: Exception? = null
 +    }
 +
 +    private sealed interface Job {
@@ -1109,17 +1115,37 @@ index 0000000..655690a
 +    }
 +
 +    fun hasUnreleasedSession(): Boolean = synchronized(guard) {
-+        current?.let { !handoffReady(it) } ?: false
++        recovering || (current?.let { !handoffReady(it) } ?: false)
 +    }
 +
 +    /** New protocol methods can complete out of request order; JSONL id correlates each response. */
-+    fun dispatch(method: String, parameters: JsonNode, success: (Any) -> Unit, failure: (Exception) -> Unit) {
++    fun dispatch(method: String, parameters: JsonNode, sendSuccess: (Any) -> Unit, failure: (Exception) -> Unit) {
++        val success: (Any) -> Unit = { value ->
++            @Suppress("UNCHECKED_CAST")
++            sendSuccess(if (value is Map<*, *> && value["protocol"] == "maestro.harmonyos.agent")
++                (value as Map<String, Any?>) + ("schemaVersion" to schemaVersion) else value)
++        }
 +        try {
-+            synchronized(guard) { if (stopping) fail("environment", "DEVICE_BUSY", "The bridge is shutting down.") }
++            synchronized(guard) {
++                if (stopping) fail("environment", "DEVICE_BUSY", "The bridge is shutting down.")
++                if (method != "agent.describe") versionFixed = true
++            }
 +            when (method) {
 +                "agent.describe" -> {
-+                    parameters.onlyFields()
-+                    success(HarmonyOsAgentProtocol.document("capabilities", 0, capabilities.describe()))
++                    parameters.onlyFields("schemaVersion")
++                    val requested = parameters.get("schemaVersion")
++                    if (requested != null && (!requested.isIntegralNumber || !requested.canConvertToInt() || requested.intValue() !in 1..2)) {
++                        fail("invalid_input", "UNSUPPORTED_PROTOCOL_VERSION", "Supported protocol versions are 1 and 2.")
++                    }
++                    synchronized(guard) {
++                        val version = requested?.intValue() ?: schemaVersion
++                        if (versionFixed && version != schemaVersion) fail("invalid_input", "PROTOCOL_VERSION_FIXED", "Negotiate the protocol before other agent requests.")
++                        schemaVersion = version
++                        versionFixed = true
++                    }
++                    val data = capabilities.describe().toMutableMap()
++                    if (schemaVersion == 2) data["methods"] = HarmonyOsAgentCapabilities.METHODS + "agent.recover"
++                    success(HarmonyOsAgentProtocol.document("capabilities", 0, data))
 +                }
 +                "agent.preflight" -> {
 +                    synchronized(guard) {
@@ -1140,6 +1166,10 @@ index 0000000..655690a
 +                "agent.action" -> success(action(parameters))
 +                "agent.cancel" -> success(cancel(parameters))
 +                "agent.release" -> success(release(parameters))
++                "agent.recover" -> {
++                    if (schemaVersion != 2) fail("unsupported", "UNKNOWN_METHOD", "Recovery requires protocol version 2.")
++                    recover(parameters, success, failure)
++                }
 +                "agent.result", "agent.evidence" -> {
 +                    parameters.onlyFields("runId", "attemptId")
 +                    val runId = HarmonyOsAgentProtocol.uuid(parameters.requiredText("runId"), "runId")
@@ -1155,6 +1185,7 @@ index 0000000..655690a
 +
 +    private fun connect(config: RecorderConfig, success: (Any) -> Unit, failure: (Exception) -> Unit) {
 +        val managed = synchronized(guard) {
++            if (recovering) fail("environment", "DEVICE_BUSY", "Recovery is in progress.")
 +            if (current?.let { !handoffReady(it) } == true) {
 +                fail("environment", "DEVICE_BUSY", "The previous session has not confirmed resource release.")
 +            }
@@ -1176,7 +1207,7 @@ index 0000000..655690a
 +    private fun ownSession(managed: Session, success: (Any) -> Unit, failure: (Exception) -> Unit) {
 +        var connectAcknowledged = false
 +        try {
-+            backend.withSession(managed.config) { rawConnection ->
++            backend.withSession(managed.config.copy(sessionId = managed.id)) { rawConnection ->
 +                val connection = rawConnection as? AgentRecorderConnection
 +                    ?: fail("unsupported", "UNSUPPORTED_COMMAND", "The recorder backend does not implement agent actions.")
 +                val connected = synchronized(guard) {
@@ -1193,6 +1224,7 @@ index 0000000..655690a
 +                connectAcknowledged = true
 +                reply(success, failure) { connected }
 +                workLoop(managed, connection)
++                synchronized(guard) { managed.cleanupPersistenceError }?.let { throw it }
 +                // Clear an already handled interrupt before driver/recording/file cleanup runs.
 +                Thread.interrupted()
 +            }
@@ -1225,12 +1257,17 @@ index 0000000..655690a
 +                managed.operation = null
 +                managed.state = "closed"
 +                val rejectedBeforeOwnership = !managed.opened && managed.closeError?.let {
-+                    it.suppressed.isEmpty() && HarmonyOsAgentProtocol.error(it).code in setOf("DEVICE_NOT_FOUND", "DEVICE_BUSY")
++                    it.suppressed.isEmpty() && HarmonyOsAgentProtocol.error(it).code in setOf("DEVICE_NOT_FOUND", "DEVICE_BUSY", "DEVICE_RECOVERY_REQUIRED")
 +                } == true
 +                if (managed.closeError == null || rejectedBeforeOwnership) {
 +                    // This is reached only after withSession returned, including lock release.
 +                    managed.lockState = "released"
 +                    managed.cleanupState = if (managed.uncertainResources) "unknown" else "complete"
++                } else if (HarmonyOsAgentProtocol.error(managed.closeError!!).code == "DEVICE_RECOVERY_REQUIRED") {
++                    managed.lockState = "released"
++                    managed.cleanupState = "unknown"
++                    managed.uncertainResources = true
++                    managed.cleanupErrors += structuredCleanupErrors(managed.closeError!!)
 +                } else {
 +                    managed.lockState = "unknown"
 +                    managed.cleanupState = "failed"
@@ -1271,6 +1308,9 @@ index 0000000..655690a
 +                }
 +            }
 +            completed?.invoke()
++            // Deliver an in-flight snapshot's response before terminating an owner whose gate
++            // metadata could not be persisted. Such an owner must never return normally.
++            synchronized(guard) { managed.cleanupPersistenceError }?.let { throw it }
 +            if (synchronized(guard) { managed.releaseRequested }) break
 +        }
 +        // A release may win before the queued operation starts. Every queued response still completes.
@@ -1319,14 +1359,29 @@ index 0000000..655690a
 +        }
 +        val cleanup = data.path("cleanup")
 +        if (cleanup.path("state").asText() !in setOf("complete", "not_started")) {
++            markUncertainResources(managed, cleanup.path("errors").map { error ->
++                mapper.convertValue(error, object : TypeReference<Map<String, Any?>>() {})
++            })
++        }
++    }
++
++    private fun markUncertainResources(managed: Session, errors: List<Map<String, Any?>>): Exception? {
++        synchronized(guard) {
++            managed.uncertainResources = true
++            managed.cleanupState = "unknown"
++            managed.cleanupErrors += errors
++            managed.revision++
++        }
++        return try {
++            backend.noteUncertainCleanup(managed.id)
++            null
++        } catch (error: Exception) {
 +            synchronized(guard) {
-+                managed.uncertainResources = true
-+                managed.cleanupState = "unknown"
-+                cleanup.path("errors").forEach { error ->
-+                    managed.cleanupErrors += mapper.convertValue(error, object : TypeReference<Map<String, Any?>>() {})
-+                }
++                if (managed.cleanupPersistenceError == null) managed.cleanupPersistenceError = error
++                managed.cleanupErrors += structuredCleanupErrors(error)
 +                managed.revision++
 +            }
++            error
 +        }
 +    }
 +
@@ -1350,12 +1405,8 @@ index 0000000..655690a
 +            Thread.interrupted()
 +            val outcomeUnconfirmed = captureStarted && HarmonyOsAgentProtocol.error(error).kind in setOf("timeout", "transport", "cancelled")
 +            if (interrupted || outcomeUnconfirmed || error.suppressed.isNotEmpty()) {
-+                synchronized(guard) {
-+                    managed.uncertainResources = true
-+                    managed.cleanupState = "unknown"
-+                    managed.cleanupErrors += structuredCleanupErrors(error)
-+                    managed.revision++
-+                }
++                markUncertainResources(managed, structuredCleanupErrors(error))
++                    ?.takeIf { it !== error }?.let(error::addSuppressed)
 +            }
 +            val completed: () -> Unit = { deliverFailure(job.failure, error) }
 +            completed
@@ -1492,6 +1543,53 @@ index 0000000..655690a
 +
 +    private fun handoffReady(managed: Session) = managed.finished && managed.state == "closed" &&
 +        managed.active == null && managed.lockState == "released" && managed.cleanupState == "complete"
++
++    private fun recover(parameters: JsonNode, success: (Any) -> Unit, failure: (Exception) -> Unit) {
++        parameters.onlyFields("deviceId", "sessionId")
++        val id = HarmonyOsAgentProtocol.uuid(parameters.requiredText("sessionId"), "sessionId")
++        val deviceId = parameters.requiredText("deviceId")
++        if (deviceId.length > 256 || !deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")))
++            fail("invalid_input", "INVALID_PARAMS", "Invalid explicit device identifier.")
++        synchronized(guard) {
++            if (recovering || sessions.values.any { !it.finished })
++                fail("environment", "DEVICE_BUSY", "Release the session and wait for the owner to finish before recovery.")
++            sessions[id]?.let { if (it.config.deviceId != deviceId)
++                fail("invalid_input", "RECOVERY_SESSION_MISMATCH", "The session belongs to another device.") }
++            recovering = true
++        }
++        try {
++            queries.execute {
++                var result: Map<String, Any?>? = null
++                var error: Exception? = null
++                try {
++                    val recovered = backend.recover(deviceId, id)
++                    check(recovered["deviceId"] == deviceId && recovered["sessionId"] == id) { "Recovery returned a different owner." }
++                    val cleanup = recovered["cleanup"] as Map<*, *>
++                    val confirmed = recovered["state"] == "complete" && cleanup["state"] == "complete" &&
++                        (cleanup["errors"] as List<*>).isEmpty() && recovered["pendingOperations"] == 0 && recovered["temporaryFiles"] == 0
++                    check(recovered["handoffReady"] == confirmed) { "Recovery did not provide consistent completion evidence." }
++                    synchronized(guard) {
++                        sessions[id]?.let { managed ->
++                            managed.state = "closed"
++                            managed.lockState = "released"
++                            managed.cleanupState = cleanup["state"] as String
++                            managed.cleanupErrors.clear()
++                            @Suppress("UNCHECKED_CAST")
++                            managed.cleanupErrors.addAll(cleanup["errors"] as List<Map<String, Any?>>)
++                            managed.uncertainResources = recovered["handoffReady"] != true
++                            managed.revision++
++                        }
++                        result = HarmonyOsAgentProtocol.document("recoveryReport", ++recoveryRevision, recovered)
++                    }
++                } catch (caught: Exception) { error = caught }
++                finally { synchronized(guard) { recovering = false } }
++                if (error != null) deliverFailure(failure, error!!) else reply(success, failure) { result!! }
++            }
++        } catch (error: Exception) {
++            synchronized(guard) { recovering = false }
++            throw error
++        }
++    }
 +
 +    private fun readAttempt(method: String, runId: String, attemptId: String): Map<String, Any?> {
 +        val known = synchronized(guard) { stores.values.toList() }
@@ -1654,10 +1752,10 @@ index 0000000..5eb9492
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
 new file mode 100644
-index 0000000..f22e305
+index 0000000..f892702
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,276 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1692,6 +1790,7 @@ index 0000000..f22e305
 +    val abilityName: String,
 +    val moduleName: String?,
 +    val artifactsDir: Path,
++    val sessionId: String? = null,
 +)
 +
 +internal interface RecorderConnection {
@@ -1702,6 +1801,9 @@ index 0000000..f22e305
 +internal interface RecorderBackend {
 +    fun devices(): List<String>
 +    fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit)
++    fun recover(deviceId: String, sessionId: String): Map<String, Any?> =
++        throw AgentProtocolException(AgentError("unsupported", "UNSUPPORTED_COMMAND", "This backend cannot prove resource recovery."))
++    fun noteUncertainCleanup(sessionId: String) = Unit
 +}
 +
 +internal class HarmonyOsBridgeServer(
@@ -1932,10 +2034,10 @@ index 0000000..f22e305
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..f64d8dc
+index 0000000..f9982ba
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,314 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -1962,6 +2064,10 @@ index 0000000..f64d8dc
 +    private var failure: Throwable? = null
 +    private var reportingFailure: Throwable? = null
 +    private var completed = false
++    private var completedFlows = 0
++    private var failedFlows = 0
++    private var observedFlows = 0
++    private var abortedFlows = 0
 +    private val shutdownHook = Thread({
 +        synchronized(this) {
 +            if (!completed) {
@@ -1985,9 +2091,14 @@ index 0000000..f64d8dc
 +    fun finish(success: Boolean, error: Throwable? = null) {
 +        if (completed) return
 +        // Returning from newSession confirms normal teardown. An exception does not.
-+        attempt.setCleanup(if (error == null) "complete" else "unknown")
-+        val actualError = if (reportingFailure != null) failure ?: error ?: reportingFailure else error ?: failure
-+        if (success && actualError == null) attempt.finishSuccess()
++        attempt.setCleanup(if (error == null) "complete" else "unknown",
++            error?.let { listOf(HarmonyOsAgentProtocol.error(it)) }.orEmpty())
++        val recoveryBlocked = error != null && HarmonyOsAgentProtocol.error(error).code == "DEVICE_RECOVERY_REQUIRED"
++        val actualError = if (recoveryBlocked) failure ?: reportingFailure ?: error
++            else if (reportingFailure != null) failure ?: error ?: reportingFailure else error ?: failure
++        if (recoveryBlocked && completedFlows > 0 && completedFlows == observedFlows &&
++            failedFlows == 0 && abortedFlows == 0 && reportingFailure == null) attempt.finishSuccess()
++        else if (success && actualError == null) attempt.finishSuccess()
 +        else if (success && reportingFailure == null && error == null) attempt.finishSuccess()
 +        else if (actualError != null && reportingFailure != null && actualError !== reportingFailure) {
 +            val classified = HarmonyOsAgentProtocol.error(actualError)
@@ -2018,6 +2129,7 @@ index 0000000..f64d8dc
 +        private val archivedSources = mutableMapOf<String, String>()
 +
 +        init {
++            observedFlows++
 +            collectCommands(commands).mapNotNull { it.sourceInfo }.forEach { info ->
 +                val path = info.path ?: return@forEach
 +                if (path !in archivedSources) {
@@ -2070,6 +2182,8 @@ index 0000000..f64d8dc
 +        }
 +
 +        fun finished(result: Orchestra.FlowResult) = observe {
++            completedFlows++
++            if (!result.success) failedFlows++
 +            val captured = mutableMapOf<String, MutableSet<String>>()
 +            result.debugOutput.executedSteps.forEach { step ->
 +                val id = steps[step.sequenceNumber] ?: return@forEach
@@ -2113,6 +2227,7 @@ index 0000000..f64d8dc
 +        }
 +
 +        fun aborted(error: Throwable) {
++            abortedFlows++
 +            if (error !== reportingFailure || failure == null) failure = error
 +            observe {
 +                val classified = HarmonyOsAgentProtocol.error(error)
@@ -2239,10 +2354,10 @@ index 0000000..f64d8dc
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt
 new file mode 100644
-index 0000000..9fc738f
+index 0000000..b5470de
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,488 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -2261,6 +2376,7 @@ index 0000000..9fc738f
 +import maestro.TreeNode
 +import maestro.UiElement.Companion.toUiElementOrNull
 +import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.cli.session.HarmonyOsRecoverySupport
 +import maestro.harmonyos.driver.HarmonyOSDriverConfig
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.orchestra.Orchestra
@@ -2288,7 +2404,29 @@ index 0000000..9fc738f
 +        Files.createDirectories(config.artifactsDir)
 +        HarmonyOsSessionSupport.withSession(
 +            selected, hdc, HarmonyOSDriverConfig(abilityName = config.abilityName, moduleName = config.moduleName),
++            ownerId = config.sessionId ?: UUID.randomUUID().toString(),
 +        ) { session -> block(HarmonyOsRecorder(session.maestro, config)) }
++    }
++
++    override fun noteUncertainCleanup(sessionId: String) {
++        HarmonyOsRecoverySupport.noteUncertainCleanup(sessionId, "The bridge could not confirm cleanup after an interrupted or failed device operation.")
++    }
++
++    override fun recover(deviceId: String, sessionId: String): Map<String, Any?> {
++        val outcome = HarmonyOsRecoverySupport.recover(deviceId, sessionId, hdc)
++        val errors = if (outcome.complete) emptyList() else (outcome.report["issues"] as? List<*>)?.map { raw ->
++            val issue = raw as Map<*, *>
++            AgentError("environment", issue["code"] as String, issue["message"] as String).toMap()
++        }.orEmpty().ifEmpty { listOf(AgentError("environment", "PRECONDITION_UNKNOWN", "Resource recovery remains unconfirmed.").toMap()) }
++        return mapOf(
++            "deviceId" to deviceId, "sessionId" to sessionId,
++            "state" to if (outcome.complete) "complete" else "unknown",
++            "cleanup" to mapOf("state" to if (outcome.complete) "complete" else "unknown", "errors" to errors),
++            "handoffReady" to outcome.complete, "reportPath" to outcome.reportPath.toString(), "reportSha256" to outcome.sha256,
++            "operations" to (outcome.report["operations"] as Number).toInt(),
++            "pendingOperations" to (outcome.report["pendingOperations"] as Number).toInt(),
++            "temporaryFiles" to (outcome.report["temporaryFiles"] as Number).toInt(),
++        )
 +    }
 +}
 +
@@ -2849,12 +2987,402 @@ index b79b107..5b826fc 100644
                  logger.error("${shardPrefix}Failed to complete flow", e)
                  flowStatus = FlowStatus.ERROR
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
+new file mode 100644
+index 0000000..2819b91
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
+@@ -0,0 +1,384 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.cli.harmonyos.AgentError
++import maestro.cli.harmonyos.AgentProtocolException
++import maestro.cli.harmonyos.HarmonyOsAgentProtocol
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.RecoveryIssue
++import maestro.harmonyos.hdc.RecoveryReport
++import java.io.FileOutputStream
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.security.MessageDigest
++import java.time.Duration
++import java.time.Instant
++import java.util.UUID
++import java.util.concurrent.ConcurrentHashMap
++
++/** OS locks serialize callers; this durable gate also survives the owner process disappearing. */
++internal class HarmonyOsSessionLease private constructor(
++    val journal: HarmonyOSRecoveryJournal,
++    private val directory: Path,
++    private var gate: LeaseGate,
++) {
++    private var finished = false
++
++    @Synchronized
++    private fun noteUncertainCleanup(reason: String) {
++        check(!finished) { "The device lease has already finished." }
++        gate = gate.copy(requiresRecovery = true, uncertainReason = reason.take(4096), updatedAt = Instant.now().toString())
++        writeGate(directory, gate)
++    }
++
++    @Synchronized
++    fun finish(closeFailure: Throwable?, hdc: HdcClient) {
++        if (finished) return
++        var failure: Throwable? = null
++        try {
++            finishOwned(closeFailure, hdc)
++        } catch (error: Throwable) {
++            failure = error
++            throw error
++        } finally {
++            finished = true
++            activeLeases.remove(gate.ownerId, this)
++            try { journal.close() } catch (error: Throwable) {
++                if (failure == null) throw error
++                else if (failure !== error) failure!!.addSuppressed(error)
++            }
++        }
++    }
++
++    private fun finishOwned(closeFailure: Throwable?, hdc: HdcClient) {
++        var report: RecoveryReport? = null
++        var failure: Throwable? = null
++        val closeError = closeFailure?.let(HarmonyOsAgentProtocol::error)
++        if (closeError != null) {
++            // Persist independently before cleanup, so a host crash cannot erase this blocker.
++            gate = gate.copy(closeFailure = closeError.toMap(), updatedAt = Instant.now().toString())
++            writeGate(directory, gate)
++        } else if (gate.unresolvedRecording) {
++            // Only the real driver's successful close can confirm its long-lived recorder cleanup.
++            gate = gate.copy(unresolvedRecording = false, updatedAt = Instant.now().toString())
++            writeGate(directory, gate)
++        }
++        try {
++            journal.seal()
++            report = if (gate.requiresRecovery) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(10))
++        } catch (error: Throwable) {
++            failure = error
++        } finally {
++            try { journal.close() } catch (error: Throwable) {
++                if (failure == null) failure = error else if (failure !== error) failure!!.addSuppressed(error)
++            }
++        }
++        val observed = report ?: RecoveryReport("unknown", 0, 0, 0,
++            listOf(RecoveryIssue("RECOVERY_JOURNAL_UNAVAILABLE", "The resource journal could not confirm cleanup.")))
++        val issues = observed.issues.toMutableList()
++        if (gate.requiresRecovery) issues += RecoveryIssue("EXPLICIT_RECOVERY_REQUIRED",
++            gate.uncertainReason ?: "The caller reported uncertain cleanup; an explicit recovery check is required.")
++        if (closeError != null) issues += RecoveryIssue("DRIVER_CLEANUP_FAILED", closeError.message)
++        if (failure != null) issues += RecoveryIssue("RECOVERY_JOURNAL_UNAVAILABLE", failure!!.message ?: failure!!.javaClass.simpleName)
++        val effective = observed.copy(state = if (observed.state == "complete" && issues.isEmpty()) "complete" else "unknown",
++            issues = issues.distinct())
++        val updated = gate
++        val outcome = writeReceipt(directory, updated, effective, "session_close")
++        writeGate(directory, updated.copy(state = if (outcome.complete) "clean" else "quarantined",
++            reportPath = outcome.reportPath.toString(), reportSha256 = outcome.sha256, updatedAt = Instant.now().toString()))
++        if (!outcome.complete) {
++            val blocked = recoveryRequired(updated, "The session ended without confirmed resource cleanup.")
++            failure?.takeIf { it !== blocked }?.let(blocked::addSuppressed)
++            throw blocked
++        }
++    }
++
++    companion object {
++        private val activeLeases = ConcurrentHashMap<String, HarmonyOsSessionLease>()
++
++        fun noteUncertainCleanup(ownerId: String, reason: String) {
++            HarmonyOsAgentProtocol.uuid(ownerId, "sessionId")
++            val lease = activeLeases[ownerId] ?: throw AgentProtocolException(AgentError(
++                "environment", "SESSION_LEASE_UNAVAILABLE", "The session has no active local device lease."))
++            lease.noteUncertainCleanup(reason)
++        }
++
++        /** Must be called while holding the matching device OS lock, before any device operation. */
++        fun begin(deviceId: String, ownerId: String, lockDirectory: Path,
++            requiresRecordingCleanup: Boolean = false): HarmonyOsSessionLease {
++            HarmonyOsAgentProtocol.uuid(ownerId, "ownerId")
++            validateDevice(deviceId)
++            val directory = lockDirectory.toAbsolutePath().normalize()
++            require(directory.toRealPath() == directory) { "Device lease directory must not contain symbolic links." }
++            readGate(directory, deviceId)?.let { prior ->
++                if (prior.state != "clean" || runCatching { existingReceipt(directory, prior).complete }.getOrDefault(false).not()) {
++                    throw recoveryRequired(prior, "A previous session requires recovery before this device can be used.")
++                }
++            }
++            val ownerDirectory = ownerDirectory(directory, deviceId, ownerId)
++            Files.createDirectories(ownerDirectory.parent)
++            require(ownerDirectory.parent.toRealPath() == ownerDirectory.parent) { "Device owner directories cannot follow links." }
++            if (Files.exists(ownerDirectory, LinkOption.NOFOLLOW_LINKS)) {
++                throw AgentProtocolException(AgentError("invalid_input", "SESSION_ALREADY_EXISTS", "A session owner identifier cannot be reused."))
++            }
++            Files.createDirectory(ownerDirectory)
++            val journal = HarmonyOSRecoveryJournal.create(ownerDirectory.resolve("recovery-journal.json"), deviceId, ownerId)
++            val gate = LeaseGate(deviceId, ownerId, "active", journal.path.toString(), Instant.now().toString(),
++                unresolvedRecording = requiresRecordingCleanup)
++            try { writeGate(directory, gate) } catch (error: Throwable) {
++                try { journal.close() } catch (closeError: Throwable) { error.addSuppressed(closeError) }
++                throw error
++            }
++            val lease = HarmonyOsSessionLease(journal, directory, gate)
++            if (activeLeases.putIfAbsent(ownerId, lease) != null) {
++                journal.close()
++                throw AgentProtocolException(AgentError("invalid_input", "SESSION_ALREADY_EXISTS", "The session owner is already active."))
++            }
++            return lease
++        }
++
++        /** Read-only observation. Malformed metadata must never make a device look available. */
++        fun requiresRecovery(deviceId: String, lockDirectory: Path): Boolean {
++            val directory = lockDirectory.toAbsolutePath().normalize()
++            val gate = readGate(directory, deviceId) ?: return false
++            return gate.state != "clean" || !existingReceipt(directory, gate).complete
++        }
++    }
++}
++
++internal data class RecoveryOutcome(
++    val deviceId: String,
++    val sessionId: String,
++    val complete: Boolean,
++    val reportPath: Path,
++    val sha256: String,
++    val report: Map<String, Any?>,
++)
++
++internal object HarmonyOsRecoverySupport {
++    /** Called before the owning session block returns, while its device OS lock is held. */
++    fun noteUncertainCleanup(ownerId: String, reason: String = "The caller could not confirm session cleanup.") =
++        HarmonyOsSessionLease.noteUncertainCleanup(ownerId, reason)
++
++    /** All recovery is serialized against normal CLI and bridge sessions using their same lock. */
++    fun recover(
++        deviceId: String,
++        ownerId: String,
++        hdc: HdcClient = HdcClient(),
++        lockDirectory: Path = HarmonyOsSessionSupport.defaultLockDirectory(),
++        timeout: Duration = Duration.ofSeconds(10),
++    ): RecoveryOutcome {
++        validateDevice(deviceId)
++        HarmonyOsAgentProtocol.uuid(ownerId, "sessionId")
++        require(timeout > Duration.ZERO && timeout <= Duration.ofSeconds(10)) { "Recovery timeout must be within ten seconds." }
++        return HarmonyOsSessionSupport.withDeviceLock(deviceId, lockDirectory) {
++            val directory = lockDirectory.toAbsolutePath().normalize()
++            val gate = readGate(directory, deviceId) ?: throw AgentProtocolException(AgentError(
++                "invalid_input", "NOT_FOUND", "No durable session record exists for this device."))
++            if (gate.ownerId != ownerId) throw AgentProtocolException(AgentError(
++                "invalid_input", "RECOVERY_SESSION_MISMATCH", "The requested session is not the current durable device owner.",
++                mapOf("recoverySessionId" to gate.ownerId)))
++            if (gate.state == "clean") return@withDeviceLock existingReceipt(directory, gate)
++            val journalPath = checkedJournalPath(directory, gate)
++            val journal = try { HarmonyOSRecoveryJournal.open(journalPath) } catch (error: Exception) {
++                throw invalidMetadata("The recovery journal could not be opened; the device gate was retained.", gate.ownerId, error)
++            }
++            val observed = journal.use {
++                if (journal.deviceId != deviceId || journal.ownerId != ownerId) {
++                    throw invalidMetadata("The resource journal does not belong to the gated device session.", ownerId)
++                }
++                journal.recover(hdc, timeout)
++            }
++            val issues = observed.issues.toMutableList()
++            // A command completion record cannot resolve an unrelated driver/recording close failure.
++            gate.closeFailure?.let { issues += RecoveryIssue("DRIVER_CLEANUP_FAILED",
++                it["message"] as? String ?: "The previous driver cleanup failure has no confirming recovery evidence.") }
++            if (gate.unresolvedRecording) issues += RecoveryIssue("RECORDING_CLEANUP_UNCONFIRMED",
++                "The previous owner enabled screen recording and never confirmed its driver cleanup.")
++            val report = observed.copy(state = if (observed.state == "complete" && issues.isEmpty()) "complete" else "unknown",
++                issues = issues.distinct())
++            val outcome = writeReceipt(directory, gate, report, "recovery")
++            // Receipt first, gate second: interruption can leave a block, never a false handoff.
++            writeGate(directory, gate.copy(state = if (outcome.complete) "clean" else "quarantined",
++                requiresRecovery = !outcome.complete && gate.requiresRecovery,
++                uncertainReason = if (outcome.complete) null else gate.uncertainReason,
++                reportPath = outcome.reportPath.toString(), reportSha256 = outcome.sha256, updatedAt = Instant.now().toString()))
++            outcome
++        }
++    }
++}
++
++private data class LeaseGate(
++    val deviceId: String,
++    val ownerId: String,
++    val state: String,
++    val journalPath: String,
++    val updatedAt: String,
++    val closeFailure: Map<String, Any?>? = null,
++    val reportPath: String? = null,
++    val reportSha256: String? = null,
++    val requiresRecovery: Boolean = false,
++    val uncertainReason: String? = null,
++    val unresolvedRecording: Boolean = false,
++)
++
++private val leaseMapper = jacksonObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++    .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++
++private fun validateDevice(deviceId: String) {
++    if (!deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")) || deviceId.length > 256) {
++        throw AgentProtocolException(AgentError("invalid_input", "INVALID_PARAMS", "Invalid explicit device identifier."))
++    }
++}
++
++private fun gatePath(directory: Path, deviceId: String): Path = directory.resolve("${HarmonyOsSessionSupport.lockName(deviceId)}.owner.json")
++private fun ownerDirectory(directory: Path, deviceId: String, ownerId: String): Path =
++    directory.resolve(HarmonyOsSessionSupport.lockName(deviceId)).resolve(ownerId)
++
++private fun readGate(directory: Path, deviceId: String): LeaseGate? {
++    val path = gatePath(directory, deviceId)
++    if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
++        if (Files.exists(directory.resolve(HarmonyOsSessionSupport.lockName(deviceId)), LinkOption.NOFOLLOW_LINKS)) {
++            throw invalidMetadata("The device has session records but its durable gate is missing.", null)
++        }
++        return null
++    }
++    try {
++        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) <= 1024 * 1024)
++        require(path.toRealPath() == path)
++        val node = leaseMapper.readTree(path.toFile())
++        require(node.isObject && node.path("schemaVersion").isIntegralNumber && node.path("schemaVersion").intValue() == 1)
++        require(node.fieldNames().asSequence().toSet() == setOf("schemaVersion", "deviceId", "ownerSessionId", "state", "journalPath",
++            "updatedAt", "closeFailure", "reportPath", "reportSha256", "requiresRecovery", "uncertainReason", "unresolvedRecording"))
++        fun text(name: String): String = node.get(name).also { require(it != null && it.isTextual && it.asText().isNotBlank()) }.asText()
++        require(text("deviceId") == deviceId)
++        val ownerId = HarmonyOsAgentProtocol.uuid(text("ownerSessionId"), "ownerSessionId")
++        val state = text("state").also { require(it in setOf("active", "quarantined", "clean")) }
++        val time = text("updatedAt").also { Instant.parse(it) }
++        val closeFailure = node["closeFailure"].takeUnless(JsonNode::isNull)?.let {
++            require(it.isObject && it.path("kind").isTextual && it.path("code").isTextual && it.path("message").isTextual)
++            @Suppress("UNCHECKED_CAST")
++            (leaseMapper.convertValue(it, Map::class.java) as Map<String, Any?>)
++        }
++        val reportPath = node["reportPath"].takeUnless(JsonNode::isNull)?.let { require(it.isTextual); it.asText() }
++        val reportHash = node["reportSha256"].takeUnless(JsonNode::isNull)?.let {
++            require(it.isTextual && it.asText().matches(Regex("[0-9a-f]{64}"))); it.asText()
++        }
++        require((reportPath == null) == (reportHash == null))
++        require(node["requiresRecovery"].isBoolean)
++        val requiresRecovery = node["requiresRecovery"].booleanValue()
++        val uncertainReason = node["uncertainReason"].takeUnless(JsonNode::isNull)?.let { require(it.isTextual); it.asText() }
++        require(node["unresolvedRecording"].isBoolean)
++        val unresolvedRecording = node["unresolvedRecording"].booleanValue()
++        require(state != "clean" || (!requiresRecovery && closeFailure == null && !unresolvedRecording))
++        return LeaseGate(deviceId, ownerId, state, text("journalPath"), time, closeFailure, reportPath, reportHash,
++            requiresRecovery, uncertainReason, unresolvedRecording)
++            .also { checkedJournalPath(directory, it) }
++    } catch (error: Exception) {
++        throw invalidMetadata("The durable device gate is missing required or trustworthy metadata.", null, error)
++    }
++}
++
++private fun checkedJournalPath(directory: Path, gate: LeaseGate): Path {
++    val expected = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recovery-journal.json")
++    require(Path.of(gate.journalPath).toAbsolutePath().normalize() == expected) { "Unexpected journal location." }
++    require(expected.parent.toRealPath() == expected.parent && !Files.isSymbolicLink(expected)) { "Recovery journal cannot follow links." }
++    return expected
++}
++
++private fun writeGate(directory: Path, gate: LeaseGate) {
++    val payload = mapOf("schemaVersion" to 1, "deviceId" to gate.deviceId, "ownerSessionId" to gate.ownerId,
++        "state" to gate.state, "journalPath" to gate.journalPath, "updatedAt" to gate.updatedAt,
++        "closeFailure" to gate.closeFailure, "reportPath" to gate.reportPath, "reportSha256" to gate.reportSha256,
++        "requiresRecovery" to gate.requiresRecovery, "uncertainReason" to gate.uncertainReason,
++        "unresolvedRecording" to gate.unresolvedRecording)
++    writeLeaseFile(gatePath(directory, gate.deviceId), leaseMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(payload))
++}
++
++private fun writeReceipt(directory: Path, gate: LeaseGate, recovery: RecoveryReport, reason: String): RecoveryOutcome {
++    val receipts = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries")
++    Files.createDirectories(receipts)
++    require(receipts.toRealPath() == receipts) { "Recovery receipts cannot follow links." }
++    val id = UUID.randomUUID().toString()
++    val report = linkedMapOf<String, Any?>("schemaVersion" to 1, "recoveryId" to id, "deviceId" to gate.deviceId,
++        "sessionId" to gate.ownerId, "observedAt" to Instant.now().toString(), "reason" to reason,
++        "previousState" to gate.state, "previousReportPath" to gate.reportPath, "previousReportSha256" to gate.reportSha256,
++        "requiresRecovery" to gate.requiresRecovery, "uncertainReason" to gate.uncertainReason,
++        "unresolvedRecording" to gate.unresolvedRecording,
++        "closeFailure" to gate.closeFailure).apply { putAll(recovery.toMap()) }
++    val path = receipts.resolve("$id.json")
++    val bytes = leaseMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(report)
++    writeLeaseFile(path, bytes, replace = false)
++    return RecoveryOutcome(gate.deviceId, gate.ownerId, recovery.state == "complete", path, digest(bytes), report)
++}
++
++private fun existingReceipt(directory: Path, gate: LeaseGate): RecoveryOutcome {
++    try {
++        val receipts = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries")
++        val path = Path.of(requireNotNull(gate.reportPath)).toAbsolutePath().normalize()
++        require(path.parent == receipts && path.fileName.toString().matches(Regex("[0-9a-f-]{36}\\.json")))
++        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path && Files.size(path) <= 4 * 1024 * 1024)
++        val bytes = path.toFile().readBytes()
++        require(digest(bytes) == gate.reportSha256)
++        val node = leaseMapper.readTree(bytes)
++        require(node.isObject && node.fieldNames().asSequence().toSet() == setOf("schemaVersion", "recoveryId", "deviceId",
++            "sessionId", "observedAt", "reason", "previousState", "previousReportPath", "previousReportSha256",
++            "requiresRecovery", "uncertainReason", "unresolvedRecording", "closeFailure", "state", "operations",
++            "pendingOperations", "temporaryFiles", "issues"))
++        fun text(name: String): String = node[name].also { require(it.isTextual) }.asText()
++        fun counter(name: String): Int = node[name].also {
++            require(it.isIntegralNumber && it.canConvertToInt() && it.intValue() >= 0)
++        }.intValue()
++        require(counter("schemaVersion") == 1 && text("deviceId") == gate.deviceId &&
++            text("sessionId") == gate.ownerId && text("state") == "complete")
++        val receiptId = HarmonyOsAgentProtocol.uuid(text("recoveryId"), "recoveryId")
++        require(path.fileName.toString() == "$receiptId.json")
++        Instant.parse(text("observedAt"))
++        require(text("reason") in setOf("session_close", "recovery"))
++        require(text("previousState") in setOf("active", "quarantined", "clean"))
++        counter("operations")
++        require(counter("pendingOperations") == 0 && counter("temporaryFiles") == 0)
++        require(node["requiresRecovery"].isBoolean && node["unresolvedRecording"].isBoolean &&
++            !node["unresolvedRecording"].booleanValue() && node["closeFailure"].isNull)
++        require(node["uncertainReason"].isNull || node["uncertainReason"].isTextual)
++        val previousPath = node["previousReportPath"]
++        val previousHash = node["previousReportSha256"]
++        require(previousPath.isNull == previousHash.isNull)
++        if (!previousPath.isNull) {
++            require(previousPath.isTextual && previousHash.isTextual && previousHash.asText().matches(Regex("[0-9a-f]{64}")))
++            val previous = Path.of(previousPath.asText()).toAbsolutePath().normalize()
++            require(previous.parent == receipts && previous != path && previous.fileName.toString().matches(Regex("[0-9a-f-]{36}\\.json")))
++        }
++        require(node.path("issues").isArray && node.path("issues").isEmpty)
++        @Suppress("UNCHECKED_CAST") val report = leaseMapper.convertValue(node, Map::class.java) as Map<String, Any?>
++        return RecoveryOutcome(gate.deviceId, gate.ownerId, true, path, requireNotNull(gate.reportSha256), report)
++    } catch (error: Exception) {
++        throw invalidMetadata("The completed device gate has no valid immutable cleanup receipt.", gate.ownerId, error)
++    }
++}
++
++private fun recoveryRequired(gate: LeaseGate, message: String) = AgentProtocolException(AgentError(
++    "environment", "DEVICE_RECOVERY_REQUIRED", message, mapOf("deviceId" to gate.deviceId, "recoverySessionId" to gate.ownerId)))
++
++private fun invalidMetadata(message: String, ownerId: String?, cause: Throwable? = null) = AgentProtocolException(AgentError(
++    "environment", "RECOVERY_METADATA_INVALID", message, ownerId?.let { mapOf("recoverySessionId" to it) },
++)).also { if (cause != null) it.initCause(cause) }
++
++private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++
++private fun writeLeaseFile(path: Path, bytes: ByteArray, replace: Boolean = true) {
++    require(path.parent.toRealPath() == path.parent && !Files.isSymbolicLink(path)) { "Lease metadata cannot follow symbolic links." }
++    val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
++    try {
++        Files.createFile(staging)
++        FileOutputStream(staging.toFile()).use { output -> output.write(bytes); output.fd.sync() }
++        if (replace) Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++        else Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE)
++    } finally { Files.deleteIfExists(staging) }
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..dc12ed9
+index 0000000..8894a0a
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,190 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -2873,10 +3401,10 @@ index 0000000..dc12ed9
 +import java.nio.file.Path
 +import java.nio.file.StandardOpenOption
 +import java.security.MessageDigest
-+import java.util.concurrent.atomic.AtomicBoolean
++import java.util.UUID
 +
 +internal object HarmonyOsSessionSupport {
-+    enum class DeviceLockStatus { AVAILABLE, BUSY, UNKNOWN }
++    enum class DeviceLockStatus { AVAILABLE, BUSY, RECOVERY_REQUIRED, UNKNOWN }
 +    fun validateOptions(
 +        host: String? = null,
 +        port: Int? = null,
@@ -2945,34 +3473,50 @@ index 0000000..dc12ed9
 +        hdc: HdcClient = HdcClient(),
 +        config: HarmonyOSDriverConfig = driverConfig(),
 +        lockDirectory: Path = defaultLockDirectory(),
++        ownerId: String = UUID.randomUUID().toString(),
 +        block: (MaestroSessionManager.MaestroSession) -> T,
 +    ): T =
 +        withDeviceLock(deviceId, lockDirectory) {
-+            val driver = HarmonyOSDriver(deviceId, hdc = hdc, config = config)
-+            val session = MaestroSessionManager.MaestroSession(Maestro(driver))
-+            val closed = AtomicBoolean(false)
++            val lease = HarmonyOsSessionLease.begin(deviceId, ownerId, lockDirectory,
++                requiresRecordingCleanup = config.enableScreenRecording)
++            var session: MaestroSessionManager.MaestroSession? = null
++            val closeGuard = Any()
++            var closed = false
++            var rememberedCloseFailure: Throwable? = null
 +            fun closeOnce() {
-+                if (closed.compareAndSet(false, true)) session.close()
++                synchronized(closeGuard) {
++                    if (!closed) {
++                        closed = true
++                        try { session?.close() } catch (error: Throwable) { rememberedCloseFailure = error }
++                    }
++                    rememberedCloseFailure?.let { throw it }
++                }
 +            }
 +            val shutdownHook = Thread({ runCatching { closeOnce() } }, "maestro-harmonyos-close")
 +            var registered = false
 +            var failure: Throwable? = null
 +            try {
++                val driver = HarmonyOSDriver(deviceId, hdc = hdc.withRecoveryJournal(lease.journal), config = config)
++                val openedSession = MaestroSessionManager.MaestroSession(Maestro(driver))
++                session = openedSession
 +                Runtime.getRuntime().addShutdownHook(shutdownHook)
 +                registered = true
 +                driver.open()
-+                block(session)
++                block(openedSession)
 +            } catch (error: Throwable) {
 +                failure = error
 +                throw error
 +            } finally {
 +                if (registered) runCatching { Runtime.getRuntime().removeShutdownHook(shutdownHook) }
-+                try {
-+                    closeOnce()
-+                } catch (closeError: Throwable) {
-+                    val original = failure
-+                    if (original != null) original.addSuppressed(closeError) else throw closeError
-+                }
++                val closeError = try { closeOnce(); null } catch (error: Throwable) { error }
++                val leaseError = try { lease.finish(closeError, hdc); null } catch (error: Throwable) { error }
++                val original = failure
++                if (original != null) {
++                    listOfNotNull(closeError, leaseError).filter { it !== original }.forEach(original::addSuppressed)
++                } else if (closeError != null) {
++                    if (leaseError != null && leaseError !== closeError) closeError.addSuppressed(leaseError)
++                    throw closeError
++                } else if (leaseError != null) throw leaseError
 +            }
 +        }
 +
@@ -2982,7 +3526,9 @@ index 0000000..dc12ed9
 +        block: () -> T,
 +    ): T {
 +        Files.createDirectories(directory)
++        require(directory.toRealPath() == directory.toAbsolutePath().normalize()) { "Device lock directory must not contain symbolic links." }
 +        val name = lockName(deviceId)
++        require(!Files.isSymbolicLink(directory.resolve("$name.lock"))) { "Device lock file must not be a symbolic link." }
 +        // Keep an empty lock file rather than deleting it: unlinking a locked file can let a
 +        // second process create another inode and acquire a second lock for the same device.
 +        FileChannel.open(directory.resolve("$name.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { channel ->
@@ -3004,11 +3550,15 @@ index 0000000..dc12ed9
 +        val path = directory.resolve("${lockName(deviceId)}.lock")
 +        return try {
 +            if (Files.isSymbolicLink(directory) || Files.isSymbolicLink(path)) return DeviceLockStatus.UNKNOWN
-+            if (Files.notExists(path)) return DeviceLockStatus.AVAILABLE
++            if (Files.notExists(path)) return if (HarmonyOsSessionLease.requiresRecovery(deviceId, directory))
++                DeviceLockStatus.RECOVERY_REQUIRED else DeviceLockStatus.AVAILABLE
 +            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) return DeviceLockStatus.UNKNOWN
 +            FileChannel.open(path, StandardOpenOption.WRITE).use { channel ->
 +                val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
-+                if (lock == null) DeviceLockStatus.BUSY else lock.use { DeviceLockStatus.AVAILABLE }
++                if (lock == null) DeviceLockStatus.BUSY else lock.use {
++                    if (HarmonyOsSessionLease.requiresRecovery(deviceId, directory)) DeviceLockStatus.RECOVERY_REQUIRED
++                    else DeviceLockStatus.AVAILABLE
++                }
 +            }
 +        } catch (_: Exception) {
 +            if (Thread.currentThread().isInterrupted) throw InterruptedException("Device-lock probe interrupted")
@@ -3016,11 +3566,11 @@ index 0000000..dc12ed9
 +        }
 +    }
 +
-+    private fun lockName(deviceId: String): String =
++    internal fun lockName(deviceId: String): String =
 +        MessageDigest.getInstance("SHA-256").digest(deviceId.toByteArray(Charsets.UTF_8))
 +            .joinToString("") { "%02x".format(it) }
 +
-+    private fun defaultLockDirectory(): Path =
++    internal fun defaultLockDirectory(): Path =
 +        Path.of(System.getProperty("user.home"), ".maestro", "harmonyos-sessions")
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt b/maestro-cli/src/main/java/maestro/cli/session/MaestroSessionManager.kt
@@ -4130,6 +4680,213 @@ index 0000000..b823e20
 +        }
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentRecoveryTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentRecoveryTest.kt
+new file mode 100644
+index 0000000..ee5dd2f
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentRecoveryTest.kt
+@@ -0,0 +1,201 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.hdc.HdcTimeoutException
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.ByteArrayOutputStream
++import java.io.IOException
++import java.io.PrintStream
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++import java.util.concurrent.CompletableFuture
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++
++class HarmonyOsAgentRecoveryTest {
++    @TempDir lateinit var root: Path
++    private val mapper = jacksonObjectMapper()
++    private fun uuid() = UUID.randomUUID().toString()
++
++    @Test fun `version one stays unchanged and version two requires explicit negotiation`() {
++        val old = controller(Backend())
++        val upgraded = controller(Backend())
++        try {
++            val original = call(old, "agent.describe")
++            assertThat(original["result"]["schemaVersion"].asInt()).isEqualTo(1)
++            assertThat(original["result"]["data"]["methods"].size()).isEqualTo(10)
++            assertThat(call(old, "agent.recover", mapOf("deviceId" to "fixture", "sessionId" to uuid()))["error"]["code"].asText()).isEqualTo("UNKNOWN_METHOD")
++            assertThat(call(old, "agent.describe", mapOf("schemaVersion" to 2))["error"]["code"].asText()).isEqualTo("PROTOCOL_VERSION_FIXED")
++            assertThat(call(upgraded, "agent.describe", mapOf("schemaVersion" to 3))["error"]["code"].asText()).isEqualTo("UNSUPPORTED_PROTOCOL_VERSION")
++            val modern = call(upgraded, "agent.describe", mapOf("schemaVersion" to 2))["result"]
++            assertThat(modern["schemaVersion"].asInt()).isEqualTo(2)
++            assertThat(modern["data"]["methods"].map { it.asText() }).contains("agent.recover")
++        } finally { old.close(); upgraded.close() }
++    }
++
++    @Test fun `recovery requires completed owner and preserves the original attempt files`() {
++        val backend = Backend()
++        val control = controller(backend)
++        try {
++            call(control, "agent.describe", mapOf("schemaVersion" to 2))
++            val session = call(control, "agent.connect", config())["result"]["data"]["sessionId"].asText()
++            assertThat(call(control, "agent.recover", recovery(session))["error"]["code"].asText()).isEqualTo("DEVICE_BUSY")
++            val run = uuid(); val attempt = uuid()
++            val submitted = call(control, "agent.action", mapOf("sessionId" to session, "runId" to run,
++                "attemptId" to attempt, "attemptNo" to 1, "action" to mapOf("type" to "back")))["result"]
++            assertThat(submitted["schemaVersion"].asInt()).isEqualTo(2)
++            awaitState(control, session, "unknown")
++            call(control, "agent.release", mapOf("sessionId" to session))
++            assertThat(awaitState(control, session, "closed")["handoffReady"].asBoolean()).isFalse()
++            val resultFile = root.resolve("runs/$run/$attempt/result.json")
++            val evidenceFile = root.resolve("runs/$run/$attempt/evidence-index.json")
++            val originalResult = Files.readString(resultFile)
++            val originalEvidence = Files.readString(evidenceFile)
++            assertThat(mapper.readTree(originalResult)["schemaVersion"].asInt()).isEqualTo(1)
++            val recovered = call(control, "agent.recover", recovery(session))["result"]
++            assertThat(recovered["kind"].asText()).isEqualTo("recoveryReport")
++            assertThat(recovered["schemaVersion"].asInt()).isEqualTo(2)
++            assertThat(recovered["data"]["handoffReady"].asBoolean()).isTrue()
++            assertThat(call(control, "agent.session", mapOf("sessionId" to session))["result"]["data"]["handoffReady"].asBoolean()).isTrue()
++            assertThat(Files.readString(resultFile)).isEqualTo(originalResult)
++            assertThat(Files.readString(evidenceFile)).isEqualTo(originalEvidence)
++            val next = call(control, "agent.connect", config())["result"]["data"]["sessionId"].asText()
++            assertThat(next).isNotEqualTo(session)
++            call(control, "agent.release", mapOf("sessionId" to next))
++            awaitState(control, next, "closed")
++        } finally { control.close() }
++    }
++
++    @Test fun `recovery is reachable without an in-memory session and cannot overlap another recovery`() {
++        val backend = Backend()
++        val entered = CountDownLatch(1); val finish = CountDownLatch(1)
++        backend.beforeRecovery = { entered.countDown(); check(finish.await(5, TimeUnit.SECONDS)) }
++        val control = controller(backend)
++        try {
++            call(control, "agent.describe", mapOf("schemaVersion" to 2))
++            val session = uuid()
++            val pending = dispatch(control, "agent.recover", recovery(session))
++            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue()
++            assertThat(control.hasUnreleasedSession()).isTrue()
++            assertThat(call(control, "agent.recover", recovery(session))["error"]["code"].asText()).isEqualTo("DEVICE_BUSY")
++            assertThat(call(control, "agent.connect", config())["error"]["code"].asText()).isEqualTo("DEVICE_BUSY")
++            finish.countDown()
++            assertThat(pending.get(5, TimeUnit.SECONDS)["result"]["data"]["handoffReady"].asBoolean()).isTrue()
++            assertThat(control.hasUnreleasedSession()).isFalse()
++        } finally { finish.countDown(); control.close() }
++    }
++
++    @Test fun `inconsistent backend completion evidence is rejected and does not poison future requests`() {
++        val backend = Backend().apply { pendingOperations = 1 }
++        val control = controller(backend)
++        try {
++            call(control, "agent.describe", mapOf("schemaVersion" to 2))
++            assertThat(call(control, "agent.recover", recovery(uuid()))["error"]["kind"].asText()).isEqualTo("internal")
++            backend.pendingOperations = 0
++            assertThat(call(control, "agent.recover", recovery(uuid()))["result"]["data"]["handoffReady"].asBoolean()).isTrue()
++        } finally { control.close() }
++    }
++
++    @Test fun `snapshot still replies with its original failure when quarantine persistence fails`() {
++        val snapshotFailure = HdcTimeoutException(Duration.ofMillis(10))
++        val persistenceFailure = IOException("gate write failed")
++        val backend = Backend().apply { snapshotError = snapshotFailure; quarantineError = persistenceFailure }
++        val control = controller(backend)
++        try {
++            val session = call(control, "agent.connect", config())["result"]["data"]["sessionId"].asText()
++            val response = call(control, "agent.snapshot", mapOf("sessionId" to session))
++            assertThat(response["error"]["code"].asText()).isEqualTo("OPERATION_TIMEOUT")
++            assertThat(snapshotFailure.suppressed.toList()).contains(persistenceFailure)
++            val closed = awaitState(control, session, "closed")
++            assertThat(closed["handoffReady"].asBoolean()).isFalse()
++            assertThat(closed["cleanup"]["errors"].map { it["message"].asText() }).contains("gate write failed")
++            assertThat(backend.returnedNormally).isFalse()
++            assertThat(call(control, "agent.connect", config())["error"]["code"].asText()).isEqualTo("DEVICE_BUSY")
++        } finally { control.close() }
++    }
++
++    @Test fun `action quarantine failure closes ownership without rewriting the terminal attempt`() {
++        val backend = Backend().apply { quarantineError = IOException("gate write failed") }
++        val control = controller(backend)
++        val run = uuid(); val attempt = uuid()
++        val resultPath = root.resolve("runs/$run/$attempt/result.json")
++        val evidencePath = root.resolve("runs/$run/$attempt/evidence-index.json")
++        var originalResult: ByteArray? = null
++        var originalEvidence: ByteArray? = null
++        backend.beforeQuarantine = {
++            originalResult = Files.readAllBytes(resultPath)
++            originalEvidence = Files.readAllBytes(evidencePath)
++        }
++        try {
++            val session = call(control, "agent.connect", config())["result"]["data"]["sessionId"].asText()
++            call(control, "agent.action", mapOf("sessionId" to session, "runId" to run,
++                "attemptId" to attempt, "attemptNo" to 1, "action" to mapOf("type" to "back")))
++            val closed = awaitState(control, session, "closed")
++            assertThat(closed["handoffReady"].asBoolean()).isFalse()
++            assertThat(closed["cleanup"]["errors"].map { it["message"].asText() }).contains("gate write failed")
++            assertThat(backend.returnedNormally).isFalse()
++            assertThat(Files.readAllBytes(resultPath)).isEqualTo(originalResult)
++            assertThat(Files.readAllBytes(evidencePath)).isEqualTo(originalEvidence)
++            assertThat(mapper.readTree(Files.readAllBytes(resultPath))["data"]["error"]["code"].asText())
++                .isEqualTo("OPERATION_TIMEOUT")
++        } finally { control.close() }
++    }
++
++    private inner class Backend : RecorderBackend {
++        var beforeRecovery: () -> Unit = {}
++        var beforeQuarantine: () -> Unit = {}
++        var pendingOperations = 0
++        var snapshotError: Exception? = null
++        var quarantineError: Exception? = null
++        var returnedNormally = false
++        override fun devices() = listOf("fixture")
++        override fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit) {
++            assertThat(config.sessionId).isNotNull()
++            block(object : AgentRecorderConnection {
++                override fun snapshot(): Any = throw snapshotError ?: IllegalStateException("Not used")
++                override fun action(parameters: JsonNode): Any = error("Not used")
++                override fun executeAgentAction(parameters: JsonNode, attempt: AgentAttempt) {
++                    attempt.startStep("flow.yaml", 0, "back", true)
++                    attempt.finishFailure(HdcTimeoutException(Duration.ofMillis(10)))
++                }
++            })
++            returnedNormally = true
++        }
++        override fun noteUncertainCleanup(sessionId: String) {
++            beforeQuarantine()
++            quarantineError?.let { throw it }
++        }
++        override fun recover(deviceId: String, sessionId: String): Map<String, Any?> {
++            beforeRecovery()
++            return mapOf("deviceId" to deviceId, "sessionId" to sessionId, "state" to "complete", "handoffReady" to true,
++                "cleanup" to mapOf("state" to "complete", "errors" to emptyList<Any>()),
++                "operations" to 1, "pendingOperations" to pendingOperations, "temporaryFiles" to 0,
++                "reportPath" to root.resolve("recovery.json").toString(), "reportSha256" to "0".repeat(64))
++        }
++    }
++    private fun controller(backend: Backend) = HarmonyOsAgentController(backend, PrintStream(ByteArrayOutputStream()))
++    private fun config() = mapOf("deviceId" to "fixture", "appId" to "org.example.fixture", "abilityName" to "EntryAbility", "artifactsDir" to root.toString())
++    private fun recovery(session: String) = mapOf("deviceId" to "fixture", "sessionId" to session)
++    private fun dispatch(control: HarmonyOsAgentController, method: String, data: Map<String, Any?> = emptyMap()): CompletableFuture<JsonNode> {
++        val result = CompletableFuture<JsonNode>()
++        control.dispatch(method, mapper.valueToTree(data),
++            { result.complete(mapper.valueToTree(mapOf("result" to it))) },
++            { result.complete(mapper.valueToTree(mapOf("error" to HarmonyOsAgentProtocol.error(it).toMap()))) })
++        return result
++    }
++    private fun call(control: HarmonyOsAgentController, method: String, data: Map<String, Any?> = emptyMap()) = dispatch(control, method, data).get(5, TimeUnit.SECONDS)
++    private fun awaitState(control: HarmonyOsAgentController, session: String, expected: String): JsonNode {
++        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
++        while (System.nanoTime() < deadline) {
++            val state = call(control, "agent.session", mapOf("sessionId" to session))["result"]["data"]
++            if (state["state"].asText() == expected) return state
++            Thread.sleep(5)
++        }
++        error("Session did not reach $expected")
++    }
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt
 new file mode 100644
 index 0000000..8a71768
@@ -4276,10 +5033,10 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..a2d6868
+index 0000000..ada45e0
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,265 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -4384,6 +5141,44 @@ index 0000000..a2d6868
 +        assertThat(result["error"].isNull).isTrue()
 +        assertThat(result["failedStepId"].isNull).isTrue()
 +        assertThat(result["effects"].asText()).isEqualTo("possible")
++    }
++
++    @Test
++    fun `unconfirmed session cleanup preserves the observed flow outcome`() {
++        val (report, flow) = create()
++        val observer = report.flow(flow.toFile(), Files.createDirectories(report.directory.resolve("flows/cleanup")))
++        val command = MaestroCommand(backPressCommand = BackPressCommand())
++        observer.starting(command)
++        observer.onCommandStart(command, 0)
++        observer.onCommandFinished(command, CommandOutcome.Completed, 1, 2)
++        observer.finished(Orchestra.FlowResult(true, FlowDebugOutput(), ArtifactManifest(emptyList())))
++        val owner = UUID.randomUUID().toString()
++        report.finish(false, AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "Unconfirmed cleanup",
++            mapOf("recoverySessionId" to owner))))
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isEqualTo("passed")
++        assertThat(result["error"].isNull).isTrue()
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        assertThat(result["cleanup"]["errors"][0]["code"].asText()).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        assertThat(result["cleanup"]["errors"][0]["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++    }
++
++    @Test
++    fun `passed earlier flow cannot hide a later aborted flow behind cleanup failure`() {
++        val (report, flow) = create()
++        val first = report.flow(flow.toFile(), Files.createDirectories(report.directory.resolve("flows/first")))
++        first.finished(Orchestra.FlowResult(true, FlowDebugOutput(), ArtifactManifest(emptyList())))
++        val second = report.flow(flow.toFile(), Files.createDirectories(report.directory.resolve("flows/second")))
++        val command = MaestroCommand(backPressCommand = BackPressCommand())
++        second.starting(command)
++        second.onCommandStart(command, 0)
++        second.aborted(MaestroException.AssertionFailure("second flow assertion", TreeNode(), "fixture"))
++        report.finish(false, AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "Unconfirmed cleanup")))
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isEqualTo("failed")
++        assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++        assertThat(result["error"]["message"].asText()).isEqualTo("second flow assertion")
++        assertThat(result["cleanup"]["errors"][0]["code"].asText()).isEqualTo("DEVICE_RECOVERY_REQUIRED")
 +    }
 +
 +    @Test
@@ -4791,6 +5586,278 @@ index 0000000..002a0ab
 +        }
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
+new file mode 100644
+index 0000000..6757568
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
+@@ -0,0 +1,266 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.node.ObjectNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.cli.CliError
++import maestro.cli.session.HarmonyOsRecoverySupport
++import maestro.cli.session.HarmonyOsSessionLease
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.nio.file.Files
++import java.nio.file.Path
++import java.security.MessageDigest
++import java.util.UUID
++
++class HarmonyOsSessionLeaseTest {
++    private val mapper = jacksonObjectMapper()
++    private val device = "fixture-device"
++    private val noHdc = HdcClient("test-hdc", HdcCommandRunner { _, _ ->
++        error("An empty journal must not contact HDC")
++    })
++
++    @Test fun `normal empty session creates a verified receipt and allows a new owner`() = directory { root ->
++        val owner = uuid()
++        normalClose(root, owner)
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE)
++        val receipt = HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        assertThat(receipt.complete).isTrue()
++        assertThat(receipt.report["operations"]).isEqualTo(0)
++        assertThat(receipt.report["reason"]).isEqualTo("session_close")
++        assertThat(receipt.reportPath.isAbsolute).isTrue()
++        assertThat(receipt.sha256).matches("[0-9a-f]{64}")
++        normalClose(root, uuid())
++        assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withDeviceLock(device, root) { HarmonyOsSessionLease.begin(device, owner, root) }
++        }.also { assertThat(it.error.code).isEqualTo("SESSION_ALREADY_EXISTS") }
++    }
++
++    @Test fun `reported unknown cleanup stays blocked until explicit recovery and preserves its receipt`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val unknownPath = Path.of(gate(root)["reportPath"].asText())
++        val unknownBytes = Files.readAllBytes(unknownPath)
++        assertThat(mapper.readTree(unknownBytes)["state"].asText()).isEqualTo("unknown")
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        val denied = assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withSession(device, noHdc, lockDirectory = root) { error("Must not connect") }
++        }
++        assertThat(denied.error.code).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        assertThat(denied.error.details?.get("recoverySessionId")).isEqualTo(owner)
++        val recovered = HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        assertThat(recovered.complete).isTrue()
++        assertThat(recovered.report["reason"]).isEqualTo("recovery")
++        assertThat(recovered.report["previousReportPath"]).isEqualTo(unknownPath.toString())
++        assertThat(Files.readAllBytes(unknownPath)).isEqualTo(unknownBytes)
++        val repeated = HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        assertThat(repeated.reportPath).isEqualTo(recovered.reportPath)
++        assertThat(repeated.sha256).isEqualTo(recovered.sha256)
++        assertThat(gate(root)["requiresRecovery"].asBoolean()).isFalse()
++        normalClose(root, uuid())
++    }
++
++    @Test fun `uncertainty flag is durable before the session block returns`() = directory { root ->
++        val owner = uuid()
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root)
++            HarmonyOsRecoverySupport.noteUncertainCleanup(owner, "Cancellation acknowledgement was not received")
++            assertThat(gate(root)["requiresRecovery"].asBoolean()).isTrue()
++            assertThat(gate(root)["uncertainReason"].asText()).contains("Cancellation acknowledgement")
++            assertThat(assertThrows<AgentProtocolException> { lease.finish(null, noHdc) }.error.code)
++                .isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        }
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsRecoverySupport.noteUncertainCleanup(owner)
++        }.error.code).isEqualTo("SESSION_LEASE_UNAVAILABLE")
++    }
++
++    @Test fun `driver close failure cannot be cleared by an empty command journal`() = directory { root ->
++        val owner = uuid()
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root)
++            assertThrows<AgentProtocolException> { lease.finish(IllegalStateException("recording still active"), noHdc) }
++        }
++        val recovered = HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        assertThat(recovered.complete).isFalse()
++        @Suppress("UNCHECKED_CAST") val issues = recovered.report["issues"] as List<Map<String, String>>
++        assertThat(issues.map { it["code"] }).contains("DRIVER_CLEANUP_FAILED")
++        assertThat(gate(root)["state"].asText()).isEqualTo("quarantined")
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++    }
++
++    @Test fun `an active durable gate outlives its operating system lock`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val abandoned = gate(root).put("state", "active")
++        Files.writeString(gatePath(root), mapper.writeValueAsString(abandoned))
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withSession(device, noHdc, lockDirectory = root) { error("Must not connect") }
++        }.error.code).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).complete).isTrue()
++    }
++
++    @Test fun `recording capability is gated before opening and only a successful close clears it`() = directory { root ->
++        val owner = uuid()
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = true)
++            assertThat(gate(root)["unresolvedRecording"].asBoolean()).isTrue()
++            lease.finish(null, noHdc)
++        }
++        assertThat(gate(root)["unresolvedRecording"].asBoolean()).isFalse()
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).complete).isTrue()
++
++        val abandonedOwner = uuid()
++        quarantine(root, abandonedOwner)
++        // Durable state left by a host exit before the recording owner's close could acknowledge completion.
++        val abandoned = gate(root).put("state", "active").put("unresolvedRecording", true)
++        Files.writeString(gatePath(root), mapper.writeValueAsString(abandoned))
++        val recovered = HarmonyOsRecoverySupport.recover(device, abandonedOwner, noHdc, root)
++        assertThat(recovered.complete).isFalse()
++        @Suppress("UNCHECKED_CAST") val issues = recovered.report["issues"] as List<Map<String, String>>
++        assertThat(issues.map { it["code"] }).contains("RECORDING_CLEANUP_UNCONFIRMED")
++        assertThat(gate(root)["unresolvedRecording"].asBoolean()).isTrue()
++    }
++
++    @Test fun `a gate without explicit recording ownership metadata is rejected`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val incomplete = gate(root).also { it.remove("unresolvedRecording") }
++        Files.writeString(gatePath(root), mapper.writeValueAsString(incomplete))
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++    }
++
++    @Test fun `recovery cannot overlap a live owner or a CLI holding the same device lock`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val original = Files.readAllBytes(gatePath(root))
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val denied = assertThrows<CliError> { HarmonyOsRecoverySupport.recover(device, owner, noHdc, root) }
++            assertThat(HarmonyOsAgentProtocol.error(denied).code).isEqualTo("DEVICE_BUSY")
++            // Recovery of one device must not serialize an unrelated device behind it.
++            HarmonyOsSessionSupport.withDeviceLock("other-device", root) {}
++        }
++        assertThat(Files.readAllBytes(gatePath(root))).isEqualTo(original)
++    }
++
++    @Test fun `wrong owner cannot recover the current gate`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val original = Files.readAllBytes(gatePath(root))
++        val denied = assertThrows<AgentProtocolException> { HarmonyOsRecoverySupport.recover(device, uuid(), noHdc, root) }
++        assertThat(denied.error.code).isEqualTo("RECOVERY_SESSION_MISMATCH")
++        assertThat(denied.error.details?.get("recoverySessionId")).isEqualTo(owner)
++        assertThat(Files.readAllBytes(gatePath(root))).isEqualTo(original)
++    }
++
++    @Test fun `missing or corrupt journal leaves the gate blocked without creating a recovery receipt`() = directory { root ->
++        for (missing in listOf(true, false)) {
++            val fixture = Files.createDirectory(root.resolve(if (missing) "missing" else "corrupt"))
++            val owner = uuid()
++            quarantine(fixture, owner)
++            val journal = Path.of(gate(fixture)["journalPath"].asText())
++            val original = Files.readAllBytes(gatePath(fixture))
++            val receipts = journal.parent.resolve("recoveries")
++            val count = Files.list(receipts).use { it.count() }
++            if (missing) Files.delete(journal) else Files.writeString(journal, "{}")
++            assertThat(assertThrows<AgentProtocolException> {
++                HarmonyOsRecoverySupport.recover(device, owner, noHdc, fixture)
++            }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++            assertThat(Files.readAllBytes(gatePath(fixture))).isEqualTo(original)
++            assertThat(Files.list(receipts).use { it.count() }).isEqualTo(count)
++        }
++    }
++
++    @Test fun `missing gate with prior session records cannot be treated as a new device`() = directory { root ->
++        val owner = uuid()
++        normalClose(root, owner)
++        Files.delete(gatePath(root))
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.UNKNOWN)
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withSession(device, noHdc, lockDirectory = root) { error("Must not connect") }
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++    }
++
++    @Test fun `tampered complete receipt prevents normal entry and idempotent recovery`() = directory { root ->
++        val owner = uuid()
++        normalClose(root, owner)
++        Files.writeString(Path.of(gate(root)["reportPath"].asText()), "{}")
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withSession(device, noHdc, lockDirectory = root) { error("Must not connect") }
++        }.error.code).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++    }
++
++    @Test fun `corrupt gate never causes recovery or a fresh connection`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        Files.writeString(gatePath(root), "{\"schemaVersion\":1,\"schemaVersion\":1}")
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withSession(device, noHdc, lockDirectory = root) { error("Must not connect") }
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++        assertThat(assertThrows<AgentProtocolException> {
++            HarmonyOsRecoverySupport.recover(device, owner, noHdc, root)
++        }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++    }
++
++    @Test fun `a complete receipt must have trustworthy zero remaining counters even with a matching digest`() = directory { root ->
++        val invalidCounters: List<(ObjectNode) -> Unit> = listOf(
++            { it.put("pendingOperations", 1) },
++            { it.put("temporaryFiles", 1) },
++            { it.put("operations", -1) },
++            { it.put("pendingOperations", "0") },
++            { it.remove("temporaryFiles") },
++        )
++        invalidCounters.forEachIndexed { index, mutate ->
++            val fixture = Files.createDirectory(root.resolve("case-$index"))
++            val owner = uuid()
++            normalClose(fixture, owner)
++            val metadata = gate(fixture)
++            val receiptPath = Path.of(metadata["reportPath"].asText())
++            val receipt = mapper.readTree(receiptPath.toFile()) as ObjectNode
++            mutate(receipt)
++            val altered = mapper.writeValueAsBytes(receipt)
++            Files.write(receiptPath, altered)
++            metadata.put("reportSha256", MessageDigest.getInstance("SHA-256").digest(altered).joinToString("") { "%02x".format(it) })
++            Files.writeString(gatePath(fixture), mapper.writeValueAsString(metadata))
++            assertThat(assertThrows<AgentProtocolException> {
++                HarmonyOsRecoverySupport.recover(device, owner, noHdc, fixture)
++            }.error.code).isEqualTo("RECOVERY_METADATA_INVALID")
++        }
++    }
++
++    private fun quarantine(root: Path, owner: String) = HarmonyOsSessionSupport.withDeviceLock(device, root) {
++        val lease = HarmonyOsSessionLease.begin(device, owner, root)
++        HarmonyOsRecoverySupport.noteUncertainCleanup(owner, "Unconfirmed cancellation")
++        assertThat(assertThrows<AgentProtocolException> { lease.finish(null, noHdc) }.error.code)
++            .isEqualTo("DEVICE_RECOVERY_REQUIRED")
++    }
++
++    private fun normalClose(root: Path, owner: String) = HarmonyOsSessionSupport.withDeviceLock(device, root) {
++        HarmonyOsSessionLease.begin(device, owner, root).finish(null, noHdc)
++    }
++
++    private fun gate(root: Path): ObjectNode = mapper.readTree(gatePath(root).toFile()) as ObjectNode
++    private fun gatePath(root: Path): Path = root.resolve("${HarmonyOsSessionSupport.lockName(device)}.owner.json")
++    private fun uuid(): String = UUID.randomUUID().toString()
++    private fun directory(block: (Path) -> Unit) = TempFileHandler().use { files ->
++        block(files.createTempDirectory("harmonyos-lease-test").toPath())
++    }
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionSupportTest.kt
 new file mode 100644
 index 0000000..85a3f5f
@@ -5182,10 +6249,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..861d5bd
+index 0000000..584d6d9
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,402 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -5231,6 +6298,7 @@ index 0000000..861d5bd
 +
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
++    private var recordingFailure: Throwable? = null
 +
 +    override fun name(): String = "HarmonyOS"
 +
@@ -5249,7 +6317,12 @@ index 0000000..861d5bd
 +        opened = false
 +        val current = recording
 +        recording = null
-+        current?.close()
++        try {
++            current?.close()
++        } catch (error: Throwable) {
++            rememberRecordingFailure(error)
++        }
++        recordingFailure?.let { throw it }
 +    }
 +
 +    override fun deviceInfo(): DeviceInfo {
@@ -5446,22 +6519,40 @@ index 0000000..861d5bd
 +    override fun startScreenRecording(out: Sink): ScreenRecording {
 +        requireOpen()
 +        if (!config.enableScreenRecording) unsupported("screen recording without explicit enableScreenRecording configuration")
++        recordingFailure?.let { throw it }
 +        check(recording == null) { "This driver already owns a recording" }
-+        val current = device.startScreenRecording(out, config)
-+        val handle = object : ScreenRecording {
-+            override val startedAt = current.startedAt
-+            override fun close() {
-+                synchronized(this@HarmonyOSDriver) {
-+                    try {
-+                        current.close()
-+                    } finally {
-+                        if (recording === this) recording = null
++        try {
++            val current = device.startScreenRecording(out, config)
++            val handle = object : ScreenRecording {
++                override val startedAt = current.startedAt
++                private var closed = false
++                override fun close() {
++                    synchronized(this@HarmonyOSDriver) {
++                        if (closed) return
++                        closed = true
++                        try {
++                            current.close()
++                        } catch (error: Throwable) {
++                            rememberRecordingFailure(error)
++                            throw error
++                        } finally {
++                            if (recording === this) recording = null
++                        }
 +                    }
 +                }
 +            }
++            recording = handle
++            return handle
++        } catch (error: Throwable) {
++            rememberRecordingFailure(error)
++            throw error
 +        }
-+        recording = handle
-+        return handle
++    }
++
++    private fun rememberRecordingFailure(error: Throwable) {
++        val first = recordingFailure
++        if (first == null) recordingFailure = error
++        else if (first !== error && error !in first.suppressed) first.addSuppressed(error)
 +    }
 +    override fun setLocation(latitude: Double, longitude: Double): Unit = unsupported("setLocation")
 +    override fun setOrientation(orientation: DeviceOrientation): Unit = unsupported("setOrientation")
@@ -6072,10 +7163,10 @@ index 0000000..d18f2f6
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..262e1d9
+index 0000000..63a7570
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,187 @@
+@@ -0,0 +1,188 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -6137,7 +7228,7 @@ index 0000000..262e1d9
 +            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
 +        var transportFailure: HdcCommandException? = null
 +        val result = try {
-+            hdc.shell(deviceId, listOf("sh", "-c", script), timeout)
++            hdc.shellFinite(deviceId, listOf("sh", "-c", script), timeout, HdcClient.finiteCommand(arguments))
 +        } catch (error: HdcCommandException) {
 +            // HDC's text heuristic can identify a remote tool's [FAIL] output as a
 +            // transport error. Only this invocation's final status proves it ran.
@@ -6177,7 +7268,7 @@ index 0000000..262e1d9
 +        checkInterrupted()
 +        require(!timeout.isZero && !timeout.isNegative) { "Screenshot timeout must be positive" }
 +        val deadline = System.nanoTime() + timeout.toNanos()
-+        val remotePath = "/data/local/tmp/maestro-screen-${UUID.randomUUID()}.png"
++        val remotePath = hdc.allocateTemporaryFile("screen", "png")
 +        val files = TempFileHandler()
 +        var localDirectory: Path? = null
 +        var localPath: Path? = null
@@ -6214,6 +7305,7 @@ index 0000000..262e1d9
 +                    try {
 +                        // Cleanup has its own small allowance even when the capture budget expired.
 +                        execute(listOf("rm", "-f", remotePath), Duration.ofSeconds(2))
++                        hdc.forgetTemporaryFile(remotePath)
 +                    } catch (error: Throwable) {
 +                        if (error is InterruptedException) {
 +                            Thread.currentThread().interrupt()
@@ -6476,12 +7568,414 @@ index 0000000..b7ea2b2
 +
 +    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
+new file mode 100644
+index 0000000..79dfed2
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
+@@ -0,0 +1,396 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
++import java.io.FileOutputStream
++import java.nio.channels.FileChannel
++import java.nio.channels.FileLock
++import java.nio.channels.OverlappingFileLockException
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.nio.file.StandardOpenOption
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++
++data class RecoveryIssue(val code: String, val message: String) {
++    fun toMap(): Map<String, String> = mapOf("code" to code, "message" to message)
++}
++
++data class RecoveryReport(
++    val state: String,
++    val operations: Int,
++    val pendingOperations: Int,
++    val temporaryFiles: Int,
++    val issues: List<RecoveryIssue>,
++) {
++    fun toMap(): Map<String, Any> = mapOf("state" to state, "operations" to operations,
++        "pendingOperations" to pendingOperations, "temporaryFiles" to temporaryFiles,
++        "issues" to issues.map { it.toMap() })
++}
++
++/** Local write-ahead record plus command-specific device completion proofs. It never retries a command. */
++class HarmonyOSRecoveryJournal private constructor(
++    val path: Path,
++    private val state: State,
++    private val ownerChannel: FileChannel,
++    private val ownerLock: FileLock,
++) : AutoCloseable {
++    val deviceId: String get() = state.deviceId
++    val ownerId: String get() = state.ownerId
++    private var activeCalls = 0
++    private var closed = false
++
++    data class Operation(
++        val id: String,
++        val token: String,
++        val sha256: String,
++        val recoverable: Boolean,
++        var completed: Boolean = false,
++        var markerRemoved: Boolean = false,
++    )
++    data class HostProcess(val pid: Long, val startedAt: String?)
++    data class HostCall(
++        val id: String,
++        val processes: MutableList<HostProcess> = mutableListOf(),
++        var returned: Boolean = false,
++        var stopped: Boolean = false,
++    )
++    data class State(
++        val version: Int = 1,
++        val deviceId: String,
++        val ownerId: String,
++        val generation: String,
++        val remoteRoot: String,
++        var sealed: Boolean = false,
++        var rootRemoved: Boolean = true,
++        val operations: MutableList<Operation> = mutableListOf(),
++        val temporaryFiles: MutableSet<String> = linkedSetOf(),
++        val hostCalls: MutableList<HostCall> = mutableListOf(),
++    )
++
++    @Synchronized fun seal() {
++        ensureOpen()
++        state.sealed = true
++        persist()
++    }
++
++    @Synchronized fun snapshot(): RecoveryReport = report()
++
++    @Synchronized internal fun allocateTemporaryFile(kind: String, extension: String): String {
++        require(kind.matches(Regex("[a-z]+")) && extension.matches(Regex("[a-z]+")))
++        requireDispatch()
++        val remote = "${state.remoteRoot}/files/$kind-${UUID.randomUUID()}.$extension"
++        state.temporaryFiles += remote
++        persist()
++        return remote
++    }
++
++    @Synchronized internal fun forgetTemporaryFile(remote: String) {
++        ensureOpen()
++        requireOwnedFile(remote)
++        state.temporaryFiles.remove(remote)
++        persist()
++    }
++
++    internal fun shell(arguments: List<String>, recoverable: Boolean, execute: (List<String>) -> HdcCommandResult): HdcCommandResult {
++        val operation = synchronized(this) {
++            requireDispatch()
++            Operation(UUID.randomUUID().toString(), UUID.randomUUID().toString(), hash(mapper.writeValueAsBytes(arguments)), recoverable)
++                .also { state.rootRemoved = false; state.operations += it; persist() }
++        }
++        val proof = proof(operation)
++        val directory = "${state.remoteRoot}/${operation.id}"
++        val ack = "MAESTRO_RECOVERY_${operation.token.replace("-", "")}="
++        val script = buildString {
++            append("umask 077; ")
++            append("[ ! -L ${quote(state.remoteRoot)} ] || exit 119; ")
++            append("if [ ! -d ${quote(state.remoteRoot)} ]; then mkdir ${quote(state.remoteRoot)} || exit 119; fi; ")
++            append("[ ! -L ${quote(state.remoteRoot + "/files")} ] || exit 119; ")
++            append("if [ ! -d ${quote(state.remoteRoot + "/files")} ]; then mkdir ${quote(state.remoteRoot + "/files")} || exit 119; fi; ")
++            append("mkdir ${quote(directory)} || exit 119; ")
++            // A lost HDC client must not cause a trap to assert that the child finished. Only the
++            // foreground command's actual return reaches the proof write below.
++            append("trap '' HUP; ")
++            append(arguments.joinToString(" ", transform = ::quote))
++            append("; __maestro_recovery_status=\$?; ")
++            append("printf '%s:%s\\n' ${quote(proof)} \"\$__maestro_recovery_status\" > ${quote(directory + "/done.pending")} || exit 120; ")
++            append("mv ${quote(directory + "/done.pending")} ${quote(directory + "/done")} || exit 120; ")
++            append("printf '\\n${ack}%s\\n' \"\$__maestro_recovery_status\"; exit \"\$__maestro_recovery_status\"")
++        }
++        var error: HdcCommandException? = null
++        val result = try { execute(listOf("sh", "-c", script)) } catch (failure: HdcCommandException) {
++            error = failure
++            failure.result
++        }
++        val completion = Regex("\\r?\\n" + Regex.escape(ack) + "([0-9]{1,3})\\r?\\n?$").find(result.stdout)
++        val completedStatus = completion?.groupValues?.get(1)?.toIntOrNull()
++        if (completedStatus != null && completedStatus in 0..255) {
++            synchronized(this) { operation.completed = true; persist() }
++            val original = result.copy(exitCode = if (result.exitCode == 0) completedStatus else result.exitCode,
++                stdout = result.stdout.substring(0, checkNotNull(completion).range.first))
++            if (error != null || completedStatus != 0) throw HdcCommandException(original)
++            return original
++        }
++        if (error != null) throw error
++        throw HdcException("The tracked command did not return its completion proof; recovery remains unknown.")
++    }
++
++    internal fun <T> hostCall(allowSealed: Boolean = false, execute: ((HostProcess) -> Unit) -> T): T {
++        val call = synchronized(this) {
++            if (allowSealed) ensureOpen() else requireDispatch()
++            HostCall(UUID.randomUUID().toString()).also { state.hostCalls += it; activeCalls++; persist() }
++        }
++        try {
++            return execute { identity ->
++                synchronized(this) {
++                    if (identity !in call.processes) { call.processes += identity; persist() }
++                }
++            }
++        } finally {
++            synchronized(this) {
++                call.returned = true
++                // Production runner reports native processes. In-process test/custom runners
++                // return only after their own finite work has unwound.
++                call.stopped = if (call.processes.isEmpty()) true else call.processes.all(::processStopped)
++                activeCalls--
++                persist()
++            }
++        }
++    }
++
++    /** Requires the caller's exclusive device lease. Does not issue input, launch, or retry commands. */
++    @Synchronized fun recover(hdc: HdcClient, timeout: Duration = Duration.ofSeconds(10)): RecoveryReport {
++        ensureOpen()
++        require(timeout > Duration.ZERO && timeout <= Duration.ofMinutes(1))
++        if (!state.sealed || activeCalls != 0) return report()
++        if (state.operations.isEmpty() && state.rootRemoved && state.hostCalls.all { it.stopped }) {
++            // Allocating a path is local bookkeeping; no remote directory is created before shell dispatch.
++            state.temporaryFiles.clear()
++            persist()
++            return report()
++        }
++        val deadline = System.nanoTime() + timeout.toNanos()
++        val problems = mutableListOf<RecoveryIssue>()
++        fun remaining(): Duration {
++            val nanos = deadline - System.nanoTime()
++            if (nanos <= 0) throw HdcTimeoutException(timeout)
++            return Duration.ofNanos(nanos)
++        }
++        fun query(script: String): String {
++            val result = hdc.shellRecovery(deviceId, listOf("sh", "-c", script), remaining(), this)
++            if (result.stderr.isNotBlank()) throw HdcException("Recovery query returned diagnostics.")
++            return result.stdout.trim()
++        }
++        state.hostCalls.filterNot { it.stopped }.forEach { call ->
++            val owned = ownedProcesses(call)
++            if (owned.isNotEmpty() && owned.all(::processStopped)) call.stopped = true
++        }
++        persist()
++        if (state.hostCalls.any { !it.stopped }) return report()
++        try {
++            for (operation in state.operations.filterNot { it.completed }) {
++                if (!operation.recoverable) {
++                    problems += RecoveryIssue("UNSUPPORTED_RECOVERY_SCOPE", "The interrupted command has no declared finite recovery scope.")
++                    continue
++                }
++                val directory = "${state.remoteRoot}/${operation.id}"
++                val script = "[ ! -L ${quote(state.remoteRoot)} ] && [ -d ${quote(state.remoteRoot)} ] && " +
++                    "[ ! -L ${quote(directory)} ] && [ -d ${quote(directory)} ] && " +
++                    "[ ! -L ${quote(directory + "/done")} ] && [ -f ${quote(directory + "/done")} ] && cat ${quote(directory + "/done")}"
++                val observed = query(script)
++                if (Regex(Regex.escape(proof(operation)) + ":[0-9]{1,3}").matches(observed) &&
++                    observed.substringAfterLast(':').toInt() in 0..255) {
++                    operation.completed = true
++                    persist()
++                } else problems += RecoveryIssue("REMOTE_COMPLETION_UNCONFIRMED", "The command-specific completion proof is absent or invalid.")
++            }
++            if (state.operations.any { !it.completed }) return report(problems)
++            // Completion evidence is durable before deleting any remote proof or owned file.
++            // Bounded batches stay below native command-line limits. They remove only explicit
++            // owned paths and share the caller's deadline. A partial cleanup remains retryable.
++            if (state.temporaryFiles.isNotEmpty() || state.operations.any { !it.markerRemoved } || !state.rootRemoved) {
++                val steps = mutableListOf<Pair<String, () -> Unit>>()
++                for (remote in state.temporaryFiles) {
++                    requireOwnedFile(remote)
++                    steps += "[ ! -L ${quote(remote)} ] && rm -f ${quote(remote)} && [ ! -e ${quote(remote)} ] || exit 121; " to
++                        { state.temporaryFiles.remove(remote); Unit }
++                }
++                for (operation in state.operations.filterNot { it.markerRemoved }) {
++                    val directory = "${state.remoteRoot}/${operation.id}"
++                    val script = "if [ -e ${quote(directory)} ] || [ -L ${quote(directory)} ]; then " +
++                        "[ -d ${quote(directory)} ] && [ ! -L ${quote(directory)} ] && " +
++                        "rm -f ${quote(directory + "/done")} ${quote(directory + "/done.pending")} && rmdir ${quote(directory)} || exit 121; fi; "
++                    steps += script to { operation.markerRemoved = true }
++                }
++                val files = state.remoteRoot + "/files"
++                val rootCleanup = "if [ -d ${quote(files)} ]; then rmdir ${quote(files)} || exit 121; fi; " +
++                    "if [ -d ${quote(state.remoteRoot)} ]; then rmdir ${quote(state.remoteRoot)} || exit 121; fi; " +
++                    "[ ! -e ${quote(state.remoteRoot)} ] && [ ! -L ${quote(state.remoteRoot)} ] || exit 121; "
++                steps += rootCleanup to { state.rootRemoved = true }
++                val batch = mutableListOf<Pair<String, () -> Unit>>()
++                var batchSize = 0
++                fun flush() {
++                    if (batch.isEmpty()) return
++                    val nonce = UUID.randomUUID().toString()
++                    val script = safeRootPrefix() + batch.joinToString("") { it.first } + "printf '%s' ${quote(nonce)}"
++                    if (query(script) != nonce) throw HdcException("Owned session resource cleanup was not confirmed.")
++                    batch.forEach { it.second() }
++                    persist()
++                    batch.clear()
++                    batchSize = 0
++                }
++                for (step in steps) {
++                    if (batchSize + step.first.length > 6 * 1024) flush()
++                    batch += step
++                    batchSize += step.first.length
++                }
++                flush()
++            }
++        } catch (error: Exception) {
++            if (error is InterruptedException) Thread.currentThread().interrupt()
++            problems += RecoveryIssue("RECOVERY_QUERY_FAILED", error.message ?: error.javaClass.simpleName)
++        }
++        return report(problems)
++    }
++
++    @Synchronized override fun close() {
++        if (closed) return
++        state.sealed = true
++        try { persist() } finally { closed = true; ownerLock.release(); ownerChannel.close() }
++    }
++
++    private fun safeRootPrefix(): String = "[ ! -L ${quote(state.remoteRoot)} ] && [ ! -L ${quote(state.remoteRoot + "/files")} ] || exit 121; "
++    private fun proof(operation: Operation): String = "${state.generation}:${state.ownerId}:${operation.id}:${operation.sha256}:${operation.token}"
++    private fun requireOwnedFile(remote: String) {
++        require(remote.matches(Regex(Regex.escape(state.remoteRoot) + "/files/[a-z]+-[0-9a-f-]{36}\\.[a-z]+"))) { "Resource does not belong to this session." }
++    }
++    private fun report(extra: List<RecoveryIssue> = emptyList()): RecoveryReport {
++        val issues = extra.toMutableList()
++        if (!state.sealed) issues += RecoveryIssue("SESSION_ACTIVE", "The journal is not sealed against new dispatch.")
++        if (activeCalls != 0) issues += RecoveryIssue("HOST_CALL_ACTIVE", "A local invocation is still active.")
++        if (state.hostCalls.any { !it.stopped }) issues += RecoveryIssue("HOST_PROCESS_UNCONFIRMED", "A native invocation has no confirmed termination.")
++        if (state.operations.any { !it.completed }) issues += RecoveryIssue("REMOTE_COMPLETION_UNCONFIRMED", "One or more remote commands have no completion proof.")
++        if (state.temporaryFiles.isNotEmpty() || state.operations.any { !it.markerRemoved } || !state.rootRemoved) {
++            issues += RecoveryIssue("OWNED_RESOURCES_REMAIN", "Owned remote resources have not all been confirmed removed.")
++        }
++        return RecoveryReport(if (issues.isEmpty()) "complete" else "unknown", state.operations.size,
++            state.operations.count { !it.completed }, state.temporaryFiles.size, issues.distinct())
++    }
++    private fun ensureOpen() = check(!closed) { "Recovery journal is closed." }
++    private fun requireDispatch() { ensureOpen(); check(!state.sealed) { "Recovery journal is sealed; no new dispatch is allowed." } }
++    private fun persist() {
++        val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
++        try {
++            FileOutputStream(staging.toFile()).use { stream -> stream.write(mapper.writeValueAsBytes(state)); stream.fd.sync() }
++            Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++        } finally { Files.deleteIfExists(staging) }
++    }
++
++    companion object {
++        private val mapper = jacksonObjectMapper()
++            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
++        private fun quote(text: String) = HdcClient.quoteShellArgument(text)
++        private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++        private fun uuid(value: String) = value.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) && runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
++        private fun processStopped(identity: HostProcess): Boolean {
++            return try {
++                val process = ProcessHandle.of(identity.pid).orElse(null)
++                when {
++                    process == null || !process.isAlive -> true
++                    identity.startedAt == null -> false
++                    else -> {
++                        val started = process.info().startInstant().orElse(null)?.toString()
++                        started != null && identity.startedAt != started
++                    }
++                }
++            } catch (_: Exception) { false }
++        }
++        private fun ownedProcesses(call: HostCall): List<HostProcess> {
++            val root = call.processes.firstOrNull()?.startedAt?.let(java.time.Instant::parse) ?: return call.processes
++            return call.processes.filterIndexed { index, process ->
++                val started = process.startedAt?.let(java.time.Instant::parse)
++                val external = index > 0 && started != null && started < root
++                if (external) System.err.println("MAESTRO_RECOVERY_IGNORED_PREEXISTING_PROCESS call=${call.id} pid=${process.pid} startedAt=$started rootStartedAt=$root; original journal entry retained")
++                !external
++            }
++        }
++        fun create(path: Path, deviceId: String, ownerId: String): HarmonyOSRecoveryJournal {
++            require(uuid(ownerId) && deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")))
++            val generation = UUID.randomUUID().toString()
++            return locked(path) { file, channel, lock ->
++                require(!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) { "Recovery journal already exists." }
++                HarmonyOSRecoveryJournal(file, State(deviceId = deviceId, ownerId = ownerId, generation = generation,
++                    remoteRoot = "/data/local/tmp/maestro-session-$generation"), channel, lock).also { it.persist() }
++            }
++        }
++        fun open(path: Path): HarmonyOSRecoveryJournal = locked(path) { file, channel, lock ->
++            require(Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) && Files.size(file) <= 32 * 1024 * 1024) { "Invalid recovery journal." }
++            val tree = mapper.readTree(file.toFile())
++            validateFields(tree)
++            val state = mapper.treeToValue(tree, State::class.java)
++            require(state.version == 1 && uuid(state.ownerId) && uuid(state.generation) &&
++                state.remoteRoot == "/data/local/tmp/maestro-session-${state.generation}" &&
++                state.deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*"))) { "Invalid recovery owner or device." }
++            require(state.operations.map { it.id }.distinct().size == state.operations.size)
++            require(state.operations.all { uuid(it.id) && uuid(it.token) && it.sha256.matches(Regex("[0-9a-f]{64}")) })
++            require(state.hostCalls.all { uuid(it.id) && it.processes.all { process -> process.pid > 0 } })
++            require(state.operations.all { !it.markerRemoved || it.completed } &&
++                (!state.rootRemoved || state.operations.all { it.markerRemoved }) &&
++                (!state.rootRemoved || state.temporaryFiles.isEmpty() || state.operations.isEmpty())) { "Inconsistent recovery evidence." }
++            state.sealed = true
++            HarmonyOSRecoveryJournal(file, state, channel, lock).also { journal ->
++                state.temporaryFiles.forEach(journal::requireOwnedFile)
++                journal.persist()
++            }
++        }
++        private fun validateFields(tree: JsonNode) {
++            fun fields(node: JsonNode, expected: Set<String>) {
++                require(node.isObject && node.fieldNames().asSequence().toSet() == expected) { "Incomplete or unknown recovery fields." }
++            }
++            fun texts(node: JsonNode, vararg names: String) { require(names.all { node[it].isTextual }) { "Invalid recovery text." } }
++            fun booleans(node: JsonNode, vararg names: String) { require(names.all { node[it].isBoolean }) { "Invalid recovery flag." } }
++            fields(tree, setOf("version", "deviceId", "ownerId", "generation", "remoteRoot", "sealed", "rootRemoved", "operations", "temporaryFiles", "hostCalls"))
++            require(tree["version"].isIntegralNumber && tree["version"].canConvertToInt())
++            texts(tree, "deviceId", "ownerId", "generation", "remoteRoot")
++            booleans(tree, "sealed", "rootRemoved")
++            require(listOf("operations", "temporaryFiles", "hostCalls").all { tree[it].isArray })
++            tree["operations"].forEach { operation ->
++                fields(operation, setOf("id", "token", "sha256", "recoverable", "completed", "markerRemoved"))
++                texts(operation, "id", "token", "sha256")
++                booleans(operation, "recoverable", "completed", "markerRemoved")
++            }
++            require(tree["temporaryFiles"].all { it.isTextual })
++            tree["hostCalls"].forEach { call ->
++                fields(call, setOf("id", "processes", "returned", "stopped"))
++                texts(call, "id")
++                booleans(call, "returned", "stopped")
++                require(call["processes"].isArray)
++                require(!call["stopped"].booleanValue() || call["returned"].booleanValue() || !call["processes"].isEmpty) { "Missing native termination evidence." }
++                call["processes"].forEach { process ->
++                    fields(process, setOf("pid", "startedAt"))
++                    require(process["pid"].isIntegralNumber && process["pid"].canConvertToLong() && process["pid"].longValue() > 0)
++                    require(process["startedAt"].isNull || process["startedAt"].isTextual)
++                    if (!process["startedAt"].isNull) java.time.Instant.parse(process["startedAt"].textValue())
++                }
++            }
++        }
++        private fun <T> locked(path: Path, action: (Path, FileChannel, FileLock) -> T): T {
++            val file = path.toAbsolutePath().normalize()
++            Files.createDirectories(file.parent)
++            require(file.parent.toRealPath() == file.parent && !Files.isSymbolicLink(file)) { "Recovery journal must not follow symbolic links." }
++            val lockPath = file.resolveSibling("${file.fileName}.lock")
++            require(!Files.isSymbolicLink(lockPath))
++            val channel = FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
++            val lock = try { channel.tryLock() } catch (_: OverlappingFileLockException) { null }
++            if (lock == null) { channel.close(); throw HdcException("The recovery journal is owned by an active process.") }
++            return try { action(file, channel, lock) } catch (error: Throwable) { lock.release(); channel.close(); throw error }
++        }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..d5f352e
+index 0000000..cfdcb12
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,159 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -6502,11 +7996,21 @@ index 0000000..d5f352e
 +    private val executablePath: String = defaultExecutable(),
 +    private val runner: HdcCommandRunner = ProcessHdcCommandRunner(),
 +    private val commandTimeout: Duration = Duration.ofSeconds(10),
++    private val recoveryJournal: HarmonyOSRecoveryJournal? = null,
 +) {
 +    init {
 +        require(executablePath.isNotBlank() && '\u0000' !in executablePath) { "A valid HDC executable is required" }
 +        require(!commandTimeout.isZero && !commandTimeout.isNegative) { "Timeout must be positive" }
 +    }
++
++    fun withRecoveryJournal(journal: HarmonyOSRecoveryJournal): HdcClient =
++        HdcClient(executablePath, runner, commandTimeout, journal)
++
++    internal fun allocateTemporaryFile(kind: String, extension: String): String =
++        recoveryJournal?.allocateTemporaryFile(kind, extension)
++            ?: "/data/local/tmp/maestro-$kind-${java.util.UUID.randomUUID()}.$extension"
++
++    internal fun forgetTemporaryFile(path: String) { recoveryJournal?.forgetTemporaryFile(path) }
 +
 +    fun listDevices(): List<String> {
 +        val result = execute(listOf("list", "targets"), commandTimeout)
@@ -6539,10 +8043,35 @@ index 0000000..d5f352e
 +        arguments: List<String>,
 +        timeout: Duration = commandTimeout,
 +    ): HdcCommandResult {
++        return shellTracked(deviceId, arguments, timeout, finiteCommand(arguments))
++    }
++
++    internal fun shellFinite(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean): HdcCommandResult =
++        shellTracked(deviceId, arguments, timeout, finite)
++
++    private fun shellTracked(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean): HdcCommandResult {
 +        validateDeviceId(deviceId)
 +        require(arguments.isNotEmpty() && arguments.first().isNotBlank()) { "A shell command is required" }
++        require(arguments.none { '\u0000' in it }) { "Shell arguments cannot contain NUL" }
++        val journal = recoveryJournal
++        if (journal != null) {
++            require(journal.deviceId == deviceId) { "Recovery journal belongs to another target." }
++            return journal.shell(arguments, finite) { wrapped -> rawShell(deviceId, wrapped, timeout, true) }
++        }
++        return rawShell(deviceId, arguments, timeout, false)
++    }
++
++    /** Recovery does not register new device work, but its native HDC processes remain tracked. */
++    internal fun shellRecovery(deviceId: String, arguments: List<String>, timeout: Duration, journal: HarmonyOSRecoveryJournal): HdcCommandResult {
++        validateDeviceId(deviceId)
++        require(journal.deviceId == deviceId)
 +        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
-+        return execute(listOf("-t", deviceId, "shell", command), timeout)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true)
++    }
++
++    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean): HdcCommandResult {
++        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, trackHost)
 +    }
 +
 +    fun receiveFile(
@@ -6555,11 +8084,16 @@ index 0000000..d5f352e
 +        require(remotePath.startsWith('/') && '\u0000' !in remotePath && '\n' !in remotePath && '\r' !in remotePath) {
 +            "An absolute device file path is required"
 +        }
-+        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout)
++        recoveryJournal?.let { require(it.deviceId == deviceId) { "Recovery journal belongs to another target." } }
++        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null)
 +    }
 +
-+    private fun execute(arguments: List<String>, timeout: Duration): HdcCommandResult {
-+        val result = runner.run(listOf(executablePath) + arguments, timeout)
++    private fun execute(arguments: List<String>, timeout: Duration, trackHost: Boolean = false,
++        journal: HarmonyOSRecoveryJournal? = recoveryJournal, allowSealed: Boolean = false): HdcCommandResult {
++        val command = listOf(executablePath) + arguments
++        val result = if (trackHost && journal != null) journal.hostCall(allowSealed) { observer ->
++            if (runner is ProcessHdcCommandRunner) runner.runObserved(command, timeout, observer) else runner.run(command, timeout)
++        } else runner.run(command, timeout)
 +        if (result.exitCode != 0 || hasHdcFailure(result.stdout) || hasHdcFailure(result.stderr)) {
 +            throw HdcCommandException(result)
 +        }
@@ -6567,6 +8101,10 @@ index 0000000..d5f352e
 +    }
 +
 +    companion object {
++        internal fun finiteCommand(arguments: List<String>): Boolean =
++            (arguments.firstOrNull() == "uitest" && arguments.getOrNull(1) in setOf("dumpLayout", "screenCap", "uiInput")) ||
++                (arguments.firstOrNull() == "aa" && arguments.getOrNull(1) in setOf("start", "force-stop")) ||
++                (arguments.take(2) == listOf("rm", "-f") && arguments.size == 3)
 +        private val deviceIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")
 +        private val diagnosticTokens = setOf("error", "fail", "failed", "failure", "warning", "warn", "usage", "help", "hdc")
 +        private val hdcFailurePattern = Regex("(?im)^\\s*(?:\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
@@ -6599,10 +8137,10 @@ index 0000000..d5f352e
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
 new file mode 100644
-index 0000000..5b3e7ec
+index 0000000..bff79c8
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,181 @@
 +package maestro.harmonyos.hdc
 +
 +import java.io.ByteArrayOutputStream
@@ -6635,7 +8173,9 @@ index 0000000..5b3e7ec
 +        require(maxOutputBytes > 0) { "Output limit must be positive" }
 +    }
 +
-+    override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++    override fun run(command: List<String>, timeout: Duration): HdcCommandResult = runObserved(command, timeout) {}
++
++    internal fun runObserved(command: List<String>, timeout: Duration, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit): HdcCommandResult {
 +        require(command.isNotEmpty() && command.first().isNotBlank()) { "An executable is required" }
 +        require(command.none { '\u0000' in it }) { "Command arguments cannot contain NUL" }
 +        require(!timeout.isZero && !timeout.isNegative) { "Timeout must be positive" }
@@ -6646,17 +8186,20 @@ index 0000000..5b3e7ec
 +        } catch (e: IOException) {
 +            throw HdcException("Unable to start HDC executable: ${command.first()}", e)
 +        }
-+        val descendants = linkedMapOf<Long, ProcessHandle>()
++        val rootIdentity = HarmonyOSRecoveryJournal.HostProcess(process.pid(), runCatching { process.info().startInstant().orElse(null)?.toString() }.getOrNull())
++        val processTree = OwnedProcessTree(rootIdentity)
 +        val readers = Executors.newFixedThreadPool(2) { task ->
 +            Thread(task, "maestro-hdc-output").apply { isDaemon = true }
 +        }
 +        try {
++            observer(rootIdentity)
 +            // Finite commands must not wait for keyboard input.
 +            process.outputStream.close()
 +            val stdout = readers.submit<String> { readOutput(process.inputStream, "stdout") }
 +            val stderr = readers.submit<String> { readOutput(process.errorStream, "stderr") }
 +            while (true) {
-+                rememberDescendants(process, descendants)
++                processTree.refresh()
++                processTree.identities().forEach(observer)
 +                checkReader(stdout)
 +                checkReader(stderr)
 +                val remaining = remainingNanos(deadline, timeout)
@@ -6670,11 +8213,11 @@ index 0000000..5b3e7ec
 +                awaitOutput(stderr, deadline, timeout),
 +            )
 +        } catch (e: InterruptedException) {
-+            terminate(process, descendants)
++            terminate(processTree, observer)
 +            Thread.currentThread().interrupt()
 +            throw e
-+        } catch (e: Exception) {
-+            terminate(process, descendants)
++        } catch (e: Throwable) {
++            terminate(processTree, observer)
 +            throw e
 +        } finally {
 +            readers.shutdownNow()
@@ -6764,19 +8307,132 @@ index 0000000..5b3e7ec
 +        return remaining
 +    }
 +
-+    private fun rememberDescendants(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
-+        process.descendants().use { children -> children.forEach { descendants[it.pid()] = it } }
++    private fun terminate(processTree: OwnedProcessTree, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit) {
++        runCatching { processTree.refresh() }
++        processTree.identities().forEach { identity -> runCatching { observer(identity) } }
++        processTree.terminate()
++        // destroyForcibly requests termination; it is not an exit acknowledgement. Recovery
++        // also retains native identities when a process does not finish within this allowance.
++        var interrupted = Thread.interrupted()
++        try {
++            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
++            while (processTree.hasUnconfirmedProcesses() && System.nanoTime() < deadline) {
++                try { Thread.sleep(10) } catch (_: InterruptedException) { interrupted = true }
++            }
++        } finally { if (interrupted) Thread.currentThread().interrupt() }
++    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/OwnedProcessTree.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/OwnedProcessTree.kt
+new file mode 100644
+index 0000000..a733559
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/OwnedProcessTree.kt
+@@ -0,0 +1,102 @@
++package maestro.harmonyos.hdc
++
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal.HostProcess
++import java.time.Instant
++
++internal data class NativeProcessSnapshot(val identity: HostProcess, val parent: HostProcess?)
++
++internal interface NativeProcessAccess {
++    fun snapshot(pid: Long): NativeProcessSnapshot?
++    fun children(pid: Long): List<Long>
++    /** Must recheck the immutable identity immediately before requesting termination. */
++    fun destroyIfMatches(identity: HostProcess)
++}
++
++internal object SystemNativeProcessAccess : NativeProcessAccess {
++    private fun readIdentity(process: ProcessHandle) = HostProcess(process.pid(), process.info().startInstant().orElse(null)?.toString())
++    override fun snapshot(pid: Long): NativeProcessSnapshot? {
++        val process = ProcessHandle.of(pid).orElse(null) ?: return null
++        if (!process.isAlive) return null
++        return NativeProcessSnapshot(readIdentity(process), process.parent().orElse(null)?.let(::readIdentity))
++    }
++    override fun children(pid: Long): List<Long> {
++        val process = ProcessHandle.of(pid).orElse(null) ?: return emptyList()
++        return process.children().use { stream -> stream.map { it.pid() }.toList() }
++    }
++    override fun destroyIfMatches(identity: HostProcess) {
++        if (identity.startedAt == null) return
++        val process = ProcessHandle.of(identity.pid).orElse(null) ?: return
++        if (readIdentity(process) == identity) process.destroyForcibly()
++    }
++}
++
++/** PPID values survive their original parent on Windows. Every edge needs both process identities. */
++internal class OwnedProcessTree(
++    private val root: HostProcess,
++    private val access: NativeProcessAccess = SystemNativeProcessAccess,
++) {
++    private val observed = linkedSetOf(root)
++
++    fun identities(): List<HostProcess> = observed.toList()
++
++    fun refresh() {
++        val queue = ArrayDeque(observed.filter { it.startedAt != null })
++        val visited = mutableSetOf<HostProcess>()
++        while (queue.isNotEmpty()) {
++            val owner = queue.removeFirst()
++            if (!visited.add(owner)) continue
++            val currentOwner = try { access.snapshot(owner.pid) } catch (_: Exception) {
++                observed += HostProcess(owner.pid, null)
++                continue
++            }
++            if (currentOwner != null && currentOwner.identity.startedAt == null) observed += HostProcess(owner.pid, null)
++            if (currentOwner?.identity != owner) continue
++            val children = try { access.children(owner.pid) } catch (_: Exception) {
++                observed += HostProcess(owner.pid, null)
++                continue
++            }
++            for (pid in children) {
++                val child = try { access.snapshot(pid) } catch (_: Exception) {
++                    observed += HostProcess(pid, null)
++                    continue
++                } ?: continue
++                val started = child.identity.startedAt
++                val ownerStarted = checkNotNull(owner.startedAt)
++                // An older process cannot have been created by this instance of its alleged parent.
++                if (started != null && Instant.parse(started) < Instant.parse(ownerStarted)) continue
++                if (child.parent?.pid != owner.pid) {
++                    if (child.parent == null) observed += HostProcess(pid, null)
++                    continue
++                }
++                if (started == null || child.parent.startedAt == null) {
++                    observed += HostProcess(pid, null)
++                    continue
++                }
++                if (child.parent != owner) continue
++                val recheckedOwner = try { access.snapshot(owner.pid) } catch (_: Exception) {
++                    observed += HostProcess(owner.pid, null)
++                    continue
++                }
++                if (recheckedOwner?.identity != owner) {
++                    if (recheckedOwner != null && recheckedOwner.identity.startedAt == null) observed += HostProcess(owner.pid, null)
++                    continue
++                }
++                if (observed.add(child.identity)) queue.addLast(child.identity)
++            }
++        }
 +    }
 +
-+    private fun terminate(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
-+        runCatching { rememberDescendants(process, descendants) }
-+        descendants.values.toList().asReversed().forEach { child -> runCatching { child.destroyForcibly() } }
-+        runCatching { process.destroyForcibly() }
++    fun terminate() {
++        observed.toList().asReversed().forEach { identity ->
++            if (identity.startedAt != null) runCatching { access.destroyIfMatches(identity) }
++        }
++    }
++
++    fun hasUnconfirmedProcesses(): Boolean = observed.any { identity ->
++        runCatching {
++            access.snapshot(identity.pid)?.identity?.let { current ->
++                identity.startedAt == null || current.startedAt == null || current == identity
++            } == true
++        }.getOrDefault(true)
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
 new file mode 100644
-index 0000000..af1ecb8
+index 0000000..ec58193
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
 @@ -0,0 +1,163 @@
@@ -6795,7 +8451,6 @@ index 0000000..af1ecb8
 +import java.nio.file.LinkOption
 +import java.nio.file.Path
 +import java.time.Duration
-+import java.util.UUID
 +
 +/**
 + * Reads a fresh dump using the OpenHarmony UITest `dumpLayout -p` interface.
@@ -6832,7 +8487,7 @@ index 0000000..af1ecb8
 +        val files = TempFileHandler()
 +        var localDirectory: Path? = null
 +        var localFile: Path? = null
-+        val remotePath = "/data/local/tmp/maestro-layout-${UUID.randomUUID()}.json"
++        val remotePath = hdc.allocateTemporaryFile("layout", "json")
 +        var dumpAttempted = false
 +        var failure: Throwable? = null
 +        try {
@@ -6870,6 +8525,7 @@ index 0000000..af1ecb8
 +                        if (result.stdout.isNotBlank() || result.stderr.isNotBlank()) {
 +                            throw HierarchyReadException("Device cleanup returned diagnostics for $remotePath")
 +                        }
++                        hdc.forgetTemporaryFile(remotePath)
 +                    } catch (error: Throwable) {
 +                        if (error is InterruptedException) {
 +                            Thread.currentThread().interrupt()
@@ -7140,10 +8796,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..18fadc6
+index 0000000..dcd9da5
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,471 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -7414,13 +9070,13 @@ index 0000000..18fadc6
 +
 +        assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(error)
 +        assertThat(driver.isShutdown()).isTrue()
-+        driver.close()
++        assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(error)
 +        assertThat(backendRecording.closeCalls).isEqualTo(1)
 +        assertThrows(IllegalStateException::class.java) { driver.inputText("after close") }
 +    }
 +
 +    @Test
-+    fun `failed recording start preserves error and does not reserve driver session`() {
++    fun `failed recording start remains unconfirmed through retries and final close`() {
 +        val error = HdcException("recording start failed")
 +        val device = Device().apply { recordingFactory = { _, _ -> throw error } }
 +        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
@@ -7431,10 +9087,26 @@ index 0000000..18fadc6
 +
 +        val backendRecording = Recording()
 +        device.recordingFactory = { _, _ -> backendRecording }
-+        driver.startScreenRecording(Buffer())
-+        assertThat(device.recordingStarts).isEqualTo(2)
-+        driver.close()
++        assertThat(assertThrows(HdcException::class.java) { driver.startScreenRecording(Buffer()) }).isSameInstanceAs(error)
++        assertThat(device.recordingStarts).isEqualTo(1)
++        assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(error)
++        assertThat(backendRecording.closeCalls).isEqualTo(0)
++    }
++
++    @Test
++    fun `closing a failed recording handle cannot erase final driver cleanup failure`() {
++        val error = HdcException("recording service stop unconfirmed")
++        val backendRecording = Recording(closeFailure = error)
++        val device = Device().apply { recordingFactory = { _, _ -> backendRecording } }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++        driver.open()
++        val handle = driver.startScreenRecording(Buffer())
++
++        assertThat(assertThrows(HdcException::class.java) { handle.close() }).isSameInstanceAs(error)
++        handle.close()
++        assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(error)
 +        assertThat(backendRecording.closeCalls).isEqualTo(1)
++        assertThat(driver.isShutdown()).isTrue()
 +    }
 +
 +    @Test
@@ -8599,6 +10271,329 @@ index 0000000..93af213
 +            else int(bytes.size + 8) + type.toByteArray() + bytes
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
+new file mode 100644
+index 0000000..8529ef9
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
+@@ -0,0 +1,317 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++import java.util.concurrent.atomic.AtomicReference
++
++class HarmonyOSRecoveryJournalTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private fun file() = directory.resolve("journal.json")
++    private fun create() = HarmonyOSRecoveryJournal.create(file(), "fixture-target", UUID.randomUUID().toString())
++
++    @Test fun `empty failed-open session releases without consulting an unavailable device`() {
++        create().use { journal ->
++            journal.seal()
++            val unavailable = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device query expected") })
++            assertThat(journal.recover(unavailable).state).isEqualTo("complete")
++        }
++    }
++
++    @Test fun `dispatch is durable before transport and recovery removes only owned resource paths`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            val temporary = hdc.allocateTemporaryFile("layout", "json")
++            val result = hdc.shell("fixture-target", listOf("uitest", "dumpLayout", "-p", temporary))
++            assertThat(result.stdout).isEqualTo("device output")
++            assertThat(remote.dispatched).isEqualTo(1)
++            assertThat(journal.snapshot().state).isEqualTo("unknown")
++            journal.seal()
++            val recovered = journal.recover(hdc)
++            assertThat(recovered.state).isEqualTo("complete")
++            assertThat(recovered.temporaryFiles).isEqualTo(0)
++            assertThat(remote.dispatched).isEqualTo(1)
++            assertThat(remote.cleanup.single()).contains(temporary)
++            assertThat(remote.cleanup.single()).doesNotContain("rm -r")
++            assertThat(remote.cleanup.single()).doesNotContain("kill")
++            assertThat(remote.cleanup.single()).doesNotContain("*")
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            assertThat(remote.cleanup).hasSize(1)
++        }
++    }
++
++    @Test fun `lost response requires exact completion proof and never redispatches the operation`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { loseResponse = true; proofAvailable = false }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            assertThrows(InterruptedException::class.java) { hdc.shell("fixture-target", listOf("uitest", "uiInput", "click", "1", "2")) }
++            journal.seal()
++            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            remote.proofAvailable = true
++            remote.foreignProof = true
++            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            remote.foreignProof = false
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            assertThat(remote.dispatched).isEqualTo(1)
++        }
++    }
++
++    @Test fun `journal can recover in a new process owner and cannot be opened while owned`() {
++        val remote = FakeRemote(file()).apply { loseResponse = true }
++        val journal = create()
++        val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++        assertThrows(InterruptedException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++        assertThrows(HdcException::class.java) { HarmonyOSRecoveryJournal.open(file()) }
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { reopened ->
++            assertThat(reopened.recover(HdcClient("fake", remote)).state).isEqualTo("complete")
++            assertThat(remote.dispatched).isEqualTo(1)
++        }
++    }
++
++    @Test fun `unsealed and wrong-device operations cannot be recovered or dispatched`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            assertThat(journal.recover(hdc).issues.map { it.code }).contains("SESSION_ACTIVE")
++            assertThrows(IllegalArgumentException::class.java) { hdc.shell("another-target", listOf("uitest", "dumpLayout")) }
++            journal.seal()
++            assertThrows(IllegalStateException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            assertThat(remote.dispatched).isEqualTo(0)
++        }
++    }
++
++    @Test fun `remote failure is still completed but cannot be mistaken for command success`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { remoteStatus = 17 }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            val failure = assertThrows(HdcCommandException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            assertThat(failure.result.exitCode).isEqualTo(17)
++            assertThat(failure.result.stdout).isEqualTo("device output")
++            journal.seal()
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++        }
++    }
++
++    @Test fun `completion suffix preserves command output whitespace`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { output = "device output  \n\n" }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            assertThat(hdc.shell("fixture-target", listOf("uitest", "dumpLayout")).stdout).isEqualTo(remote.output)
++        }
++    }
++
++    @Test fun `long session cleanup uses bounded batches and can retry an unconfirmed batch`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            repeat(24) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            journal.seal()
++            remote.failCleanup = true
++            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
++            remote.failCleanup = false
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            assertThat(remote.dispatched).isEqualTo(24)
++            assertThat(remote.cleanup.size).isGreaterThan(2)
++            assertThat(remote.cleanup.all { it.length < 10 * 1024 }).isTrue()
++        }
++    }
++
++    @Test fun `completion probes and cleanup share one recovery deadline`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { loseResponse = true; proofDelayMillis = 50 }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            assertThrows(InterruptedException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            journal.seal()
++            assertThat(journal.recover(hdc, Duration.ofMillis(20)).state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            remote.proofDelayMillis = 0
++            assertThat(journal.recover(hdc).state).isEqualTo("complete")
++        }
++    }
++
++    @Test fun `unknown command scope remains unknown even if its shell returned a completion file`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { loseResponse = true }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            assertThrows(InterruptedException::class.java) { hdc.shell("fixture-target", listOf("sh", "-c", "sleep 20 &")) }
++            journal.seal()
++            assertThat(journal.recover(hdc).issues.map { it.code }).contains("UNSUPPORTED_RECOVERY_SCOPE")
++            assertThat(remote.cleanup).isEmpty()
++        }
++    }
++
++    @Test fun `process-start crash window without a native identity is never inferred stopped`() {
++        create().close()
++        val tree = mapper.readTree(file().toFile())
++        (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(
++            HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString())))
++        mapper.writeValue(file().toFile(), tree)
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> error("No remote query before host stop is confirmed") })
++            assertThat(journal.recover(hdc).issues.map { it.code }).contains("HOST_PROCESS_UNCONFIRMED")
++        }
++    }
++
++    @Test fun `a live recorded host process blocks recovery even with remote completion evidence`() {
++        create().close()
++        val tree = mapper.readTree(file().toFile())
++        val current = ProcessHandle.current()
++        val call = HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString(), mutableListOf(
++            HarmonyOSRecoveryJournal.HostProcess(current.pid(), current.info().startInstant().orElseThrow().toString())))
++        (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(call))
++        mapper.writeValue(file().toFile(), tree)
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> error("Must not query/clean while a native invocation is active") })
++            assertThat(journal.recover(hdc).issues.map { it.code }).contains("HOST_PROCESS_UNCONFIRMED")
++            assertThat(current.isAlive).isTrue()
++        }
++    }
++
++    @Test fun `ownership corruption is rejected before any recovery action`() {
++        create().close()
++        val tree = mapper.readTree(file().toFile()) as com.fasterxml.jackson.databind.node.ObjectNode
++        tree.put("remoteRoot", "/data/local/tmp/another-tool")
++        mapper.writeValue(file().toFile(), tree)
++        assertThrows(IllegalArgumentException::class.java) { HarmonyOSRecoveryJournal.open(file()) }
++    }
++
++    @Test fun `missing duplicate trailing or coerced evidence cannot open as an empty journal`() {
++        create().close()
++        val valid = Files.readString(file())
++        val missing = mapper.readTree(valid) as com.fasterxml.jackson.databind.node.ObjectNode
++        missing.remove("operations")
++        val coerced = mapper.readTree(valid) as com.fasterxml.jackson.databind.node.ObjectNode
++        coerced.put("rootRemoved", "true")
++        for (invalid in listOf(mapper.writeValueAsString(missing), mapper.writeValueAsString(coerced),
++            valid + " {}", valid.replaceFirst("{", "{\"rootRemoved\":false,"))) {
++            Files.writeString(file(), invalid)
++            assertThrows(Exception::class.java) { HarmonyOSRecoveryJournal.open(file()) }
++        }
++    }
++
++    @Test fun `removed markers cannot substitute for an absent command completion proof`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { loseResponse = true }
++            assertThrows(InterruptedException::class.java) {
++                HdcClient("fake", remote).withRecoveryJournal(journal).shell("fixture-target", listOf("uitest", "dumpLayout"))
++            }
++        }
++        val tree = mapper.readTree(file().toFile())
++        (tree["operations"][0] as com.fasterxml.jackson.databind.node.ObjectNode).put("markerRemoved", true)
++        mapper.writeValue(file().toFile(), tree)
++        assertThrows(IllegalArgumentException::class.java) { HarmonyOSRecoveryJournal.open(file()) }
++    }
++
++    @Test fun `native process is terminated if recording its identity fails`() {
++        val handle = AtomicReference<HarmonyOSRecoveryJournal.HostProcess>()
++        assertThrows(IllegalStateException::class.java) {
++            ProcessHdcCommandRunner().runObserved(HdcProcessTestChild.command("sleep", directory.resolve("child.pid").toString()), Duration.ofSeconds(10)) {
++                handle.set(it)
++                error("Journal write failed")
++            }
++        }
++        assertThat(ProcessHandle.of(handle.get().pid).map { it.isAlive }.orElse(false)).isFalse()
++    }
++
++    @Test fun `legacy preexisting process entries stay recorded but cannot block confirmed owned process exit`() {
++        create().close()
++        val child = ProcessBuilder(HdcProcessTestChild.command("failure")).start()
++        val root = HarmonyOSRecoveryJournal.HostProcess(child.pid(), child.info().startInstant().orElseThrow().toString())
++        child.waitFor()
++        val current = ProcessHandle.current()
++        val older = HarmonyOSRecoveryJournal.HostProcess(current.pid(), current.info().startInstant().orElseThrow().toString())
++        val tree = mapper.readTree(file().toFile())
++        val call = HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString(), mutableListOf(root, older))
++        (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(call))
++        mapper.writeValue(file().toFile(), tree)
++
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            assertThat(journal.recover(HdcClient("fake", HdcCommandRunner { _, _ -> error("No device work exists") })).state).isEqualTo("complete")
++        }
++        val retained = mapper.readTree(file().toFile())["hostCalls"][0]["processes"]
++        assertThat(retained.size()).isEqualTo(2)
++        assertThat(retained[1]["pid"].asLong()).isEqualTo(current.pid())
++        assertThat(current.isAlive).isTrue()
++    }
++
++    @Test fun `missing native creation time remains unknown rather than excluding a possible owner`() {
++        create().close()
++        val tree = mapper.readTree(file().toFile())
++        val call = HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString(), mutableListOf(
++            HarmonyOSRecoveryJournal.HostProcess(ProcessHandle.current().pid(), null)))
++        (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(call))
++        mapper.writeValue(file().toFile(), tree)
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            assertThat(journal.recover(HdcClient("fake", HdcCommandRunner { _, _ -> error("No query permitted") })).issues.map { it.code })
++                .contains("HOST_PROCESS_UNCONFIRMED")
++        }
++    }
++
++    @Test fun `an identity lost during exit can recover after the recorded PID has disappeared`() {
++        create().close()
++        val child = ProcessBuilder(HdcProcessTestChild.command("sleep", directory.resolve("exit-race.pid").toString())).start()
++        try {
++            val known = HarmonyOSRecoveryJournal.HostProcess(child.pid(), child.info().startInstant().orElseThrow().toString())
++            val unknown = HarmonyOSRecoveryJournal.HostProcess(child.pid(), null)
++            val tree = mapper.readTree(file().toFile())
++            val call = HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString(), mutableListOf(known, unknown))
++            (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(call))
++            mapper.writeValue(file().toFile(), tree)
++            HarmonyOSRecoveryJournal.open(file()).use { journal ->
++                val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device work exists") })
++                assertThat(journal.recover(hdc).issues.map { it.code }).contains("HOST_PROCESS_UNCONFIRMED")
++                child.destroyForcibly().waitFor()
++                assertThat(journal.recover(hdc).state).isEqualTo("complete")
++            }
++            assertThat(mapper.readTree(file().toFile())["hostCalls"][0]["processes"].size()).isEqualTo(2)
++        } finally {
++            child.destroyForcibly().waitFor()
++        }
++    }
++
++    private class FakeRemote(private val journal: Path) : HdcCommandRunner {
++        var dispatched = 0
++        var loseResponse = false
++        var proofAvailable = true
++        var foreignProof = false
++        var remoteStatus = 0
++        var output = "device output"
++        var failCleanup = false
++        var proofDelayMillis = 0L
++        val cleanup = mutableListOf<String>()
++        private val mapper = jacksonObjectMapper()
++        private var proof: String? = null
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            val script = command.last()
++            if (script.contains("MAESTRO_RECOVERY_")) {
++                val state = mapper.readTree(journal.toFile())
++                val operation = state["operations"].last()
++                check(!state["hostCalls"].last()["returned"].asBoolean()) { "Dispatch was not write-ahead recorded" }
++                proof = listOf(state["generation"], state["ownerId"], operation["id"], operation["sha256"], operation["token"])
++                    .joinToString(":") { it.asText() } + ":$remoteStatus"
++                dispatched++
++                if (loseResponse) throw InterruptedException("Lost host response; remote command may still be finishing")
++                return HdcCommandResult(0, "$output\nMAESTRO_RECOVERY_${operation["token"].asText().replace("-", "")}=$remoteStatus\n", "")
++            }
++            if (script.contains("cat ")) {
++                if (proofDelayMillis > 0) Thread.sleep(proofDelayMillis)
++                return HdcCommandResult(0, if (!proofAvailable) "" else if (foreignProof) proof!!.replaceFirst(':', '-') else proof!!, "")
++            }
++            cleanup += script
++            if (failCleanup) return HdcCommandResult(0, "", "")
++            val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
++            return HdcCommandResult(0, nonce, "")
++        }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
 new file mode 100644
 index 0000000..267dbab
@@ -8735,6 +10730,122 @@ index 0000000..267dbab
 +            this.command = command
 +            this.timeout = timeout
 +            return result
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/OwnedProcessTreeTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/OwnedProcessTreeTest.kt
+new file mode 100644
+index 0000000..5755356
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/OwnedProcessTreeTest.kt
+@@ -0,0 +1,110 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal.HostProcess
++import org.junit.jupiter.api.Test
++import java.time.Instant
++
++class OwnedProcessTreeTest {
++    private fun process(pid: Long, second: Long) = HostProcess(pid, Instant.ofEpochSecond(second).toString())
++
++    @Test fun `reused parent PID cannot claim an older unrelated process or its descendants`() {
++        val root = process(10, 100)
++        val child = process(11, 101)
++        val grandchild = process(12, 102)
++        val old = process(20, 50)
++        val unrelated = process(21, 103)
++        val access = Processes().apply {
++            add(root, null); add(child, root); add(grandchild, child)
++            add(old, root); add(unrelated, old)
++        }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        assertThat(owned.identities()).containsExactly(root, child, grandchild)
++        owned.terminate()
++        assertThat(access.terminated).containsExactly(root, child, grandchild)
++        assertThat(access.snapshot(old.pid)).isNotNull()
++        assertThat(access.snapshot(unrelated.pid)).isNotNull()
++    }
++
++    @Test fun `every parent edge requires its creation identity and child chronological order`() {
++        val root = process(10, 100)
++        val child = process(11, 110)
++        val olderGrandchild = process(12, 105)
++        val wrongParentIdentity = process(13, 120)
++        val access = Processes().apply {
++            add(root, null); add(child, root); add(olderGrandchild, child)
++            add(wrongParentIdentity, process(root.pid, 99))
++        }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        assertThat(owned.identities()).containsExactly(root, child)
++    }
++
++    @Test fun `PID reuse between observation and termination never kills the new process`() {
++        val root = process(10, 100)
++        val child = process(11, 101)
++        val access = Processes().apply { add(root, null); add(child, root) }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        val replacement = process(child.pid, 200)
++        access.add(replacement, null)
++        owned.terminate()
++        assertThat(access.terminated).containsExactly(root)
++        assertThat(access.snapshot(child.pid)?.identity).isEqualTo(replacement)
++        assertThat(owned.hasUnconfirmedProcesses()).isFalse()
++    }
++
++    @Test fun `missing creation identity prevents termination and stays unconfirmed`() {
++        val root = process(10, 100)
++        val unknown = HostProcess(11, null)
++        val access = Processes().apply { add(root, null); add(unknown, root) }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        owned.terminate()
++        assertThat(access.terminated).containsExactly(root)
++        assertThat(owned.hasUnconfirmedProcesses()).isTrue()
++        assertThat(access.snapshot(unknown.pid)).isNotNull()
++    }
++
++    @Test fun `a missing root identity cannot authorize any child termination`() {
++        val root = HostProcess(10, null)
++        val child = process(11, 101)
++        val access = Processes().apply { add(root, null); add(child, root) }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        owned.terminate()
++        assertThat(access.terminated).isEmpty()
++        assertThat(owned.hasUnconfirmedProcesses()).isTrue()
++    }
++
++    @Test fun `an unidentified live child stays unconfirmed until a lookup proves it has exited`() {
++        val root = process(10, 100)
++        val unknown = HostProcess(11, null)
++        val access = Processes().apply { add(root, null); add(unknown, root) }
++        val owned = OwnedProcessTree(root, access)
++        owned.refresh()
++        owned.terminate()
++        assertThat(owned.hasUnconfirmedProcesses()).isTrue()
++        assertThat(access.terminated).containsExactly(root)
++
++        access.exited(unknown.pid)
++        assertThat(owned.hasUnconfirmedProcesses()).isFalse()
++        assertThat(access.terminated).containsExactly(root)
++    }
++
++    private class Processes : NativeProcessAccess {
++        private val values = linkedMapOf<Long, NativeProcessSnapshot>()
++        val terminated = mutableListOf<HostProcess>()
++        fun add(identity: HostProcess, parent: HostProcess?) { values[identity.pid] = NativeProcessSnapshot(identity, parent) }
++        fun exited(pid: Long) { values.remove(pid) }
++        override fun snapshot(pid: Long) = values[pid]
++        override fun children(pid: Long) = values.values.filter { it.parent?.pid == pid }.map { it.identity.pid }
++        override fun destroyIfMatches(identity: HostProcess) {
++            if (identity.startedAt != null && values[identity.pid]?.identity == identity) {
++                terminated += identity
++                values.remove(identity.pid)
++            }
 +        }
 +    }
 +}
@@ -10205,10 +12316,10 @@ index 0000000..225a604
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
 new file mode 100644
-index 0000000..44eb499
+index 0000000..c60d840
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,165 @@
 +package maestro.harmonyos
 +
 +import com.google.common.truth.Truth.assertThat
@@ -10320,26 +12431,30 @@ index 0000000..44eb499
 +            pollInterval = Duration.ofMillis(1),
 +        ))
 +        driver.open()
-+        Maestro(driver).use { maestro ->
-+            val scope = FileAccessScope.under(workspace)
-+            val commands = YamlCommandReader.readCommands(flowFile, scope)
-+            val commandFailures = mutableListOf<Throwable>()
-+            val orchestra = Orchestra(
-+                maestro = maestro,
-+                artifactsDir = artifacts,
-+                lookupTimeoutMs = 0,
-+                optionalLookupTimeoutMs = 0,
-+                scope = scope,
-+                onCommandStart = { _, command ->
-+                    if (cancellation != null && command.asCommand() is AssertConditionCommand) throw cancellation
-+                },
-+                onCommandFailed = { _, _, failure ->
-+                    commandFailures += failure
-+                    throw failure
-+                },
-+            )
-+            block(FlowFixture(device, orchestra, commands, commandFailures))
++        fun runFixture() {
++            Maestro(driver).use { maestro ->
++                val scope = FileAccessScope.under(workspace)
++                val commands = YamlCommandReader.readCommands(flowFile, scope)
++                val commandFailures = mutableListOf<Throwable>()
++                val orchestra = Orchestra(
++                    maestro = maestro,
++                    artifactsDir = artifacts,
++                    lookupTimeoutMs = 0,
++                    optionalLookupTimeoutMs = 0,
++                    scope = scope,
++                    onCommandStart = { _, command ->
++                        if (cancellation != null && command.asCommand() is AssertConditionCommand) throw cancellation
++                    },
++                    onCommandFailed = { _, _, failure ->
++                        commandFailures += failure
++                        throw failure
++                    },
++                )
++                block(FlowFixture(device, orchestra, commands, commandFailures))
++            }
 +        }
++        if (stopFailure == null) runFixture()
++        else assertThat(assertThrows<IOException> { runFixture() }).isSameInstanceAs(stopFailure)
 +        assertThat(device.stopCalls).isEqualTo(1)
 +        assertThat(transport.remoteFiles).isEmpty()
 +    }

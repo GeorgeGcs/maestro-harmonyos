@@ -1,28 +1,36 @@
-# 智能体调用协议 v1
+# 智能体调用协议
 
 更新日期：2026-10-29。本文确定能力查询、运行结果、失败证据和取消交接的共同约定，供执行端与调用方实现。
 
-**当前状态：两批接口已接入源码。** 重新构建本仓库的 CLI 后，`harmonyos-bridge` 提供下面十个 `agent.*` 方法；CLI Flow 和设备矩阵可输出相同格式的结果与证据索引。现有 VSCode 继续使用[原录制协议](recorder-protocol.md)。[JSON Schema](protocol/agent-v1.schema.json)和[示例](protocol/examples)用于格式校验，实际验证范围见[进展记录](progress/2026-10-29.md)。
+**当前状态：v1 的十个接口和 v2 的受控恢复已接入源码。** 重新构建本仓库的 CLI 后，`harmonyos-bridge` 默认提供 v1；显式协商 v2 才增加 `agent.recover`。CLI Flow 和设备矩阵继续输出 v1 运行结果与证据索引。现有 VSCode 继续使用[原录制协议](recorder-protocol.md)。格式定义见 [v1 Schema](protocol/agent-v1.schema.json)、[v2 Schema](protocol/agent-v2.schema.json)和[协议示例](protocol/examples)，实际验证范围见[进展记录](progress/2026-10-29.md)。完整调用方实现见 [Node 客户端示例](../examples/agent-client/README.md)。
 
-本版不把 HDC 客户端被中断当成手机端命令已经停止。动作已派发但设备端清理无法确认时，结果保留 `effects=possible`、`cleanup.state=unknown`，会话不会返回 `handoffReady=true`。调用方应先检查设备与残留任务，再重新建立会话；不能因取消请求成功而自动重跑。
+本版不把 HDC 客户端被中断当成手机端命令已经停止。动作已派发但设备端清理无法确认时，结果保留 `effects=possible`、`cleanup.state=unknown`，会话不会返回 `handoffReady=true`。调用方应按恢复约定核对旧会话；不能因取消请求成功而自动重跑，也不能绕过未确认的恢复记录接管设备。
 
 ## 1. 版本与通信
 
-协议名为 `maestro.harmonyos.agent`，`schemaVersion` 为整数 `1`。JSONL 请求保留现有封包：
+协议名为 `maestro.harmonyos.agent`。`schemaVersion` 支持整数 `1`、`2`，新连接默认 v1。JSONL 请求保留现有封包：
 
 ```json
 {"id":1,"method":"agent.describe","params":{}}
 ```
 
+上述首条请求选择 v1，`methods` 保持原有十个方法，不包含恢复接口。使用 v2 时，第一条 `agent.*` 请求必须改为：
+
+```json
+{"id":1,"method":"agent.describe","params":{"schemaVersion":2}}
+```
+
+协商成功后，该连接所有 `agent.*` 成功响应文档均为 v2；`methods` 增加 `agent.recover`。第一条已受理的能力查询或其他 `agent.*` 请求固定版本，之后不能切换；切换请求返回 `PROTOCOL_VERSION_FIXED`。协商后再次查询 `agent.describe {}` 保持当前版本。使用不支持的版本返回 `UNSUPPORTED_PROTOCOL_VERSION`；旧分发包也可能返回 `INVALID_PARAMS` 或 `UNKNOWN_METHOD`，需要恢复能力的调用方应停止并更新分发包，不能默默降版后继续。
+
 `id` 仍为 1～9007199254740991 的整数，同一连接中不得复用。响应仍为 `{id,result}` 或 `{id,error}`。不向旧请求的顶层或旧 `connect/action` 参数中添加新字段；它们有严格白名单。
 
-新方法成功响应的 `result`，以及持久化的结果和证据文件，使用相同的文档封包：
+成功响应的 `result`，以及持久化的结果和证据文件，使用以下文档封包。线上版本按连接协商；磁盘 `result.json` 和 `evidence-index.json` 继续使用 v1，不因连接协商而改写。
 
 | 字段 | 含义 |
 | --- | --- |
 | `protocol` | 固定为 `maestro.harmonyos.agent` |
-| `schemaVersion` | 当前为 `1` |
-| `kind` | `capabilities`、`preflight`、`session`、`snapshot`、`cancelAck`、`runResult` 或 `evidenceIndex` |
+| `schemaVersion` | 线上为协商后的 `1` 或 `2`；磁盘运行结果与证据索引仍为 `1` |
+| `kind` | v1 为 `capabilities`、`preflight`、`session`、`snapshot`、`cancelAck`、`runResult` 或 `evidenceIndex`；v2 额外允许 `recoveryReport` |
 | `observedAt` | 本次状态观察或文档生成时间，UTC、以 `Z` 结尾 |
 | `revision` | 同一状态对象的非负递增修订号；内容变化时增加，不能因重新查询而倒退 |
 | `data` | 对应类型的数据，由 Schema 校验 |
@@ -106,9 +114,9 @@ v1 的字段、枚举和语义保持固定。新增字段或枚举时更新 Sche
 
 | `kind` | 共同错误码 |
 | --- | --- |
-| `invalid_input` | `INVALID_REQUEST`、`INVALID_PARAMS`、`NOT_FOUND`、`ATTEMPT_ALREADY_EXISTS`、`ATTEMPT_CONFLICT`、`STALE_ATTEMPT` |
+| `invalid_input` | `INVALID_REQUEST`、`INVALID_PARAMS`、`NOT_FOUND`、`ATTEMPT_ALREADY_EXISTS`、`ATTEMPT_CONFLICT`、`STALE_ATTEMPT`、`UNSUPPORTED_PROTOCOL_VERSION`、`PROTOCOL_VERSION_FIXED`、`RECOVERY_SESSION_MISMATCH` |
 | `unsupported` | `UNKNOWN_METHOD`、`UNSUPPORTED_COMMAND` |
-| `environment` | `DEVICE_NOT_FOUND`、`DEVICE_UNAUTHORIZED`、`DEVICE_LOCKED`、`DEVICE_BUSY`、`APP_NOT_INSTALLED`、`PRECONDITION_UNKNOWN`、`STALE_SNAPSHOT`、`AMBIGUOUS_SELECTOR` |
+| `environment` | `DEVICE_NOT_FOUND`、`DEVICE_UNAUTHORIZED`、`DEVICE_LOCKED`、`DEVICE_BUSY`、`DEVICE_RECOVERY_REQUIRED`、`APP_NOT_INSTALLED`、`PRECONDITION_UNKNOWN`、`STALE_SNAPSHOT`、`AMBIGUOUS_SELECTOR` |
 | `assertion` | `ASSERTION_FAILED` |
 | `timeout` | `OPERATION_TIMEOUT` |
 | `cancelled` | `CANCELLED` |
@@ -172,6 +180,37 @@ sequenceDiagram
 
 `agent.*` 的控制读取与设备工作线程分离，状态、取消与释放请求在动作执行中仍可处理。新动作入口登记后立即返回，调用方继续查询结果；设备动作严格串行。原五方法保持同步行为，只有新入口提供执行期间的取消查询。
 
+### 5.1 v2 受控恢复
+
+`agent.recover` 的参数固定为 `{deviceId,sessionId}`，设备必须显式指定，`sessionId` 指向待恢复的旧会话。恢复与普通设备会话竞争同一设备锁，执行期间不能建立新会话；它在有限等待预算内返回最终 `recoveryReport`，不只返回“已受理”。当前后端的设备检查预算为 10 秒，超时或凭据不足保持未知。
+
+同一桥接进程中的顺序是：`agent.release` → 查询 `agent.session` 至 `closed` → 若 `handoffReady=false`，调用 `agent.recover` → 核对恢复报告 → 再查 `agent.session`。只有恢复完成，且会话仍满足上述交接条件，才能接管。恢复前仍有活动会话时返回 `DEVICE_BUSY`。恢复更新会话当前的清理状态，不改写原尝试的 `status/effects/error/cleanup`、原结果文件或失败证据。
+
+跨进程连接若被旧会话阻止，`agent.connect` 返回 `DEVICE_RECOVERY_REQUIRED`，错误 `details.recoverySessionId` 给出待恢复会话标识。调用方使用这个标识和原目标设备恢复，核对成功后重新预检，再建立新会话。不要从文件名猜标识，不重发原动作。若当前设备记录已经属于另一个会话，恢复返回 `RECOVERY_SESSION_MISMATCH`。
+
+预检含必需失败时不能执行动作。仅当所有必需失败均为 `DEVICE_RECOVERY_REQUIRED` 时，可尝试连接以取得上述结构化会话标识。如果标记在预检与连接之间解除，连接意外成功，也应先释放这个用于检查的会话，再重新预检。恢复后其他条件仍可能未知；示例默认停止，由使用者确认后显式传入 `--allow-unknown`，不能把恢复成功等同于全部前置条件通过。
+
+`recoveryReport.data` 包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `deviceId`、`sessionId` | 本次恢复对应的设备和旧会话，必须与请求一致 |
+| `state` | `complete` 或 `unknown`，说明资源恢复结论，不是业务执行结论 |
+| `cleanup` | 本次恢复的清理状态及错误；完成时为 `complete` 且错误数组为空，未知时为 `unknown` |
+| `handoffReady` | 只有 `state=complete`、清理完成且未决操作及临时文件均为 0 时为 `true` |
+| `operations` | 资源记录中的操作总数 |
+| `pendingOperations` | 尚未取得可信完成凭据的操作数 |
+| `temporaryFiles` | 尚未确认清理的已登记临时文件数 |
+| `reportPath`、`reportSha256` | 独立审计报告的本机绝对路径及实际字节 SHA-256 |
+
+调用方须检查报告在明确可信的恢复目录内，以 `realpath` 排除目录链接越界，再核对 SHA-256；只验证 JSON 结构不够。恢复报告与原尝试结果分别保存：后续资源恢复成功，不会把原来的取消、失败或未知改成通过。
+
+当前分发包在 `~/.maestro/harmonyos-sessions` 保存持久的设备会话记录、资源日志和审计报告。未确认清理的记录会阻止同一新版分发包的 CLI、v1/v2 智能体入口和原录制桥接入口接管。它不约束旧二进制、外部 HDC 命令或手机上的手工操作。
+
+恢复只核对已登记的命令完成凭据，清理归属明确的资源，不重放点击、输入、启动等业务动作，也不按进程名结束无关任务。资源日志缺失、损坏、仍由活跃进程持有，命令完成凭据不足或设备失联时不能确认恢复。不能删除阻止接管的记录或换目录绕过；当前实现不保证恢复所有崩溃场景。
+
+实验性 Huawei 系统录屏不属于可确认的崩溃恢复范围。启用录屏的会话预先登记长期资源；进程崩溃后，即使尚未开始录制或启动命令已结束，也不能据此证明资源已关闭。恢复保持 `unknown`，不能宣称已可接管。
+
 ## 6. 结果与证据文件
 
 每次尝试使用独立的输出目录，输入 Flow 和脚本只读。摘要与证据索引纳入上游产物 bundle 和 manifest，不放在输入 YAML 旁。已有 JUnit、`manifest.json` 和命令产物继续保留，统一摘要不另造一套测试执行器。
@@ -193,11 +232,11 @@ sequenceDiagram
 
 ## 7. 方法约定与分批实现
 
-所有新方法只控制该执行端持有的会话和产物，不结束其他应用或工具的进程。新接口采用下表方法名；参数中的标识均按上述作用域验证。
+所有方法只控制所属会话及有归属证据的资源，不结束其他应用或工具的进程。默认 v1 保留以下十个方法；参数中的标识均按上述作用域验证。
 
 | 方法 | 参数 | 返回与行为 |
 | --- | --- | --- |
-| `agent.describe` | `{}` | `capabilities`，列出实际已实现的方法及命令 |
+| `agent.describe` | `{schemaVersion?}` | `capabilities`；首条请求省略版本时选 v1，显式 `2` 协商 v2，之后不能切换 |
 | `agent.preflight` | `{deviceId,commands,appId?,abilityName?,moduleName?}` | `preflight`，`commands` 必须非空；按请求范围只读检查 |
 | `agent.connect` | `{deviceId,appId,abilityName,moduleName?,artifactsDir}` | `session`；使用与原录制器相同的设备锁，显式目标，不自动换设备 |
 | `agent.session` | `{sessionId}` | `session`，执行期间也能读取 |
@@ -207,6 +246,8 @@ sequenceDiagram
 | `agent.release` | `{sessionId}` | `session`；受理释放后拒绝新动作，查询完成状态 |
 | `agent.result` | `{runId,attemptId}` | `runResult`；读已有尝试，不触发重跑 |
 | `agent.evidence` | `{runId,attemptId}` | `evidenceIndex`；只读取，不重新操作设备采证 |
+
+v2 在这十个方法之外增加 `agent.recover({deviceId,sessionId})`，返回 `recoveryReport`，具体顺序和交接条件见 [5.1 节](#51-v2-受控恢复)。v1 调用该方法返回 `UNKNOWN_METHOD`，不会把它加入 v1 的能力枚举。
 
 `agent.action` 在新协议中把一条录制动作视为一次明确的执行尝试；完整 Flow 的运行继续由 CLI 承担。两者使用相同的结果与证据格式，不承诺通过当前录制桥接执行任意 Flow。CLI 的取消由拥有该 CLI 进程的调用入口处理，并遵守相同的结束、清理和交接条件。
 
@@ -223,6 +264,8 @@ sequenceDiagram
 第一批至少覆盖：旧五方法和现有插件兼容；无设备、设备占用与未知前置条件；长动作执行中能受理取消；取消后实际获取设备锁接管；迟到或重复取消不影响下一次尝试；断连或超时不自动重发；未确认清理时不返回可接管。
 
 第二批至少覆盖：断言失败、环境阻塞、超时和取消分别归类；每项失败关联到尝试和步骤或明确的执行前阶段；设备失联时如实记录证据缺失；动作成功但画面刷新失败不重做动作；重跑保留原尝试；Schema 校验与实际文件、哈希、manifest 引用一致。
+
+v2 恢复还须覆盖：默认 v1 的十方法不变；版本只能在首条请求协商；释放与恢复竞态；跨进程阻止接管；恢复只匹配指定设备及旧会话；凭据缺失和损坏不能放行；恢复不改原尝试历史；审计文件真实路径和哈希可核对。客户端子进程测试见[示例说明](../examples/agent-client/README.md#本地主机测试)。
 
 完成记录写明主机测试、集成测试和真机结果。协议样本及 Schema 校验只证明格式和约束，不能代替运行实现或设备验证。
 
@@ -248,7 +291,7 @@ $cli = './.upstream/maestro/maestro-cli/build/install/maestro/bin/maestro.bat'
 & $cli --platform harmonyos harmonyos-bridge
 ```
 
-每行写一条 JSON 请求。标准输出只有协议消息，诊断写标准错误；异步请求可乱序返回，按 `id` 匹配。先发 `agent.describe`，再用明确的本地设备标识调用 `agent.preflight`。预检不启动应用：当前会查询 HDC 连接、设备锁、UITest 路径和可选的应用/模块/Ability 元数据。无法可靠读取的锁屏状态为 `unknown`；录屏还要求显式启用实验后端，工具存在不代表录屏成功。
+每行写一条 JSON 请求。标准输出只有协议消息，诊断写标准错误；异步请求可乱序返回，按 `id` 匹配。先发 `agent.describe`，需要恢复时首条请求明确传 `schemaVersion:2`，再用明确的本地设备标识调用 `agent.preflight`。预检不启动应用：当前会查询 HDC 连接、设备锁、持久恢复记录、UITest 路径和可选的应用/模块/Ability 元数据。无法可靠读取的锁屏状态为 `unknown`；录屏还要求显式启用实验后端，工具存在不代表录屏成功。
 
 预检返回后，调用方仍须明确决定是否执行。`agent.connect` 成功意味着取得会话；只有会话为 `idle` 才能抓快照或提交动作。点击节点使用同会话的新快照，参数沿用[原动作格式](recorder-protocol.md)。每次执行先生成 `runId`、`attemptId` 和序号，收到登记结果后轮询 `agent.result`。响应丢失时查询原尝试，不能换一个传输 `id` 重发动作。
 
@@ -259,3 +302,5 @@ $cli = './.upstream/maestro/maestro-cli/build/install/maestro/bin/maestro.bat'
 完整 YAML 使用 CLI `test`，通过 `--harmonyos-agent-output` 指定稳定输出根，可同时传 `--harmonyos-run-id`、`--harmonyos-attempt-id` 和 `--harmonyos-attempt-no`。使用 [run-harmonyos.ps1](../scripts/run-harmonyos.ps1) 时默认启用，`RunId`、`AttemptId`、`AttemptNo` 对应这些参数；结果路径由每次调用的 `invocation.json` 给出。重试保留 `RunId`，生成新 `AttemptId` 并递增 `AttemptNo`，输入和设备保持一致。修改流程、配置或设备时创建新任务。
 
 当前实现对已派发的修改操作保守记录 `possible`，没有仅凭退出码宣称业务副作用已经验证。错误类别依据实际异常类型；无法取得截图或布局时索引明确记为缺失，不能保证每次失败都能从离线设备取回图片。CLI 由拥有它的调用方取消，强制结束进程可能只留下未完成记录；未确认清理时仍不能直接接管。
+
+可直接运行的完整调用方见 [examples/agent-client](../examples/agent-client/README.md)，包括普通断言与截图、取消演示、可选 CLI 接管及原材料保存。示例显式要求设备、应用、Ability 和输出目录，不内置个人设备信息。
