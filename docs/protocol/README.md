@@ -14,6 +14,7 @@
 | 录屏资源登记与快照 | [v1](recording-resources-v1.schema.json) | [资源身份、阶段与原件](recording-resources.md) |
 | 内部恢复凭据 | [v1/v2](recovery-receipt.schema.json) | v2 增加不可变录屏资源快照引用 |
 | 完整解码报告 | [v1](recording-verification-v1.schema.json) | [解码命令与检查范围](../recording-diagnostics.md) |
+| 录屏阶段诊断 | [v1](recording-diagnostics-v1.schema.json) | [来源、事件与视频关联](recording-diagnostics.md) |
 
 以上采用 JSON Schema 2020-12，检查 JSON 结构和局部约束。JSONL 应逐行检查。跨文件身份、文件哈希、事件顺序、重复 ID、步骤覆盖、计数及设备清理状态仍由运行验证器核验；Schema 通过不能直接作为运行成功或设备可接管的依据。读取器还应拒绝重复 JSON 键、尾随内容和超出读取预算的文件。
 

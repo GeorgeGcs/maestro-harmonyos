@@ -1,0 +1,1483 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:recording-diagnostics:1",
+  "title": "HarmonyOS offline recording diagnostics v1",
+  "$comment": "Describes collect-recording-diagnostics.mjs output, including partial failure reports. Completeness describes collected observations only, not video decode or resource handoff. File hashes, identities, sequence continuity, created/final close-or-abort and expectedEventCount checks, limits across arrays and source associations require collector checks. AgentError.details is the sole opaque JSON exception to closed structures.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "schemaVersion",
+    "status",
+    "startedAt",
+    "finishedAt",
+    "limits",
+    "run",
+    "execution",
+    "sources",
+    "sourceFiles",
+    "sourcesVerified",
+    "logs",
+    "recordings",
+    "foreignContexts",
+    "issues",
+    "videoValidation",
+    "resourceHandoff"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "maestro.harmonyos.recording-diagnostics"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "incomplete"
+      ]
+    },
+    "startedAt": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "finishedAt": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "limits": {
+      "$ref": "#/$defs/limits"
+    },
+    "run": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/run"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "execution": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/execution"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sources": {
+      "$ref": "#/$defs/sources"
+    },
+    "sourceFiles": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 2048,
+      "items": {
+        "$ref": "#/$defs/fileReference"
+      }
+    },
+    "sourcesVerified": {
+      "type": "boolean"
+    },
+    "logs": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 2048,
+      "items": {
+        "$ref": "#/$defs/fileReference"
+      }
+    },
+    "recordings": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/recording"
+      }
+    },
+    "foreignContexts": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/foreignContext"
+      }
+    },
+    "issues": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 20000,
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "videoValidation": {
+      "const": "not_performed"
+    },
+    "resourceHandoff": {
+      "const": "not_assessed"
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "recordingId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32768,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)(?!.*[\\u0000-\\u001f\\u007f]).*$",
+      "description": "An absolute host path. Actual path normalization, link rejection and containment are checked by the collector."
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"
+    },
+    "nonnegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "stage": {
+      "enum": [
+        "created",
+        "service",
+        "processes",
+        "captures",
+        "query",
+        "start",
+        "ready",
+        "stop",
+        "capture_ended",
+        "export",
+        "export_scratch",
+        "export_media",
+        "stat",
+        "receive",
+        "validate",
+        "archive",
+        "copy",
+        "flush",
+        "delete",
+        "media_retained",
+        "media_removed",
+        "limit_reached",
+        "resource_failure",
+        "cleanup_remote",
+        "cleanup_local",
+        "cleanup_temp",
+        "cleanup_resource",
+        "cleanup",
+        "close",
+        "abort",
+        "truncated"
+      ]
+    },
+    "eventResult": {
+      "enum": [
+        "begin",
+        "returned",
+        "acknowledged",
+        "observed",
+        "absent",
+        "present",
+        "invalid",
+        "incomplete",
+        "failed",
+        "skipped"
+      ]
+    },
+    "groupIssueCode": {
+      "enum": [
+        "event_conflict",
+        "resource_conflict",
+        "context_reused",
+        "recording_id_reused",
+        "binding_conflict",
+        "binding_missing",
+        "binding_unavailable",
+        "start_missing",
+        "sequence_gap",
+        "elapsed_regressed",
+        "emission_incomplete",
+        "terminal_missing_or_conflicting",
+        "output_reused",
+        "video_unavailable"
+      ]
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metadataBytes",
+        "fileBytes",
+        "totalBytes",
+        "lineBytes",
+        "files",
+        "lines",
+        "events",
+        "contexts"
+      ],
+      "properties": {
+        "metadataBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        },
+        "fileBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 268435456
+        },
+        "lineBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32768
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        },
+        "lines": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200000
+        },
+        "events": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "contexts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        }
+      }
+    },
+    "fileReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "bytes",
+        "sha256",
+        "sha256After"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 67108864
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "sha256After": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "verifiedFileReference": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/fileReference"
+        },
+        {
+          "properties": {
+            "sha256After": {
+              "$ref": "#/$defs/sha256"
+            }
+          }
+        }
+      ]
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "index",
+        "manifest"
+      ],
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/fileReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/fileReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/fileReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "attemptId",
+        "baseDir"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "baseDir": {
+          "$ref": "#/$defs/absolutePath"
+        }
+      }
+    },
+    "agentError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "assertion",
+            "environment",
+            "unsupported",
+            "timeout",
+            "cancelled",
+            "invalid_input",
+            "transport",
+            "internal"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304,
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304
+        },
+        "details": {
+          "$comment": "Opaque original AgentError.details is null or an object whose values may contain arbitrary JSON. It is bounded by the original metadata byte and structural limits, not interpreted as diagnostic fields.",
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "maxProperties": 100000,
+              "additionalProperties": true
+            }
+          ]
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "errors"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_started",
+            "in_progress",
+            "complete",
+            "failed",
+            "unknown"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/agentError"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "errors": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "errors": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "error",
+        "cleanup"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/agentError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup": {
+          "$ref": "#/$defs/cleanup"
+        }
+      }
+    },
+    "logSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logPath",
+        "line",
+        "payloadSha256"
+      ],
+      "properties": {
+        "logPath": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "line": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200000
+        },
+        "payloadSha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "eventFields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": {
+          "$ref": "#/$defs/eventResult"
+        },
+        "stageElapsedMs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "expectedBytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "receivedBytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "copiedBytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "archiveBytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "archiveSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archiveMetadataUnavailable": {
+          "type": "boolean"
+        },
+        "count": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "cleanupErrors": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "droppedEvents": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "emissionFailures": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "attempt": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "expectedEventCount": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "pids": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "pidsTruncated": {
+          "type": "boolean"
+        },
+        "retentionRequested": {
+          "type": "boolean"
+        },
+        "persistent": {
+          "type": "boolean"
+        },
+        "priorFailure": {
+          "type": "boolean"
+        },
+        "uriUnavailable": {
+          "type": "boolean"
+        },
+        "mediaUriPreviouslyObserved": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "mediaUri": {
+          "type": "string",
+          "maxLength": 512,
+          "pattern": "^file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-[0-9a-f]{32}\\.mp4$"
+        },
+        "errorKind": {
+          "enum": [
+            "timeout",
+            "interrupted",
+            "invalid_mp4",
+            "io",
+            "other"
+          ]
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "recordingId",
+        "contextId",
+        "resourceId",
+        "seq",
+        "observedAt",
+        "elapsedMs",
+        "stage",
+        "fields",
+        "sources"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "recordingId": {
+          "$ref": "#/$defs/recordingId"
+        },
+        "contextId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resourceId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/utcTimestamp"
+        },
+        "elapsedMs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
+        "stage": {
+          "$ref": "#/$defs/stage"
+        },
+        "fields": {
+          "$ref": "#/$defs/eventFields"
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/logSource"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "fields": {
+                "properties": {
+                  "terminal": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "terminal"
+                ]
+              }
+            },
+            "required": [
+              "fields"
+            ]
+          },
+          "then": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "close",
+                  "abort"
+                ]
+              },
+              "fields": {
+                "required": [
+                  "result",
+                  "expectedEventCount",
+                  "truncated",
+                  "droppedEvents",
+                  "emissionFailures",
+                  "terminal"
+                ],
+                "properties": {
+                  "result": {
+                    "enum": [
+                      "returned",
+                      "failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "video": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "path",
+        "bytes",
+        "sha256"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "missing",
+            "available",
+            "unindexed",
+            "ambiguous"
+          ]
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 67108864
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "available"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/relativePath"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 67108864
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "bytes": {
+                "type": "null"
+              },
+              "sha256": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "unindexed",
+                  "ambiguous"
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/relativePath"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "stageDuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "stage",
+        "result",
+        "elapsedMs"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "stage": {
+          "$ref": "#/$defs/stage"
+        },
+        "result": {
+          "$ref": "#/$defs/eventResult"
+        },
+        "elapsedMs": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        }
+      }
+    },
+    "archiveObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "attempt",
+        "bytes",
+        "sha256",
+        "metadataUnavailable",
+        "indexedVideoMatch",
+        "archiveFileVerification"
+      ],
+      "properties": {
+        "seq": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "attempt": {
+          "anyOf": [
+            { "$ref": "#/$defs/positiveInteger" },
+            { "type": "null" }
+          ]
+        },
+        "bytes": {
+          "anyOf": [
+            { "$ref": "#/$defs/nonnegativeInteger" },
+            { "type": "null" }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            { "$ref": "#/$defs/sha256" },
+            { "type": "null" }
+          ]
+        },
+        "metadataUnavailable": {
+          "type": "boolean"
+        },
+        "indexedVideoMatch": {
+          "type": ["boolean", "null"]
+        },
+        "archiveFileVerification": {
+          "const": "not_performed"
+        }
+      }
+    },
+    "exportAttempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "remoteBeforeBytes",
+        "receivedBytes",
+        "remoteAfterBytes",
+        "remoteAfterObservation",
+        "eventSequences"
+      ],
+      "properties": {
+        "attempt": {
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "remoteBeforeBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receivedBytes": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/nonnegativeInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "remoteAfterBytes": {
+          "type": "null"
+        },
+        "remoteAfterObservation": {
+          "const": "not_observed"
+        },
+        "eventSequences": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        }
+      }
+    },
+    "observations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "captureEnded",
+        "structureValidated",
+        "copyCompleted",
+        "flushCompleted",
+        "mediaRetained",
+        "mediaRemoved"
+      ],
+      "properties": {
+        "captureEnded": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "structureValidated": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "copyCompleted": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "flushCompleted": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "mediaRetained": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        },
+        "mediaRemoved": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/positiveInteger"
+          }
+        }
+      }
+    },
+    "recording": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contextId",
+        "recordingId",
+        "resourceId",
+        "status",
+        "video",
+        "bindingSources",
+        "events",
+        "stageDurations",
+        "exportAttempts",
+        "archiveObservations",
+        "observations",
+        "issueCodes"
+      ],
+      "properties": {
+        "contextId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recordingId": {
+          "$ref": "#/$defs/recordingId"
+        },
+        "resourceId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "complete",
+            "incomplete"
+          ]
+        },
+        "video": {
+          "$ref": "#/$defs/video"
+        },
+        "bindingSources": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/logSource"
+          }
+        },
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/event"
+          }
+        },
+        "stageDurations": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/stageDuration"
+          }
+        },
+        "exportAttempts": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/exportAttempt"
+          }
+        },
+        "archiveObservations": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/archiveObservation"
+          }
+        },
+        "observations": {
+          "$ref": "#/$defs/observations"
+        },
+        "issueCodes": {
+          "type": "array",
+          "minItems": 0,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/groupIssueCode"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "contextId": {
+                "$ref": "#/$defs/uuid"
+              },
+              "bindingSources": {
+                "minItems": 1
+              },
+              "issueCodes": {
+                "maxItems": 0
+              },
+              "video": {
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "available",
+                      "missing"
+                    ]
+                  },
+                  "path": {
+                    "$ref": "#/$defs/relativePath"
+                  }
+                }
+              },
+              "events": {
+                "minItems": 2
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "complete"
+              },
+              "video": {
+                "properties": {
+                  "state": {
+                    "const": "missing"
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "video"
+            ]
+          },
+          "then": {
+            "properties": {
+              "events": {
+                "contains": {
+                  "properties": {
+                    "stage": {
+                      "const": "abort"
+                    },
+                    "fields": {
+                      "properties": {
+                        "result": {
+                          "const": "failed"
+                        },
+                        "terminal": {
+                          "const": true
+                        }
+                      },
+                      "required": [
+                        "result",
+                        "terminal"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "stage",
+                    "fields"
+                  ]
+                },
+                "not": {
+                  "contains": {
+                    "properties": {
+                      "stage": {
+                        "enum": [
+                          "copy",
+                          "flush"
+                        ]
+                      },
+                      "fields": {
+                        "properties": {
+                          "result": {
+                            "const": "returned"
+                          }
+                        },
+                        "required": [
+                          "result"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "stage",
+                      "fields"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "foreignContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contextId",
+        "recordingId",
+        "outputPath",
+        "reason",
+        "eventCount",
+        "bindingSources"
+      ],
+      "properties": {
+        "contextId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "recordingId": {
+          "$ref": "#/$defs/recordingId"
+        },
+        "outputPath": {
+          "$ref": "#/$defs/absolutePath",
+          "maxLength": 4096
+        },
+        "reason": {
+          "const": "outside_attempt"
+        },
+        "eventCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20000
+        },
+        "bindingSources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {
+            "$ref": "#/$defs/logSource"
+          }
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "contextId",
+        "logPath",
+        "line"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "event_conflict",
+            "resource_conflict",
+            "context_reused",
+            "recording_id_reused",
+            "binding_conflict",
+            "binding_missing",
+            "binding_unavailable",
+            "start_missing",
+            "sequence_gap",
+            "elapsed_regressed",
+            "emission_incomplete",
+            "terminal_missing_or_conflicting",
+            "output_reused",
+            "video_unavailable",
+            "log_unavailable",
+            "truncated_log_line",
+            "invalid_log_record",
+            "events_missing",
+            "recordings_missing",
+            "input_verification_failed",
+            "source_changed",
+            "snapshot_cleanup_failed"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4194304
+        },
+        "contextId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "logPath": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200000
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "sourcesVerified": {
+            "const": true
+          },
+          "issues": {
+            "maxItems": 0
+          },
+          "run": {
+            "$ref": "#/$defs/run"
+          },
+          "execution": {
+            "$ref": "#/$defs/execution"
+          },
+          "sources": {
+            "properties": {
+              "result": {
+                "$ref": "#/$defs/verifiedFileReference"
+              },
+              "index": {
+                "$ref": "#/$defs/verifiedFileReference"
+              },
+              "manifest": {
+                "$ref": "#/$defs/verifiedFileReference"
+              }
+            }
+          },
+          "sourceFiles": {
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/verifiedFileReference"
+            }
+          },
+          "logs": {
+            "minItems": 1,
+            "items": {
+              "$ref": "#/$defs/verifiedFileReference"
+            }
+          },
+          "recordings": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "status": {
+                  "const": "complete"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}
