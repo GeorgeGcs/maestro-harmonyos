@@ -60,6 +60,8 @@ Remove-Item Env:MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA
 
 录屏恢复凭据使用内部版本 2，并引用 `recoveries/<recoveryId>-recordings.json` 的不可变资源快照和哈希。外部 agent 协议版本不变。消费者需要同时核对该快照，不能只检查 `complete` 字样。恢复只证明资源可以移交，不修改原执行结果或为旧视频补写“通过”。
 
+正文断言与录屏关闭同时失败时，执行结果保留正文错误，清理状态及 `DEVICE_RECOVERY_REQUIRED` 放在独立的 cleanup.errors 中。读取报告时需同时检查两者：`ASSERTION_FAILED` 说明正文失败，不能据此判断设备已释放。已有 cleanup unknown 不会因为随后写入终态而变成已确认的清理结果。
+
 ## 当前验证范围
 
 主机测试覆盖保留原件后的恢复、缺失结束凭据、活跃录屏、媒体变化、归档损坏、删除确认丢失和时长上限归属。视频检查工具使用真实 FFmpeg 测试有效视频、截断文件、无视频轨，并使用进程夹具测试超时、错误诊断和输入变化。

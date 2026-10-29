@@ -503,10 +503,10 @@ index f2f7bae..a13e0e6 100644
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
 new file mode 100644
-index 0000000..0b0495b
+index 0000000..3f4e810
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,409 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -784,7 +784,15 @@ index 0000000..0b0495b
 +    @Synchronized fun finishFailure(error: Throwable) {
 +        if (isTerminal) return
 +        val classified = HarmonyOsAgentProtocol.error(error)
-+        if (error.suppressed.isNotEmpty()) setCleanup("failed", error.suppressed.map { HarmonyOsAgentProtocol.error(it) })
++        if (error.suppressed.isNotEmpty()) {
++            val additional = error.suppressed.map { HarmonyOsAgentProtocol.error(it) }
++            val cleanup = data["cleanup"] as Map<*, *>
++            if (cleanup["state"] == "unknown") {
++                val existing = (cleanup["errors"] as List<*>).filterIsInstance<Map<*, *>>()
++                data["cleanup"] = mapOf("state" to "unknown",
++                    "errors" to (existing + additional.map { it.toMap() }).distinct())
++            } else setCleanup("failed", additional)
++        }
 +        finishWithError(classified)
 +    }
 +
@@ -816,7 +824,9 @@ index 0000000..0b0495b
 +        }
 +        if (error.kind in setOf("cancelled", "timeout", "transport") && data["startedAt"] != null) {
 +            val cleanup = data["cleanup"] as Map<*, *>
-+            if (cleanup["state"] != "failed") data["cleanup"] = mapOf("state" to "unknown", "errors" to emptyList<Any>())
++            if (cleanup["state"] !in setOf("failed", "unknown")) {
++                data["cleanup"] = mapOf("state" to "unknown", "errors" to emptyList<Any>())
++            }
 +        }
 +        finish()
 +    }
@@ -2099,10 +2109,10 @@ index 0000000..f892702
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..6a9efb4
+index 0000000..593584e
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,395 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -2161,8 +2171,12 @@ index 0000000..6a9efb4
 +    fun finish(success: Boolean, error: Throwable? = null) {
 +        if (completed) return
 +        // Returning from newSession confirms normal teardown. An exception does not.
++        val recoveryError = recoveryError(error)
 +        attempt.setCleanup(if (error == null) "complete" else "unknown",
-+            error?.let { listOf(HarmonyOsAgentProtocol.error(it)) }.orEmpty())
++            (error?.let { listOf(HarmonyOsAgentProtocol.error(it)) }.orEmpty() + listOfNotNull(recoveryError)).distinct())
++        // Only a top-level recovery blocker delegates the execution outcome to
++        // prior Flow observations. A final error with a suppressed blocker wins
++        // over failures from earlier, successfully recovered retry attempts.
 +        val recoveryBlocked = error != null && HarmonyOsAgentProtocol.error(error).code == "DEVICE_RECOVERY_REQUIRED"
 +        val actualError = if (recoveryBlocked) failure ?: reportingFailure ?: error
 +            else if (reportingFailure != null) failure ?: error ?: reportingFailure else error ?: failure
@@ -2180,6 +2194,25 @@ index 0000000..6a9efb4
 +            "The CLI did not expose a confirmed terminal Flow outcome."), "unknown")
 +        completed = true
 +        Runtime.getRuntime().removeShutdownHook(shutdownHook)
++    }
++
++    /** A body error can carry the session's independent cleanup blocker as suppressed. */
++    private fun recoveryError(error: Throwable?): AgentError? {
++        if (error == null) return null
++        val pending = ArrayDeque<Throwable>()
++        val seen = java.util.Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
++        fun enqueue(candidate: Throwable) {
++            if (seen.size < 64 && seen.add(candidate)) pending.addLast(candidate)
++        }
++        enqueue(error)
++        while (pending.isNotEmpty()) {
++            val current = pending.removeFirst()
++            val classified = HarmonyOsAgentProtocol.error(current)
++            if (classified.code == "DEVICE_RECOVERY_REQUIRED") return classified
++            current.cause?.let(::enqueue)
++            current.suppressed.take(64).forEach(::enqueue)
++        }
++        return null
 +    }
 +
 +    fun junit(path: Path) {
@@ -4073,10 +4106,10 @@ index cc05d69..714c609 100644
              )
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
 new file mode 100644
-index 0000000..b7c2aef
+index 0000000..5957468
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,299 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -4295,6 +4328,69 @@ index 0000000..b7c2aef
 +        assertThat(one).isNotEqualTo(two)
 +        assertThat(json(attempt.result())["data"]["failedStepId"].isNull).isTrue()
 +        assertThat(json(attempt.evidence())["data"]["entries"].map { it["source"]["commandIndex"].asInt() }).containsExactly(3, 3)
++    }
++
++    @Test fun `known unknown cleanup merges suppressed errors without losing or duplicating its recovery owner`() {
++        val attempt = register()
++        attempt.startStep("flow.yaml", 0, "AssertConditionCommand", false)
++        val owner = uuid()
++        val recovery = AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "recording cleanup unconfirmed",
++            mapOf("recoverySessionId" to owner))
++        attempt.setCleanup("unknown", listOf(recovery))
++        val assertion = MaestroException.AssertionFailure("body assertion", TreeNode(), "fixture")
++        assertion.addSuppressed(AgentProtocolException(recovery))
++        assertion.addSuppressed(java.io.IOException("recording flush failed"))
++
++        attempt.finishFailure(assertion)
++
++        val result = json(attempt.result())["data"]
++        assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        assertThat(result["cleanup"]["errors"].size()).isEqualTo(2)
++        val retained = result["cleanup"]["errors"].single { it["code"].asText() == "DEVICE_RECOVERY_REQUIRED" }
++        assertThat(retained["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++        assertThat(mapper.readTree(attempt.directory.resolve("result.json").toFile())["data"]).isEqualTo(result)
++        assertThat(mapper.readTree(attempt.directory.resolve("state.json").toFile())["result"]["data"]).isEqualTo(result)
++    }
++
++    @Test fun `cancel timeout and transport terminal paths retain existing unknown cleanup diagnostics`() {
++        for (kind in listOf("cancelled", "timeout", "transport")) {
++            for (fromThrowable in listOf(false, true)) {
++                val attempt = register()
++                attempt.startStep("flow.yaml", 0, "InputTextCommand", true)
++                val owner = uuid()
++                val recovery = AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "cleanup needs recovery",
++                    mapOf("recoverySessionId" to owner))
++                attempt.setCleanup("unknown", listOf(recovery))
++                val failure = AgentError(kind, "FIXTURE_FAILURE", "terminal $kind")
++
++                if (fromThrowable) attempt.finishFailure(AgentProtocolException(failure))
++                else attempt.finishWithError(failure)
++
++                val result = json(attempt.result())["data"]
++                assertThat(result["status"].asText()).isEqualTo(if (kind == "cancelled") "cancelled" else "unknown")
++                assertThat(result["error"]["kind"].asText()).isEqualTo(kind)
++                assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++                assertThat(result["cleanup"]["errors"].size()).isEqualTo(1)
++                assertThat(result["cleanup"]["errors"][0]["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++            }
++        }
++    }
++
++    @Test fun `ordinary assertion cleanup remains complete and unmarked suppressed cleanup remains failed`() {
++        for (suppressed in listOf(false, true)) {
++            val attempt = register()
++            attempt.startStep("flow.yaml", 0, "AssertConditionCommand", false)
++            val failure = MaestroException.AssertionFailure("body assertion", TreeNode(), "fixture")
++            if (suppressed) failure.addSuppressed(java.io.IOException("recording close failed"))
++
++            attempt.finishFailure(failure)
++
++            val result = json(attempt.result())["data"]
++            assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++            assertThat(result["cleanup"]["state"].asText()).isEqualTo(if (suppressed) "failed" else "complete")
++            assertThat(result["cleanup"]["errors"].size()).isEqualTo(if (suppressed) 1 else 0)
++        }
 +    }
 +
 +    @Test fun `classification uses wrapped types instead of misleading message text`() {
@@ -5510,16 +5606,30 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..2302ce4
+index 0000000..33f9a76
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,517 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import com.google.common.truth.Truth.assertThat
++import io.mockk.coEvery
++import io.mockk.mockk
++import kotlinx.coroutines.runBlocking
++import maestro.DeviceInfo
++import maestro.Maestro
 +import maestro.MaestroException
++import maestro.ScreenRecording
 +import maestro.TreeNode
++import maestro.ViewHierarchy
++import maestro.device.Platform
++import maestro.cli.session.HarmonyOsSessionLease
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
++import maestro.harmonyos.hdc.RecordingResourceFailure
 +import maestro.orchestra.ArtifactEntry
 +import maestro.orchestra.ArtifactFormat
 +import maestro.orchestra.ArtifactKind
@@ -5544,7 +5654,10 @@ index 0000000..2302ce4
 +import org.junit.jupiter.api.assertThrows
 +import java.nio.file.Files
 +import java.nio.file.Path
++import java.io.IOException
++import java.time.Instant
 +import java.util.UUID
++import okio.Sink
 +
 +/** Tests the CLI observer boundary; no device execution is simulated as a validation pass. */
 +class HarmonyOsCliAgentReportTest {
@@ -5644,6 +5757,143 @@ index 0000000..2302ce4
 +        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
 +        assertThat(result["cleanup"]["errors"][0]["code"].asText()).isEqualTo("DEVICE_RECOVERY_REQUIRED")
 +        assertThat(result["cleanup"]["errors"][0]["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++    }
++
++    @Test
++    fun `real Orchestra FAIL keeps assertion and independent recording recovery blocker in CLI result`() {
++        val source = directory.resolve("recording-assertion.yaml")
++        Files.writeString(source, "appId: org.example.fixture\n---\n- startRecording: failure\n- assertTrue: false\n")
++        val report = HarmonyOsCliAgentReport.create(directory.resolve("recording-report"), null, null, 1,
++            "fixture-device", setOf(source.toFile()), emptyMap())
++        val commands = YamlCommandReader.readCommands(source)
++        val bundle = Files.createDirectories(report.directory.resolve("flows/recording"))
++        val observer = report.flow(source.toFile(), bundle, commands)
++        val cleanup = IOException("recording output flush failed")
++        val owner = UUID.randomUUID().toString()
++        val locks = directory.resolve("recording-locks")
++        val noHdc = HdcClient("unused", HdcCommandRunner { _, _ -> error("No device command is expected") })
++        HarmonyOsSessionSupport.withDeviceLock("fixture-device", locks) {
++            val lease = HarmonyOsSessionLease.begin("fixture-device", owner, locks, requiresRecordingCleanup = true)
++            val resource = lease.journal.allocateRecording()
++            resource.starting(); resource.started(51); resource.stopping(); resource.ended()
++            resource.media("file://media/Photo/123/VID_123/${resource.fileName}")
++            val original = lease.journal.path.parent.resolve("original.mp4")
++            Files.writeString(original, "retained recording fixture")
++            resource.archive(original)
++            resource.failed(cleanup)
++            val marker = cleanup.suppressed.filterIsInstance<RecordingResourceFailure>().single()
++            val maestro = recordingMaestro(cleanup)
++            var commandFailure: Throwable? = null
++            val orchestra = Orchestra(maestro, artifactsDir = bundle, listeners = listOf(observer),
++                onCommandStart = { index, command -> observer.starting(command, index) },
++                onCommandFailed = { _, _, error -> commandFailure = error; Orchestra.ErrorResolution.FAIL })
++
++            val failure = assertThrows<MaestroException.AssertionFailure> { runBlocking { orchestra.runFlow(commands) } }
++            assertThat(failure).isSameInstanceAs(commandFailure)
++            assertThat(failure.suppressed).asList().containsExactly(cleanup)
++            assertThat(HarmonyOSRecordingResourceJournal.failureFingerprint(cleanup)).isEqualTo(marker.fingerprint)
++            observer.aborted(failure)
++            // withSession passes the independently remembered Driver close error to the lease.
++            val blocked = assertThrows<AgentProtocolException> { lease.finish(cleanup, noHdc) }
++            failure.addSuppressed(blocked)
++            report.finish(false, failure)
++
++            val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++            assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++            assertThat(result["error"]["message"].asText()).isEqualTo(failure.message)
++            assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++            val recovery = result["cleanup"]["errors"].single { it["code"].asText() == "DEVICE_RECOVERY_REQUIRED" }
++            assertThat(recovery["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++            val gatePath = locks.resolve("${HarmonyOsSessionSupport.lockName("fixture-device")}.owner.json")
++            val gate = mapper.readTree(gatePath.toFile())
++            assertThat(gate["state"].asText()).isEqualTo("quarantined")
++            assertThat(gate["closeFailure"]["code"].asText()).isEqualTo("RECORDING_RESOURCE_CLEANUP_FAILED")
++            assertThat(gate["closeFailure"]["details"]["recordingId"].asText()).isEqualTo(marker.recordingId)
++            assertThat(gate["closeFailure"]["details"]["failureFingerprint"].asText()).isEqualTo(marker.fingerprint)
++        }
++    }
++
++    @Test
++    fun `real Orchestra handled assertion with successful recording close adds no cleanup error`() {
++        val source = directory.resolve("handled-assertion.yaml")
++        Files.writeString(source, "appId: org.example.fixture\n---\n- startRecording: failure\n- assertTrue: false\n")
++        val report = HarmonyOsCliAgentReport.create(directory.resolve("handled-report"), null, null, 1,
++            "fixture-device", setOf(source.toFile()), emptyMap())
++        val commands = YamlCommandReader.readCommands(source)
++        val bundle = Files.createDirectories(report.directory.resolve("flows/handled"))
++        val observer = report.flow(source.toFile(), bundle, commands)
++        val result = runBlocking {
++            Orchestra(recordingMaestro(null), artifactsDir = bundle, listeners = listOf(observer),
++                onCommandStart = { index, command -> observer.starting(command, index) },
++                onCommandFailed = { _, _, _ -> Orchestra.ErrorResolution.FAIL }).runFlow(commands)
++        }
++        assertThat(result.success).isFalse()
++        observer.finished(result)
++        report.finish(false)
++        val saved = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(saved["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++        assertThat(saved["cleanup"]["state"].asText()).isEqualTo("complete")
++        assertThat(saved["cleanup"]["errors"].size()).isEqualTo(0)
++    }
++
++    @Test
++    fun `bounded cyclic cleanup cause graph never claims cleanup complete`() {
++        val (report, _) = create()
++        val failure = MaestroException.AssertionFailure("original assertion", TreeNode(), "fixture")
++        val causeOne = IOException("cyclic cause one")
++        val causeTwo = IOException("cyclic cause two")
++        causeOne.initCause(causeTwo)
++        causeTwo.initCause(causeOne)
++        failure.addSuppressed(causeOne)
++        var tail: Throwable = failure
++        repeat(80) { index ->
++            val next = IOException("cleanup layer $index")
++            tail.addSuppressed(next)
++            next.addSuppressed(failure)
++            tail = next
++        }
++        tail.addSuppressed(AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "late blocker")))
++        report.finish(false, failure)
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        assertThat(result["cleanup"]["errors"].map { it["message"].asText() })
++            .containsExactly("original assertion", "cyclic cause one", "cleanup layer 0")
++        assertThat(result["cleanup"]["errors"].none { it["code"].asText() == "DEVICE_RECOVERY_REQUIRED" }).isTrue()
++    }
++
++    @Test
++    fun `suppressed recovery blocker does not replace a final error with a recovered retry assertion`() {
++        val (report, flow) = create()
++        val observer = report.flow(flow.toFile(), Files.createDirectories(report.directory.resolve("flows/recovered")))
++        val command = MaestroCommand(backPressCommand = BackPressCommand())
++        observer.starting(command)
++        observer.onCommandStart(command, 0)
++        observer.onCommandFinished(command, CommandOutcome.Failed(
++            MaestroException.AssertionFailure("earlier retry assertion", TreeNode(), "fixture")), 1, 2)
++        observer.finished(Orchestra.FlowResult(true, FlowDebugOutput(), ArtifactManifest(emptyList())))
++        val finalError = IOException("final driver close failed")
++        finalError.addSuppressed(AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "cleanup blocked")))
++
++        report.finish(false, finalError)
++
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isNotEqualTo("passed")
++        assertThat(result["error"]["message"].asText()).isEqualTo("final driver close failed")
++        assertThat(result["error"]["code"].asText()).isNotEqualTo("ASSERTION_FAILED")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        assertThat(result["cleanup"]["errors"].map { it["code"].asText() }).contains("DEVICE_RECOVERY_REQUIRED")
++    }
++
++    private fun recordingMaestro(cleanup: IOException?): Maestro = mockk(relaxed = true) {
++        coEvery { cachedDeviceInfo } returns DeviceInfo(Platform.HARMONYOS, 100, 200, 100, 200)
++        coEvery { viewHierarchy(any()) } returns ViewHierarchy(TreeNode())
++        coEvery { findAppCrash(any(), any()) } returns null
++        coEvery { takeScreenshot(any<Sink>(), any(), any()) } answers { firstArg<Sink>().close() }
++        coEvery { startScreenRecording(any()) } returns object : ScreenRecording {
++            override val startedAt: Instant = Instant.now()
++            override fun close() { cleanup?.let { throw it } }
++        }
 +    }
 +
 +    @Test
@@ -13653,7 +13903,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..b4ec944 100644
+index c388689..220a585 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -36,6 +36,7 @@ import maestro.Maestro
@@ -13730,7 +13980,7 @@ index c388689..b4ec944 100644
          val flowStartMs = System.currentTimeMillis()
          timeMsOfLastInteraction = System.currentTimeMillis()
  
-@@ -233,6 +272,9 @@ class Orchestra(
+@@ -233,9 +272,14 @@ class Orchestra(
  
          onFlowStart(commands)
          dispatch("onFlowStart") { it.onFlowStart() }
@@ -13740,15 +13990,21 @@ index c388689..b4ec944 100644
  
          var flowSuccess = false
          var exception: Throwable? = null
-@@ -248,6 +290,7 @@ class Orchestra(
++        var bodyFailure: Throwable? = null
++        var completionFailure: Throwable? = null
+         try {
+             executeDefineVariablesCommands(commands, config)
+             // After the variables: `appId: ${APP_ID}` only evaluates once they are defined.
+@@ -248,6 +292,8 @@ class Orchestra(
                      commands = it,
                      config = config,
                      shouldReinitJsEngine = false,
 +                    phase = "onFlowStart",
++                    onFailure = { bodyFailure = it },
                  )
              } ?: true
  
-@@ -256,38 +299,44 @@ class Orchestra(
+@@ -256,38 +302,51 @@ class Orchestra(
                      commands = filteredCommands,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -13756,6 +14012,7 @@ index c388689..b4ec944 100644
 -                    // close existing screen recording, if left open.
 -                    screenRecording?.close()
 -                }
++                    onFailure = { bodyFailure = it },
 +                )
              }
          } catch (e: CancellationException) {
@@ -13787,7 +14044,7 @@ index c388689..b4ec944 100644
 -            } else {
 -                true
 +            // Finish the body recording before hooks, including when a command threw.
-+            exception = closeFlowRecording(exception)
++            exception = closeFlowRecording(exception, bodyFailure)
 +            val onCompleteSuccess = try {
 +                if (exception !is CancellationException && currentCoroutineContext().isActive) {
 +                    config?.onFlowComplete?.commands?.let {
@@ -13797,6 +14054,7 @@ index c388689..b4ec944 100644
 +                                config = config,
 +                                shouldReinitJsEngine = false,
 +                                phase = "onFlowComplete",
++                                onFailure = { completionFailure = it },
 +                            )
 +                        } catch (e: CancellationException) {
 +                            // Cancellation takes precedence over flow and cleanup failures.
@@ -13806,7 +14064,12 @@ index c388689..b4ec944 100644
 +                        } catch (e: Throwable) {
 +                            // Keep collecting flow-end artifacts after a hook fails.
 +                            logger.warn("onFlowComplete hook failed: ${e.message}")
-+                            if (exception == null) exception = e
++                            val primary = exception ?: bodyFailure
++                            if (primary == null) exception = e
++                            else {
++                                if (primary !== e) primary.addSuppressed(e)
++                                exception = primary
++                            }
 +                            false
 +                        }
 +                    } ?: true
@@ -13815,11 +14078,11 @@ index c388689..b4ec944 100644
 +                }
 +            } finally {
 +                // A completion hook can start its own recording.
-+                exception = closeFlowRecording(exception)
++                exception = closeFlowRecording(exception, bodyFailure ?: completionFailure)
              }
  
              jsEngine.close()
-@@ -297,6 +346,8 @@ class Orchestra(
+@@ -297,6 +356,8 @@ class Orchestra(
  
              dispatch("onFlowEnd") { it.onFlowEnd() }
  
@@ -13828,18 +14091,21 @@ index c388689..b4ec944 100644
              // A failed flow whose app crashed failed because of the crash. This is the one place the
              // crash is raised; the failing command's own error rides along.
              val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
-@@ -314,10 +365,24 @@ class Orchestra(
+@@ -314,10 +375,28 @@ class Orchestra(
          }
      }
  
-+    private fun closeFlowRecording(failure: Throwable?): Throwable? {
++    private fun closeFlowRecording(failure: Throwable?, handledFailure: Throwable? = null): Throwable? {
 +        val recording = screenRecording ?: return failure
 +        screenRecording = null
 +        try {
 +            recording.close()
 +        } catch (closeError: Throwable) {
-+            if (failure == null) return closeError
-+            if (failure !== closeError) failure.addSuppressed(closeError)
++            // FAIL callbacks normally return a failed result. Promote their original
++            // error only when recording cleanup also fails and must be thrown.
++            val primary = failure ?: handledFailure ?: return closeError
++            if (primary !== closeError) primary.addSuppressed(closeError)
++            return primary
 +        }
 +        return failure
 +    }
@@ -13850,10 +14116,11 @@ index c388689..b4ec944 100644
          shouldReinitJsEngine: Boolean = true,
 +        phase: String = "body",
 +        scopeOwner: Int? = executingCommands.lastOrNull()?.context?.executionSequence,
++        onFailure: (Throwable) -> Unit = {},
      ): Boolean {
          if (shouldReinitJsEngine) {
              initJsEngine(config)
-@@ -333,11 +398,7 @@ class Orchestra(
+@@ -333,11 +412,7 @@ class Orchestra(
                  // Check for pause before executing each command
                  flowController.waitIfPaused()
  
@@ -13866,7 +14133,17 @@ index c388689..b4ec944 100644
  
                  jsEngine.onLogMessage { msg ->
                      val metadata = getMetadata(command)
-@@ -402,6 +463,7 @@ class Orchestra(
+@@ -396,12 +471,16 @@ class Orchestra(
+                     dispatchFinished(command, CommandOutcome.Failed(e), sequenceNumber)
+                     val errorResolution = onCommandFailed(index, command, e)
+                     when (errorResolution) {
+-                        ErrorResolution.FAIL -> return false
++                        ErrorResolution.FAIL -> {
++                            onFailure(e)
++                            return false
++                        }
+                         ErrorResolution.CONTINUE -> {} // Do nothing
+                     }
                  } finally {
                      insights.unregisterListener(callback)
                  }
@@ -13874,7 +14151,7 @@ index c388689..b4ec944 100644
              }
          return true
      }
-@@ -989,29 +1051,60 @@ class Orchestra(
+@@ -989,29 +1068,60 @@ class Orchestra(
  
      private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
          val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
@@ -13951,7 +14228,7 @@ index c388689..b4ec944 100644
      }
  
      private fun updateMetadata(rawCommand: MaestroCommand, metadata: CommandMetadata) {
-@@ -1042,8 +1135,45 @@ class Orchestra(
+@@ -1042,8 +1152,45 @@ class Orchestra(
      ) {
          val finishedAt = System.currentTimeMillis()
          val startedAt = commandStartTimes.remove(sequenceNumber) ?: finishedAt
@@ -13999,7 +14276,7 @@ index c388689..b4ec944 100644
          }
      }
  
-@@ -1144,7 +1274,10 @@ class Orchestra(
+@@ -1144,7 +1291,10 @@ class Orchestra(
          return true
      }
  
@@ -14011,7 +14288,7 @@ index c388689..b4ec944 100644
          jsEngine.enterScope()
          subflowDepth++
  
-@@ -1152,13 +1285,8 @@ class Orchestra(
+@@ -1152,13 +1302,8 @@ class Orchestra(
              commands
                  .mapIndexed { index, command ->
                      yield()
@@ -14027,7 +14304,7 @@ index c388689..b4ec944 100644
                          try {
                              // Script evaluation is part of running the command, so keep it inside the
                              // guarded block: a parse error (e.g. a bad numeric field) then reports a
-@@ -1205,6 +1333,7 @@ class Orchestra(
+@@ -1205,6 +1350,7 @@ class Orchestra(
                              }
                          }
                      }
@@ -14035,7 +14312,7 @@ index c388689..b4ec944 100644
                  }
                  .any { it }
          } finally {
-@@ -1229,7 +1358,7 @@ class Orchestra(
+@@ -1229,7 +1375,7 @@ class Orchestra(
              val onCompleteSuccess: Boolean
              try {
                  val onStartSuccess = subflowConfig?.onFlowStart?.commands?.let {
@@ -14044,7 +14321,7 @@ index c388689..b4ec944 100644
                  } ?: true
  
                  if (onStartSuccess) {
-@@ -1242,7 +1371,7 @@ class Orchestra(
+@@ -1242,7 +1388,7 @@ class Orchestra(
              } finally {
                  onCompleteSuccess = if (currentCoroutineContext().isActive) {
                      subflowConfig?.onFlowComplete?.commands?.let {
@@ -14053,7 +14330,7 @@ index c388689..b4ec944 100644
                      } ?: true
                  } else {
                      true
-@@ -1337,9 +1466,12 @@ class Orchestra(
+@@ -1337,9 +1483,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -14069,7 +14346,7 @@ index c388689..b4ec944 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1871,7 +2003,8 @@ class Orchestra(
+@@ -1871,7 +2020,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
@@ -14792,10 +15069,10 @@ index 0000000..225a604
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
 new file mode 100644
-index 0000000..c60d840
+index 0000000..94fc56a
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRecordingCleanupTest.kt
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,345 @@
 +package maestro.harmonyos
 +
 +import com.google.common.truth.Truth.assertThat
@@ -14812,6 +15089,9 @@ index 0000000..c60d840
 +import maestro.orchestra.AssertConditionCommand
 +import maestro.orchestra.MaestroCommand
 +import maestro.orchestra.Orchestra
++import maestro.orchestra.debug.CommandOutcome
++import maestro.orchestra.debug.ExecutionTraceEnd
++import maestro.orchestra.debug.OrchestraListener
 +import maestro.orchestra.yaml.YamlCommandReader
 +import maestro.utils.FileAccessScope
 +import maestro.utils.TempFileHandler
@@ -14854,6 +15134,148 @@ index 0000000..c60d840
 +    }
 +
 +    @Test
++    fun `FAIL callback still returns false when recording cleanup succeeds`() {
++        withFlow(failureResolution = Orchestra.ErrorResolution.FAIL) { flow ->
++            val result = runBlocking { flow.orchestra.runFlow(flow.commands) }
++            assertThat(result.success).isFalse()
++            assertThat(flow.commandFailures.single()).isInstanceOf(MaestroException.AssertionFailure::class.java)
++            assertThat(flow.commandFailures.single().suppressed).isEmpty()
++            assertThat(flow.traceEnds.single().error).isNull()
++            assertThat(flow.traceEnds.single().success).isFalse()
++            assertThat(flow.listenerFailures.single()).isSameInstanceAs(flow.commandFailures.single())
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `FAIL callback preserves the assertion when recording cleanup also fails`() {
++        val cleanup = IOException("recording stop failed")
++        withFlow(stopFailure = cleanup, failureResolution = Orchestra.ErrorResolution.FAIL) { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(failure).isSameInstanceAs(flow.commandFailures.single())
++            assertThat(failure.suppressed).asList().containsExactly(cleanup)
++            assertThat(flow.listenerFailures.single()).isSameInstanceAs(failure)
++            assertThat(flow.traceEnds.single().error).isSameInstanceAs(failure)
++            assertThat(flow.device.stopCalls).isEqualTo(1)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `completion FAIL still returns false when its recording cleanup succeeds`() {
++        withFlow(failureResolution = Orchestra.ErrorResolution.FAIL, yaml = completionRecordingFlow(bodyFails = false)) { flow ->
++            val result = runBlocking { flow.orchestra.runFlow(flow.commands) }
++            assertThat(result.success).isFalse()
++            assertThat(flow.commandFailures).hasSize(1)
++            assertThat(flow.commandFailures.single().suppressed).isEmpty()
++            assertThat(flow.traceEnds.single().error).isNull()
++            assertThat(flow.traceEnds.single().success).isFalse()
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `completion FAIL retains its original assertion when its recording cleanup fails`() {
++        val cleanup = IOException("completion recording stop failed")
++        withFlow(stopFailure = cleanup, failureResolution = Orchestra.ErrorResolution.FAIL,
++            yaml = completionRecordingFlow(bodyFails = false)) { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(failure).isSameInstanceAs(flow.commandFailures.single())
++            assertThat(failure.suppressed).asList().containsExactly(cleanup)
++            assertThat(flow.traceEnds.single().error).isSameInstanceAs(failure)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `body FAIL remains primary when completion also fails and cannot close its recording`() {
++        val cleanup = IOException("completion recording stop failed")
++        withFlow(stopFailure = cleanup, failureResolution = Orchestra.ErrorResolution.FAIL,
++            yaml = completionRecordingFlow(bodyFails = true)) { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(flow.commandFailures).hasSize(2)
++            assertThat(failure).isSameInstanceAs(flow.commandFailures[0])
++            assertThat(failure).isNotSameInstanceAs(flow.commandFailures[1])
++            assertThat(failure.suppressed).asList().containsExactly(cleanup)
++            assertThat(flow.traceEnds.single().error).isSameInstanceAs(failure)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `body FAIL remains primary when completion throws and its recording cleanup also fails`() {
++        val hookFailure = IllegalStateException("completion input failed")
++        val cleanup = IOException("completion recording stop failed")
++        withFlow(stopFailure = cleanup, failureResolution = Orchestra.ErrorResolution.FAIL,
++            completionCommandFailure = hookFailure, yaml = """
++                appId: org.example.harmonyos.flowfixture
++                onFlowComplete:
++                  - startRecording: completion-failure
++                  - inputText: fixture
++                ---
++                - assertTrue: false
++            """) { flow ->
++            val failure = assertThrows<MaestroException.AssertionFailure> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(flow.commandFailures).hasSize(2)
++            assertThat(failure).isSameInstanceAs(flow.commandFailures[0])
++            val observedHookFailure = flow.commandFailures[1]
++            // Coroutine stack recovery can copy the IO-thread exception, retaining its cause.
++            assertThat(generateSequence(observedHookFailure) { it.cause }.any { it === hookFailure }).isTrue()
++            assertThat(failure.suppressed).asList().containsExactly(observedHookFailure, cleanup).inOrder()
++            assertThat(flow.traceEnds.single().error).isSameInstanceAs(failure)
++            assertOutputClosed(flow.device.output)
++        }
++    }
++
++    @Test
++    fun `recovered retry does not turn its earlier assertion into a recording cleanup failure`() {
++        for (cleanup in listOf(null, IOException("recording stop after successful retry failed"))) {
++            withFlow(stopFailure = cleanup, failureResolution = Orchestra.ErrorResolution.FAIL, yaml = """
++                appId: org.example.harmonyos.flowfixture
++                ---
++                - startRecording: before-retry
++                - evalScript: ${'$'}{output.retryAttempt = 0}
++                - retry:
++                    maxRetries: 2
++                    commands:
++                      - assertTrue: ${'$'}{++output.retryAttempt > 1}
++            """) { flow ->
++                if (cleanup == null) {
++                    assertThat(runBlocking { flow.orchestra.runFlow(flow.commands) }.success).isTrue()
++                    assertThat(flow.traceEnds.single().error).isNull()
++                    assertThat(flow.traceEnds.single().success).isTrue()
++                } else {
++                    val failure = assertThrows<IOException> { runBlocking { flow.orchestra.runFlow(flow.commands) } }
++                    assertThat(generateSequence<Throwable>(failure) { it.cause }.any { it === cleanup }).isTrue()
++                    assertThat(flow.traceEnds.single().error).isSameInstanceAs(cleanup)
++                    assertThat(cleanup.suppressed).isEmpty()
++                }
++                assertThat(flow.commandFailures).hasSize(1)
++                assertThat(flow.commandFailures.single()).isInstanceOf(MaestroException.AssertionFailure::class.java)
++                assertThat(flow.commandFailures.single().suppressed).isEmpty()
++                assertOutputClosed(flow.device.output)
++            }
++        }
++    }
++
++    private fun completionRecordingFlow(bodyFails: Boolean) = """
++        appId: org.example.harmonyos.flowfixture
++        onFlowComplete:
++          - startRecording: completion-failure
++          - assertTrue: false
++        ---
++        - assertTrue: ${!bodyFails}
++    """
++
++    @Test
 +    fun `cancellation closes the recording and retains cancellation when cleanup fails`() {
 +        val cancelled = CancellationException("flow cancelled")
 +        val cleanupFailure = IOException("recording stop failed")
@@ -14878,18 +15300,21 @@ index 0000000..c60d840
 +    private fun withFlow(
 +        stopFailure: IOException? = null,
 +        cancellation: CancellationException? = null,
++        failureResolution: Orchestra.ErrorResolution? = null,
++        completionCommandFailure: Throwable? = null,
++        yaml: String = """
++            appId: org.example.harmonyos.flowfixture
++            ---
++            - startRecording: before-failure
++            - assertVisible: never-present
++        """,
 +        block: (FlowFixture) -> Unit,
 +    ) = TempFileHandler().use { temporary ->
 +        val root = temporary.createTempDirectory("harmonyos-recording-cleanup-").toPath()
 +        val workspace = Files.createDirectory(root.resolve("workspace"))
 +        val artifacts = Files.createDirectory(root.resolve("artifacts"))
 +        val flowFile = workspace.resolve("recording-failure.yaml")
-+        Files.writeString(flowFile, """
-+            appId: org.example.harmonyos.flowfixture
-+            ---
-+            - startRecording: before-failure
-+            - assertVisible: never-present
-+        """.trimIndent())
++        Files.writeString(flowFile, yaml.trimIndent())
 +
 +        val transport = SimulatedHarmonyOSDevice()
 +        val device = RecordingDevice(
@@ -14898,6 +15323,7 @@ index 0000000..c60d840
 +                HdcClient(executablePath = "simulated-hdc", runner = transport),
 +            ),
 +            stopFailure,
++            completionCommandFailure,
 +        )
 +        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(
 +            abilityName = "EntryAbility",
@@ -14908,29 +15334,51 @@ index 0000000..c60d840
 +        ))
 +        driver.open()
 +        fun runFixture() {
-+            Maestro(driver).use { maestro ->
++            val maestro = Maestro(driver)
++            var fixtureFailure: Throwable? = null
++            try {
 +                val scope = FileAccessScope.under(workspace)
 +                val commands = YamlCommandReader.readCommands(flowFile, scope)
 +                val commandFailures = mutableListOf<Throwable>()
++                val listenerFailures = mutableListOf<Throwable>()
++                val traceEnds = mutableListOf<ExecutionTraceEnd>()
 +                val orchestra = Orchestra(
 +                    maestro = maestro,
 +                    artifactsDir = artifacts,
 +                    lookupTimeoutMs = 0,
 +                    optionalLookupTimeoutMs = 0,
 +                    scope = scope,
++                    listeners = listOf(object : OrchestraListener {
++                        override fun onCommandFinished(cmd: MaestroCommand, outcome: CommandOutcome, startedAt: Long, finishedAt: Long) {
++                            if (outcome is CommandOutcome.Failed) listenerFailures += outcome.error
++                        }
++                        override fun onExecutionTraceEnd(end: ExecutionTraceEnd) { traceEnds += end }
++                    }),
 +                    onCommandStart = { _, command ->
 +                        if (cancellation != null && command.asCommand() is AssertConditionCommand) throw cancellation
 +                    },
 +                    onCommandFailed = { _, _, failure ->
 +                        commandFailures += failure
-+                        throw failure
++                        if (completionCommandFailure != null && failure !is MaestroException) throw failure
++                        failureResolution ?: throw failure
 +                    },
 +                )
-+                block(FlowFixture(device, orchestra, commands, commandFailures))
++                block(FlowFixture(device, orchestra, commands, commandFailures, listenerFailures, traceEnds))
++            } catch (error: Throwable) {
++                fixtureFailure = error
++                throw error
++            } finally {
++                try {
++                    if (stopFailure == null || device.stopCalls == 0) maestro.close()
++                    else assertThat(assertThrows<IOException> { maestro.close() }).isSameInstanceAs(stopFailure)
++                } catch (closeError: Throwable) {
++                    val original = fixtureFailure
++                    if (original == null) throw closeError
++                    if (original !== closeError) original.addSuppressed(closeError)
++                }
 +            }
 +        }
-+        if (stopFailure == null) runFixture()
-+        else assertThat(assertThrows<IOException> { runFixture() }).isSameInstanceAs(stopFailure)
++        runFixture()
 +        assertThat(device.stopCalls).isEqualTo(1)
 +        assertThat(transport.remoteFiles).isEmpty()
 +    }
@@ -14938,9 +15386,16 @@ index 0000000..c60d840
 +    private class RecordingDevice(
 +        delegate: HarmonyOSDevice,
 +        private val stopFailure: IOException?,
++        private val completionCommandFailure: Throwable?,
 +    ) : HarmonyOSDevice by delegate {
++        private val delegate = delegate
 +        lateinit var output: Sink
 +        var stopCalls = 0
++
++        override fun execute(arguments: List<String>, timeout: Duration): String {
++            if (arguments.take(3) == listOf("uitest", "uiInput", "text")) completionCommandFailure?.let { throw it }
++            return delegate.execute(arguments, timeout)
++        }
 +
 +        override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording {
 +            output = out
@@ -14959,6 +15414,8 @@ index 0000000..c60d840
 +        val orchestra: Orchestra,
 +        val commands: List<MaestroCommand>,
 +        val commandFailures: List<Throwable>,
++        val listenerFailures: List<Throwable>,
++        val traceEnds: List<ExecutionTraceEnd>,
 +    )
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRetryTraceIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSRetryTraceIntegrationTest.kt
