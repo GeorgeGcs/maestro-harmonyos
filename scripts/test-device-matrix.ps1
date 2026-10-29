@@ -154,6 +154,28 @@ function ConvertTo-MatrixMarkdown {
     return ([string]$Value).Replace('|', '\|').Replace("`r", ' ').Replace("`n", ' ')
 }
 
+function Read-MatrixAgentResult {
+    param($Run)
+    $document = Get-Content -LiteralPath $Run.runResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $data = $document.data
+    if ($document.protocol -ne 'maestro.harmonyos.agent' -or $document.schemaVersion -ne 1 -or $document.kind -ne 'runResult' -or
+        $data.runId -cne $Run.runId -or $data.attemptId -cne $Run.attemptId -or $data.attemptNo -ne $Run.round -or
+        $data.deviceId -cne $Run.deviceId -or
+        $data.status -notin @('passed', 'failed', 'blocked', 'cancelled', 'unknown') -or -not $data.endedAt) {
+        throw 'The agent result does not confirm a terminal outcome for this attempt.'
+    }
+    if ($data.status -eq 'passed' -and ($null -ne $data.error -or $Run.cliExitCode -ne 0)) {
+        throw 'Agent result and CLI exit disagree; inspect the retained artifacts.'
+    }
+    if ($data.status -ne 'passed' -and $null -eq $data.error) { throw 'The unsuccessful agent result has no typed error.' }
+    $Run.agentStatus = $data.status
+    $Run.agentError = $data.error
+    $Run.cleanup = $data.cleanup
+    $Run.effects = $data.effects
+    $Run.evidenceIndexPath = $data.artifacts.evidenceIndexPath
+    return $data
+}
+
 function Write-MatrixText {
     param([string]$Path, [string]$Text)
     $temporaryPath = $Path + '.tmp'
@@ -170,6 +192,9 @@ function Write-MatrixReport {
         planned = $report.runs.Count
         passed = @($report.runs | Where-Object { $_.status -eq 'passed' }).Count
         failed = @($report.runs | Where-Object { $_.status -eq 'failed' }).Count
+        blocked = @($report.runs | Where-Object { $_.status -eq 'blocked' }).Count
+        cancelled = @($report.runs | Where-Object { $_.status -eq 'cancelled' }).Count
+        unknown = @($report.runs | Where-Object { $_.status -eq 'unknown' }).Count
         notRun = @($report.runs | Where-Object { $_.status -eq 'not-run' }).Count
         running = @($report.runs | Where-Object { $_.status -eq 'running' }).Count
         pending = @($report.runs | Where-Object { $_.status -eq 'pending' }).Count
@@ -179,7 +204,7 @@ function Write-MatrixReport {
     $markdown = [Collections.Generic.List[string]]::new()
     $markdown.Add('# HarmonyOS device matrix')
     $markdown.Add('')
-    $markdown.Add('Status: ' + $report.status + '. Planned: ' + $report.summary.planned + '; passed: ' + $report.summary.passed + '; failed: ' + $report.summary.failed + '; not run: ' + $report.summary.notRun + '.')
+    $markdown.Add('Status: ' + $report.status + '. Planned: ' + $report.summary.planned + '; passed: ' + $report.summary.passed + '; failed: ' + $report.summary.failed + '; blocked: ' + $report.summary.blocked + '; cancelled: ' + $report.summary.cancelled + '; unknown: ' + $report.summary.unknown + '; not run: ' + $report.summary.notRun + '.')
     $markdown.Add('')
     $markdown.Add('Every row is a planned invocation, not an automatic retry. Manual intervention is unknown until reviewed. Unsupported or unexecuted work is never counted as passed. A successful Flow does not establish support for commands it did not run.')
     $markdown.Add('')
@@ -216,6 +241,7 @@ try {
     if (-not (Test-Path -LiteralPath $hdc -PathType Leaf) -or [IO.Path]::GetExtension($hdc) -ine '.exe') { throw 'HDC must point to a native .exe file.' }
     $artifactsRoot = if ($Artifacts) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Artifacts) } else { Join-Path $projectRoot 'artifacts/device-matrix' }
     $matrixDirectory = Join-Path $artifactsRoot ('matrix-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
+    $agentDirectory = Join-Path $matrixDirectory 'agent'
     $null = [IO.Directory]::CreateDirectory($matrixDirectory)
     $flowFiles = if ($flowItem.PSIsContainer) { @(Get-ChildItem -LiteralPath $flowItem.FullName -Recurse -File | Where-Object { $_.Extension -in @('.yaml', '.yml', '.js') } | Sort-Object FullName) } else { @($flowItem) }
     $hashes = @($flowFiles | ForEach-Object { [ordered]@{ path = $_.FullName; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
@@ -239,9 +265,12 @@ try {
     }
     for ($deviceIndex = 0; $deviceIndex -lt $DeviceIds.Count; $deviceIndex++) {
         $key = 'device-' + ($deviceIndex + 1).ToString('00')
-        $report.devices += [ordered]@{ key = $key; id = $DeviceIds[$deviceIndex]; info = $null }
+        $logicalRunId = [guid]::NewGuid().ToString()
+        $report.devices += [ordered]@{ key = $key; id = $DeviceIds[$deviceIndex]; info = $null; runId = $logicalRunId }
         for ($round = 1; $round -le $Repeat; $round++) {
-            $report.runs += [ordered]@{ deviceKey = $key; round = $round; status = 'pending'; startedAt = $null; finishedAt = $null; cliExitCode = $null; reason = $null; manualIntervention = 'unknown'; artifactDirectory = (Join-Path $matrixDirectory ($key + '/round-' + $round.ToString('000'))); log = $null; screen = $null }
+            $report.runs += [ordered]@{ deviceKey = $key; round = $round; status = 'pending'; startedAt = $null; finishedAt = $null; cliExitCode = $null; reason = $null; manualIntervention = 'unknown'; artifactDirectory = (Join-Path $matrixDirectory ($key + '/round-' + $round.ToString('000'))); log = $null; screen = $null
+                runId = $logicalRunId; attemptId = [guid]::NewGuid().ToString(); deviceId = $DeviceIds[$deviceIndex]; agentStatus = $null; agentError = $null; runResultPath = $null; evidenceIndexPath = $null; cleanup = $null; effects = $null }
+            $report.runs[-1].runResultPath = Join-Path $agentDirectory ('runs/' + $logicalRunId + '/' + $report.runs[-1].attemptId + '/result.json')
         }
     }
     Write-Output ('Matrix artifacts: ' + $matrixDirectory)
@@ -265,20 +294,26 @@ try {
             $run.log = Join-Path $run.artifactDirectory 'runner.log'
             $run.status = 'running'; $run.startedAt = Get-MatrixTimestamp
             Write-MatrixReport
-            $parameters = @{ FlowPath = $flowItem.FullName; BundleId = $BundleId; AbilityName = $AbilityName; DeviceId = $device.id; Env = $Env; Artifacts = $run.artifactDirectory }
+            $parameters = @{ FlowPath = $flowItem.FullName; BundleId = $BundleId; AbilityName = $AbilityName; DeviceId = $device.id; Env = $Env; Artifacts = $run.artifactDirectory; AgentRoot = $agentDirectory; RunId = $run.runId; AttemptId = $run.attemptId; AttemptNo = $run.round }
             if ($PSBoundParameters.ContainsKey('Module')) { $parameters.Module = $Module }
             try {
                 $global:LASTEXITCODE = $null
                 & $runner @parameters *> $run.log
                 $run.cliExitCode = $LASTEXITCODE
                 if ($null -eq $run.cliExitCode) { throw 'The runner did not report an exit code.' }
-                $run.status = if ($run.cliExitCode -eq 0) { 'passed' } else { 'failed' }
-                if ($run.status -eq 'failed') { $run.reason = 'Runner returned nonzero; inspect runner.log and Maestro artifacts. Unsupported operations remain failures.' }
+                $agentResult = Read-MatrixAgentResult $run
+                $run.status = $agentResult.status
+                if ($null -ne $agentResult.error) { $run.reason = $agentResult.error.kind + '/' + $agentResult.error.code + ': ' + $agentResult.error.message }
+                if ($agentResult.cleanup.state -ne 'complete' -or $agentResult.status -eq 'unknown') {
+                    $deviceUnavailable = 'The previous attempt did not confirm safe handoff. Remaining rounds require device/session inspection and were not run.'
+                }
             } catch [OperationCanceledException] { throw } catch {
-                $run.status = 'failed'; $run.reason = $_.Exception.Message
+                $run.status = 'unknown'; $run.agentStatus = 'unknown'; $run.reason = $_.Exception.Message
+                $deviceUnavailable = 'The previous invocation has no confirmed outcome and cleanup. Remaining rounds were not run.'
             } finally {
                 $run.finishedAt = Get-MatrixTimestamp
-                $run.screen = Get-MatrixScreen $run.artifactDirectory
+                $screenDirectory = Split-Path -Parent $run.runResultPath
+                $run.screen = Get-MatrixScreen $(if (Test-Path -LiteralPath $screenDirectory -PathType Container) { $screenDirectory } else { $run.artifactDirectory })
                 Write-MatrixReport
             }
         }
@@ -292,7 +327,7 @@ try {
     if ($null -ne $report) {
         foreach ($run in $report.runs) {
             if ($run.status -eq 'running') {
-                $run.status = 'failed'; $run.reason = 'Matrix execution was interrupted while this round was running; its outcome is unknown.'; $run.finishedAt = Get-MatrixTimestamp
+                $run.status = 'unknown'; $run.agentStatus = 'unknown'; $run.reason = 'Matrix execution was interrupted while this round was running; its outcome is unknown.'; $run.finishedAt = Get-MatrixTimestamp
             } elseif ($run.status -eq 'pending') {
                 $run.status = 'not-run'; $run.reason = 'Matrix execution was interrupted before this round started.'; $run.finishedAt = Get-MatrixTimestamp
             }

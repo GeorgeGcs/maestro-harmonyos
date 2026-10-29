@@ -117,13 +117,16 @@ $env:RUNNER_CONFIG_MARKER = 'loaded'
         Assert-Test ($captured[$index] -ceq $expectedPrefix[$index]) ('Unexpected argument at index ' + $index)
     }
     $firstArtifacts = $captured[9]
-    $expectedTail = @('-e', 'APP_ID=org.example.launcher', '-e', 'EMPTY=', '-e', ('INPUT_TEXT=' + $argumentValue), '-e', ('MULTILINE=' + $multilineValue), $flowPath)
+    $expectedTail = @('-e', 'APP_ID=org.example.launcher', '-e', 'EMPTY=', '-e', ('INPUT_TEXT=' + $argumentValue), '-e', ('MULTILINE=' + $multilineValue),
+        '--harmonyos-agent-output', (Join-Path $parameters.Artifacts 'agent'), '--harmonyos-run-id', $captured[21], '--harmonyos-attempt-id', $captured[23], '--harmonyos-attempt-no', '1', $flowPath)
     Assert-Test ($captured.Count -eq 10 + $expectedTail.Count) 'The argument count changed.'
     for ($index = 0; $index -lt $expectedTail.Count; $index++) {
         Assert-Test ($captured[$index + 10] -ceq $expectedTail[$index]) ('Argument text was not preserved at index ' + ($index + 10) + ': actual=' + $captured[$index + 10] + '; expected=' + $expectedTail[$index])
     }
     Assert-Test (Test-Path -LiteralPath $firstArtifacts -PathType Container) 'The artifact directory was not created.'
-    Assert-Test (@(Get-ChildItem -LiteralPath $firstArtifacts -Force).Count -eq 0) 'The launcher wrote parameter files into the artifact directory.'
+    $invocation = Get-Content -LiteralPath (Join-Path $firstArtifacts 'invocation.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($invocation.agentStatus -eq 'unknown' -and $invocation.cliExitCode -eq 0) 'Missing typed results were treated as confirmed success.'
+    Assert-Test ($invocation.runId -ceq $captured[21] -and $invocation.attemptId -ceq $captured[23]) 'Invocation identifiers changed before CLI launch.'
     $passed++
 
     Assert-Test ($env:MAESTRO_HARMONYOS_ABILITY -ceq 'caller-ability') 'Ability environment was not restored.'
@@ -137,8 +140,17 @@ $env:RUNNER_CONFIG_MARKER = 'loaded'
     Assert-Test ($failedExit -eq 37) 'The CLI exit code was not preserved.'
     $secondCapture = Read-Capture $capturePath
     Assert-Test ($secondCapture[9] -cne $firstArtifacts) 'Two invocations shared an artifact directory.'
-    Assert-Test (@(Get-ChildItem -LiteralPath $secondCapture[9] -Force).Count -eq 0) 'Failed CLI execution retained launcher files.'
+    $failedInvocation = Get-Content -LiteralPath (Join-Path $secondCapture[9] 'invocation.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($failedInvocation.cliExitCode -eq 37 -and $failedInvocation.agentStatus -eq 'unknown') 'Missing typed failures were guessed from the exit code.'
     Assert-Test ($env:MAESTRO_HARMONYOS_ABILITY -ceq 'caller-ability') 'Failure did not restore the environment.'
+    Assert-Test ($secondCapture[19] -ceq $captured[19]) 'Random invocation directories bypass the stable attempt registry.'
+    $parameters.RunId = $captured[21]
+    $parameters.AttemptId = $captured[23]
+    & $fixtureRunner @parameters | Out-Null
+    $duplicateCapture = Read-Capture $capturePath
+    Assert-Test ($duplicateCapture[19] -ceq $captured[19] -and $duplicateCapture[21] -ceq $captured[21] -and $duplicateCapture[23] -ceq $captured[23]) 'Resubmission changed the attempt identity or registry root.'
+    $parameters.Remove('RunId')
+    $parameters.Remove('AttemptId')
     $passed++
 
     $env:RUNNER_CAPTURE_EXIT = '0'

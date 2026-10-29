@@ -6,7 +6,11 @@ param(
     [Alias('ModuleName')][string]$Module,
     [string]$DeviceId,
     [hashtable]$Env = @{},
-    [Alias('ArtifactsRoot')][string]$Artifacts
+    [Alias('ArtifactsRoot')][string]$Artifacts,
+    [string]$AgentRoot,
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$RunId = [guid]::NewGuid().ToString(),
+    [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$AttemptId = [guid]::NewGuid().ToString(),
+    [ValidateRange(1, 2147483647)][int]$AttemptNo = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,6 +19,7 @@ $originalLocation = Get-Location
 $originalEnvironment = [Environment]::GetEnvironmentVariables('Process')
 $runProcess = $null
 $runExitCode = 1
+$invocation = $null
 
 function ConvertTo-WindowsArgument {
     param([AllowEmptyString()][string]$Value)
@@ -124,6 +129,8 @@ try {
     $runName = 'harmonyos-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N')
     $artifactDirectory = Join-Path $artifactsRoot $runName
     $artifactDirectory = [IO.Path]::GetFullPath($artifactDirectory)
+    $agentDirectory = if ($AgentRoot) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($AgentRoot) } else { Join-Path $artifactsRoot 'agent' }
+    $agentDirectory = [IO.Path]::GetFullPath($agentDirectory)
     # Keep the installed launcher's classpath, main class and default JVM option.
     # Start Java directly so cmd.exe and .bat do not re-parse Flow parameters.
     $arguments = [System.Collections.Generic.List[string]]::new()
@@ -141,6 +148,8 @@ try {
         $arguments.Add('-e')
         $arguments.Add($key + '=' + [string]$Env[$key])
     }
+    foreach ($value in @('--harmonyos-agent-output', $agentDirectory, '--harmonyos-run-id', $RunId,
+        '--harmonyos-attempt-id', $AttemptId, '--harmonyos-attempt-no', [string]$AttemptNo)) { $arguments.Add($value) }
     $arguments.Add($resolvedFlow)
 
     # Windows JDK 17 can replace characters outside its native code page with '?'
@@ -155,6 +164,12 @@ try {
         }
     }
     $null = [IO.Directory]::CreateDirectory($artifactDirectory)
+    $invocation = [ordered]@{
+        runId = $RunId; attemptId = $AttemptId; attemptNo = $AttemptNo; cliExitCode = $null
+        runResultPath = (Join-Path $agentDirectory ('runs/' + $RunId + '/' + $AttemptId + '/result.json'))
+        agentStatus = 'pending'; reason = $null
+    }
+    [IO.File]::WriteAllText((Join-Path $artifactDirectory 'invocation.json'), ($invocation | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
     Write-Output ('Artifacts: ' + $artifactDirectory)
     $runProcess = [Diagnostics.Process]::new()
     $runProcess.StartInfo.FileName = $javaExecutable
@@ -201,6 +216,22 @@ try {
             if (-not $runProcess.HasExited) { $runProcess.Kill(); $null = $runProcess.WaitForExit(5000) }
         } catch { }
         $runProcess.Dispose()
+    }
+    if ($null -ne $invocation) {
+        $invocation.cliExitCode = $runExitCode
+        try {
+            $summary = Get-Content -LiteralPath $invocation.runResultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($summary.protocol -ne 'maestro.harmonyos.agent' -or $summary.schemaVersion -ne 1 -or $summary.kind -ne 'runResult' -or
+                $summary.data.runId -cne $RunId -or $summary.data.attemptId -cne $AttemptId -or
+                $summary.data.status -notin @('passed', 'failed', 'blocked', 'cancelled', 'unknown')) { throw 'No matching terminal agent result.' }
+            if ($summary.data.status -eq 'passed' -and $runExitCode -ne 0) { throw 'CLI exit does not confirm the stored result for this invocation.' }
+            $invocation.agentStatus = $summary.data.status
+        } catch {
+            $invocation.agentStatus = 'unknown'
+            $invocation.reason = 'The CLI did not produce a matching terminal agent result. Inspect the retained artifacts; the exit code is preserved.'
+        }
+        [IO.File]::WriteAllText((Join-Path $artifactDirectory 'invocation.json'), ($invocation | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+        Write-Output ('Agent result: ' + $invocation.runResultPath + ' (' + $invocation.agentStatus + ')')
     }
     $currentEnvironment = [Environment]::GetEnvironmentVariables('Process')
     foreach ($name in $currentEnvironment.Keys) {

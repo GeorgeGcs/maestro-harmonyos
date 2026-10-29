@@ -26,7 +26,7 @@ VSCode 的“操作录制”记录通过插件发出的动作，不监听手机�
 | 了解实现、接手开发或扩展命令 | [开发设计文档](docs/development-design.md)：模块职责、执行过程、数据转换、会话与错误处理 |
 | 查看工具参数、环境配置和录屏限制 | [环境与运行参考](docs/setup.md) |
 | 使用或开发 VSCode 插件 | [插件说明](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md) |
-| 为智能体调用接入做准备 | [智能体调用协议 v1](docs/agent-protocol.md)：共用标识、状态、JSON Schema 与两批实现范围；新接口尚未实现 |
+| 接入智能体或自动化调用方 | [智能体调用协议 v1](docs/agent-protocol.md)：环境查询、取消交接、统一结果和步骤证据；需重新构建本仓库 CLI |
 | 按多台设备或多轮执行同一流程 | [逐台验证说明](docs/device-matrix.md) |
 | 为项目贡献代码 | [贡献说明](CONTRIBUTING.md)、[主机测试说明](host-tests/README.md) |
 

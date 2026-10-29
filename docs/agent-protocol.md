@@ -2,7 +2,9 @@
 
 更新日期：2026-10-29。本文确定能力查询、运行结果、失败证据和取消交接的共同约定，供执行端与调用方实现。
 
-**当前状态：协议规范，运行接口尚未实现。** 现有 CLI、VSCode 及[录制协议](recorder-protocol.md)仍按原方式工作。下面的 `agent.*` 方法不能直接用于当前分发包；[JSON Schema](protocol/agent-v1.schema.json)和[示例](protocol/examples)用于实现与校验，不是设备测试结果。
+**当前状态：两批接口已接入源码。** 重新构建本仓库的 CLI 后，`harmonyos-bridge` 提供下面十个 `agent.*` 方法；CLI Flow 和设备矩阵可输出相同格式的结果与证据索引。现有 VSCode 继续使用[原录制协议](recorder-protocol.md)。[JSON Schema](protocol/agent-v1.schema.json)和[示例](protocol/examples)用于格式校验，实际验证范围见[进展记录](progress/2026-10-29.md)。
+
+本版不把 HDC 客户端被中断当成手机端命令已经停止。动作已派发但设备端清理无法确认时，结果保留 `effects=possible`、`cleanup.state=unknown`，会话不会返回 `handoffReady=true`。调用方应先检查设备与残留任务，再重新建立会话；不能因取消请求成功而自动重跑。
 
 ## 1. 版本与通信
 
@@ -110,8 +112,8 @@ v1 的字段、枚举和语义保持固定。新增字段或枚举时更新 Sche
 | `assertion` | `ASSERTION_FAILED` |
 | `timeout` | `OPERATION_TIMEOUT` |
 | `cancelled` | `CANCELLED` |
-| `transport` | `DEVICE_DISCONNECTED`、`EXECUTOR_LOST` |
-| `internal` | `INTERNAL_ERROR`、`CLEANUP_FAILED` |
+| `transport` | `DEVICE_DISCONNECTED`、`DEVICE_COMMAND_FAILED`、`HDC_ERROR`、`EXECUTOR_LOST` |
+| `internal` | `INTERNAL_ERROR`、`CLEANUP_FAILED`、`CANCELLATION_NOT_CONFIRMED` |
 
 不能确认设备确实未授权或锁屏时，使用 `PRECONDITION_UNKNOWN`，不能凭连接失败猜测具体原因。协商前收到的旧桥接错误可能只有 `code/message`；只有协商成功的新方法才适用完整的新错误约定。
 
@@ -168,7 +170,7 @@ sequenceDiagram
 
 接管方仍须实际获取同一设备锁。上一会话已经释放，不保证中间没有其他进程取得设备；`handoffReady` 不是对下一调用方的独占预约。设备文件锁也不能阻止手机上的手工触摸或外部 HDC 操作。
 
-当前桥接在执行动作时同步阻塞读取。实现新协议时必须让状态、取消与释放请求在动作执行中仍可处理；仅在现有同步分支里增加 `cancel` 方法不符合本规范。新动作入口采用登记后立即返回、后续查询结果的方式，控制请求与执行工作分离，设备动作仍严格串行。
+`agent.*` 的控制读取与设备工作线程分离，状态、取消与释放请求在动作执行中仍可处理。新动作入口登记后立即返回，调用方继续查询结果；设备动作严格串行。原五方法保持同步行为，只有新入口提供执行期间的取消查询。
 
 ## 6. 结果与证据文件
 
@@ -236,3 +238,24 @@ Get-ChildItem ./docs/protocol/examples -Filter '*.json' -File | ForEach-Object {
 ```
 
 调用方使用支持 JSON Schema 2020-12 的校验器并启用日期时间格式校验。Schema 不能核实真实文件、设备副作用或资源释放，这些仍须由执行端的实现和测试证明。
+
+## 9. 接入当前实现
+
+启动重新构建的 CLI，并保持标准输入打开：
+
+```powershell
+$cli = './.upstream/maestro/maestro-cli/build/install/maestro/bin/maestro.bat'
+& $cli --platform harmonyos harmonyos-bridge
+```
+
+每行写一条 JSON 请求。标准输出只有协议消息，诊断写标准错误；异步请求可乱序返回，按 `id` 匹配。先发 `agent.describe`，再用明确的本地设备标识调用 `agent.preflight`。预检不启动应用：当前会查询 HDC 连接、设备锁、UITest 路径和可选的应用/模块/Ability 元数据。无法可靠读取的锁屏状态为 `unknown`；录屏还要求显式启用实验后端，工具存在不代表录屏成功。
+
+预检返回后，调用方仍须明确决定是否执行。`agent.connect` 成功意味着取得会话；只有会话为 `idle` 才能抓快照或提交动作。点击节点使用同会话的新快照，参数沿用[原动作格式](recorder-protocol.md)。每次执行先生成 `runId`、`attemptId` 和序号，收到登记结果后轮询 `agent.result`。响应丢失时查询原尝试，不能换一个传输 `id` 重发动作。
+
+`artifactsDir` 使用稳定的本地绝对目录。登记在 `<artifactsDir>/runs/<runId>/<attemptId>/`，同一输出根下的跨进程登记使用文件锁。相同标识再次提交会被拒绝；主动更换输出根意味着另一份登记空间，调用方不能用换目录规避查重。`agent.result/evidence` 查询本进程已通过 `agent.connect` 配置过的输出根；尚未配置时可直接读取该目录的结果文件。恢复读到失去执行进程的未完成尝试时，保留 `unknown`，不自动续跑。
+
+一次尝试包含 `input.json`、`result.json`、`evidence-index.json`、`agent-manifest.json`；已生成的 Flow 另存 `flow.yaml`，执行层的原 manifest、日志、截图和命令记录继续留在各自 bundle。`state.json` 是内部原子检查点，供恢复读取一致的结果与索引；调用方依赖公开结果文件及协议字段，不修改登记文件。读取 `available` 证据时，再核对相对路径和 SHA-256。
+
+完整 YAML 使用 CLI `test`，通过 `--harmonyos-agent-output` 指定稳定输出根，可同时传 `--harmonyos-run-id`、`--harmonyos-attempt-id` 和 `--harmonyos-attempt-no`。使用 [run-harmonyos.ps1](../scripts/run-harmonyos.ps1) 时默认启用，`RunId`、`AttemptId`、`AttemptNo` 对应这些参数；结果路径由每次调用的 `invocation.json` 给出。重试保留 `RunId`，生成新 `AttemptId` 并递增 `AttemptNo`，输入和设备保持一致。修改流程、配置或设备时创建新任务。
+
+当前实现对已派发的修改操作保守记录 `possible`，没有仅凭退出码宣称业务副作用已经验证。错误类别依据实际异常类型；无法取得截图或布局时索引明确记为缺失，不能保证每次失败都能从离线设备取回图片。CLI 由拥有它的调用方取消，强制结束进程可能只留下未完成记录；未确认清理时仍不能直接接管。

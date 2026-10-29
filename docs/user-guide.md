@@ -281,4 +281,12 @@ try {
 | 返回后流程失败 | `back` 是设备返回键；按应用的真实导航行为调整步骤，不能假设所有页面都只关闭键盘 |
 | 不支持的命令失败 | 对照上表删改测试或补充适配；不要用忽略错误把未实现步骤记为通过 |
 
+## 自动化调用方读取结果
+
+`run-harmonyos.ps1` 默认生成[智能体协议 v1](agent-protocol.md)的运行摘要和证据索引。控制台会输出 `Agent result:`，本次调用目录的 `invocation.json` 同时保存结果路径和原 CLI 退出码。结果登记默认放在 `Artifacts/agent/runs/<runId>/<attemptId>/`；使用 `AgentRoot` 可以指定另一处稳定目录。保持同一登记根，重复提交相同尝试才会被识别并拒绝。
+
+摘要的 `status` 区分通过、失败、环境阻塞、取消和未知；`error.kind/code` 给出错误分类。`failedStepId` 对应 `evidence-index.json` 中的步骤，截图、布局、日志和命令记录都有实际路径或明确的缺失说明。先保留这次结果，再决定是否重试；重试使用新 `AttemptId`，同一任务的 `AttemptNo` 递增。修改 Flow、设备或配置时使用新的 `RunId`。
+
+调用方需要交互控制设备时，使用桥接的 `agent.describe/preflight` 查询能力与条件，再连接并操作。取消回执只表示请求已收到，必须等会话 `handoffReady=true` 后才启动另一个执行入口。手机端命令或清理无法确认时会保留未知状态，不能自动当作安全接管。完整请求顺序、字段和本版边界见[协议接入说明](agent-protocol.md#9-接入当前实现)。
+
 提问题时提供本仓提交、构建方式、主机与设备系统版本、最小 YAML、实际退出码和脱敏日志。不要直接附设备序列号、真实账号、签名文件或私人页面截图。参与开发前阅读[贡献说明](../CONTRIBUTING.md)和[开发设计](development-design.md)。新增内容按 [Apache-2.0](../LICENSE) 开源，上游和第三方声明见 [THIRD_PARTY.md](../THIRD_PARTY.md)。

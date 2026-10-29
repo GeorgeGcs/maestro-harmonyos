@@ -1,10 +1,12 @@
 [CmdletBinding()]
-param()
+param([string]$TestArtifactsRoot)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $source = Join-Path $projectRoot 'scripts/test-device-matrix.ps1'
-$testParent = Join-Path $projectRoot 'artifacts/matrix-tests'
+# Keep UUID attempt bundles below Windows PowerShell 5.1's file API path limit.
+# Script and Flow inputs still exercise Unicode and spaces in the separate fixture tree.
+$testParent = if ($TestArtifactsRoot) { [IO.Path]::GetFullPath($TestArtifactsRoot) } else { Join-Path ([IO.Path]::GetTempPath()) 'mh-matrix' }
 $testRoot = Join-Path $testParent ([guid]::NewGuid().ToString('N').Substring(0, 12))
 $utf8 = [Text.UTF8Encoding]::new($false)
 $savedEnvironment = [Environment]::GetEnvironmentVariables('Process')
@@ -45,7 +47,7 @@ try {
     Copy-Item -LiteralPath $source -Destination $matrixScript
     $flowFile = Join-Path $fixture 'input flow.yaml'
     $stateFile = Join-Path $fixture 'state.json'
-    $outputDirectory = Join-Path $fixture 'output space'
+    $outputDirectory = Join-Path $testRoot 'output space'
     $inputText = $unicodeText + ' O''Reilly "quoted" C:\path with spaces\'
     Write-TestFile $flowFile "appId: org.example.matrix`n---`n- launchApp`n"
     Write-TestFile (Join-Path $fixture 'fakehdc.exe') 'Not executed; native commands are mocked by the fixture config.'
@@ -94,18 +96,29 @@ function Invoke-MatrixNative {
 '@
     Write-TestFile (Join-Path $fixture 'config.local.ps1') $configuration
     $runnerFixture = @'
-param([string]$FlowPath, [string]$BundleId, [string]$AbilityName, [string]$Module, [string]$DeviceId, [hashtable]$Env, [string]$Artifacts)
+param([string]$FlowPath, [string]$BundleId, [string]$AbilityName, [string]$Module, [string]$DeviceId, [hashtable]$Env, [string]$Artifacts, [string]$AgentRoot, [string]$RunId, [string]$AttemptId, [int]$AttemptNo)
 $state = Get-Content -LiteralPath $env:MATRIX_FIXTURE_STATE -Raw -Encoding UTF8 | ConvertFrom-Json
 $state.calls = @($state.calls) + @([ordered]@{ device = $DeviceId; flow = $FlowPath; bundle = $BundleId; ability = $AbilityName; module = $Module; env = $Env; artifacts = $Artifacts })
 [IO.File]::WriteAllText($env:MATRIX_FIXTURE_STATE, ($state | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
 if ($state.scenario -eq 'cancel') { throw [OperationCanceledException]::new('fixture cancelled') }
-$captureDirectory = Join-Path $Artifacts 'cli-artifacts/takeScreenshot'
+$resultDirectory = Join-Path $AgentRoot ('runs/' + $RunId + '/' + $AttemptId)
+$captureDirectory = Join-Path $resultDirectory 'takeScreenshot'
 $null = [IO.Directory]::CreateDirectory($captureDirectory)
 [IO.File]::WriteAllBytes((Join-Path $captureDirectory 'screen.png'), [Convert]::FromBase64String('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII='))
 Write-Output ('Artifacts: ' + $captureDirectory)
+$status = 'passed'; $error = $null; $exitCode = 0
+if ($state.scenario -eq 'failure' -and $state.calls.Count -eq 2) { $status = 'failed'; $error = @{ kind = 'assertion'; code = 'ASSERTION_FAILED'; message = 'fixture assertion' }; $exitCode = 37 }
+if ($state.scenario -eq 'unsupported') { $status = 'failed'; $error = @{ kind = 'unsupported'; code = 'UNSUPPORTED_COMMAND'; message = 'fixture unsupported' }; $exitCode = 2 }
+if ($state.scenario -in @('blocked', 'cancelled', 'unknown')) { $status = $state.scenario; $error = @{ kind = 'environment'; code = 'PRECONDITION_UNKNOWN'; message = 'fixture terminal state' }; $exitCode = 9 }
+$null = [IO.Directory]::CreateDirectory($resultDirectory)
+$document = @{ protocol = 'maestro.harmonyos.agent'; schemaVersion = 1; kind = 'runResult'; observedAt = [DateTime]::UtcNow.ToString('o'); revision = 1
+    data = @{ runId = $RunId; attemptId = $AttemptId; attemptNo = $AttemptNo; deviceId = $DeviceId; status = $status; error = $error; endedAt = [DateTime]::UtcNow.ToString('o'); cleanup = @{ state = 'complete'; errors = @() }; effects = 'none'; artifacts = @{ evidenceIndexPath = 'evidence-index.json' } } }
+if ($state.scenario -eq 'cleanup-unknown') { $document.data.cleanup.state = 'unknown' }
+if ($state.scenario -eq 'cleanup-failed') { $document.data.cleanup.state = 'failed'; $document.data.cleanup.errors = @(@{ kind = 'internal'; code = 'CLEANUP_FAILED'; message = 'fixture cleanup' }) }
+if ($state.scenario -ne 'missing-result') { [IO.File]::WriteAllText((Join-Path $resultDirectory 'result.json'), ($document | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false)) }
 if ($state.scenario -eq 'failure' -and $state.calls.Count -eq 2) { Write-Output 'fixture failed'; exit 37 }
 if ($state.scenario -eq 'unsupported') { Write-Output 'operation not supported'; exit 2 }
-exit 0
+exit $exitCode
 '@
     Write-TestFile (Join-Path $fixtureScripts 'run-harmonyos.ps1') $runnerFixture
 
@@ -169,7 +182,23 @@ exit 0
 
     $result = Invoke-Fixture 'cancel' -Rounds 2
     Assert-Test ($result.ExitCode -eq 1 -and $result.Report.status -eq 'interrupted') 'Cancellation did not interrupt the matrix.'
-    Assert-Test ($result.Report.summary.failed -eq 1 -and $result.Report.summary.notRun -eq 3 -and $result.State.calls.Count -eq 1) 'Cancellation lost the current round or ran pending work.'
+    Assert-Test ($result.Report.summary.unknown -eq 1 -and $result.Report.summary.failed -eq 0 -and $result.Report.summary.notRun -eq 3 -and $result.State.calls.Count -eq 1) 'Cancellation lost the current round or claimed a confirmed failure.'
+    $passed++
+
+    foreach ($scenario in @('blocked', 'cancelled', 'unknown', 'missing-result')) {
+        $result = Invoke-Fixture $scenario -Targets @('fixture-a')
+        $expected = if ($scenario -eq 'missing-result') { 'unknown' } else { $scenario }
+        Assert-Test ($result.ExitCode -eq 1 -and $result.Report.runs[0].status -eq $expected) 'Structured outcome was not preserved.'
+        Assert-Test ($result.Report.summary.failed -eq 0 -and $result.Report.summary.passed -eq 0) 'Unconfirmed execution was counted as a test failure or pass.'
+        Assert-Test ($result.Report.runs[0].cliExitCode -eq $(if ($scenario -eq 'missing-result') { 0 } else { 9 })) 'Original CLI exit was changed.'
+    }
+    $passed++
+
+    foreach ($scenario in @('cleanup-unknown', 'cleanup-failed', 'unknown', 'missing-result')) {
+        $result = Invoke-Fixture $scenario -Targets @('fixture-a') -Rounds 3
+        Assert-Test ($result.ExitCode -eq 1 -and $result.State.calls.Count -eq 1 -and $result.Report.summary.notRun -eq 2) 'A device was reused before safe handoff was confirmed.'
+        Assert-Test ($result.Report.runs[1].reason -match 'not run') 'The handoff block was not explained.'
+    }
     $passed++
 
     $result = Invoke-Fixture 'pass' -Targets @('fixture-a', 'fixture-a')
