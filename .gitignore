@@ -36,3 +36,6 @@ Thumbs.db
 # Personal device/config files
 device.local.json
 config.local.*
+
+# Local working notes
+/.local/
