@@ -130,7 +130,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     write(reportPath, audit);
     if (ready && params.sessionId === sessionId) { cleanup = 'complete'; sessionRevision++; }
     respond(id, 'recoveryReport', { ...report, cleanup: { state: ready ? 'complete' : 'unknown', errors: [] }, handoffReady: ready,
-      reportPath, reportSha256: mode === 'cancel-bad-report-hash' ? '0'.repeat(64) : sha(fs.readFileSync(reportPath)) });
+      reportPath, reportSha256: mode === 'cancel-bad-report-hash' ? '0'.repeat(64) : sha(fs.readFileSync(reportPath)) }, 0,
+      mode === 'recovery-needed-delayed' ? 250 : 0);
   } else error(id, 'UNKNOWN_METHOD');
 }).on('close', () => { process.exitCode = connected && cleanup !== 'complete' ? 1 : 0; });
 write(path.join(root, 'ready'), 'ready');

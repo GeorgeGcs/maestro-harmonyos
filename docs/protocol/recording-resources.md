@@ -26,7 +26,7 @@ Test-Json -Json (Get-Content -LiteralPath './artifacts/video-check/verification.
 | `remotePath` | 当前 generation 的 `files/recording-<UUID>.mp4`，只用于本资源的导出 |
 | `startRequested`、`stopRequested` | 相应操作派发前已经登记意图，不代表设备已执行 |
 | `startAcknowledged`、`ownerPid` | 启动已确认，并记录所属采集进程 |
-| `captureEnded` | 已持久登记捕获结束事实；达到时长限制也可能结束，因此不强制要求 `stopRequested=true` |
+| `captureEnded` | 驱动或受控恢复入口已持久登记捕获结束事实；达到时长限制也可能结束，因此不强制要求 `stopRequested=true` |
 | `uri` | 查询确认的本次系统媒体 URI，文件名必须与资源身份对应 |
 | `archives` | 按归档顺序保存的所有原件版本，包含相对文件名、字节数、SHA-256 |
 | `archiveName`、`archiveSize`、`archiveSha256` | 最近一次归档，三项必须同时为空或同时有值，并与 `archives` 最后一项一致 |
@@ -37,6 +37,8 @@ Test-Json -Json (Get-Content -LiteralPath './artifacts/video-check/verification.
 原件位于所属会话的 `recording-originals/`。名称为 `<resourceId>-<archive UUID>.mp4`，单份最多 1 GiB。媒体内容变化时保留所有版本，后续恢复仍需核验每份归档。`clean` 只描述资源，不代表视频能完整解码。
 
 资源登记和不可变快照使用同一结构。Schema 可以拒绝“已结束但未确认启动”或“已删除但无归档”等矛盾；它不能比较 `id` 与文件名、识别不同对象重复 ID、确认最新归档与历史一致、读取归档字节或判断实际路径是否经过目录联接。这些检查由驱动和客户端执行。
+
+恢复入口只为已确认启动的资源补查结束状态，条件见[恢复说明](../recording-diagnostics.md#通过已有恢复入口解除占用)。v1 的 `captureEnded` 仍是受信任写入者保存的事实，内部 v2 凭据通过快照哈希固定该事实；该字段不是供外部消费者独立重放设备查询的原始证据。首次归档或发现新版本时返回未知，后续显式恢复再做独立比较，资源格式不变。
 
 ## 内部恢复凭据
 

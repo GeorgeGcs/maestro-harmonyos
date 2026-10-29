@@ -3402,10 +3402,10 @@ index b79b107..7a38dd6 100644
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..a4df5ed
+index 0000000..3232cc5
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,469 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -3589,11 +3589,11 @@ index 0000000..a4df5ed
 +        ownerId: String,
 +        hdc: HdcClient = HdcClient(),
 +        lockDirectory: Path = HarmonyOsSessionSupport.defaultLockDirectory(),
-+        timeout: Duration = Duration.ofSeconds(10),
++        timeout: Duration = Duration.ofSeconds(30),
 +    ): RecoveryOutcome {
 +        validateDevice(deviceId)
 +        HarmonyOsAgentProtocol.uuid(ownerId, "sessionId")
-+        require(timeout > Duration.ZERO && timeout <= Duration.ofSeconds(10)) { "Recovery timeout must be within ten seconds." }
++        require(timeout > Duration.ZERO && timeout <= Duration.ofSeconds(30)) { "Recovery timeout must be within thirty seconds." }
 +        return HarmonyOsSessionSupport.withDeviceLock(deviceId, lockDirectory) {
 +            val directory = lockDirectory.toAbsolutePath().normalize()
 +            val gate = readGate(directory, deviceId) ?: throw AgentProtocolException(AgentError(
@@ -3617,22 +3617,29 @@ index 0000000..a4df5ed
 +                if (journal.deviceId != deviceId || journal.ownerId != ownerId) {
 +                    throw invalidMetadata("The resource journal does not belong to the gated device session.", ownerId)
 +                }
-+                val readiness = journal.recover(hdc, remaining(), cleanupResources = false)
-+                val resources = journal.recordings
-+                if (readiness.issues.any { it.code != "OWNED_RESOURCES_REMAIN" }) return@use readiness
-+                val recordingIssues = resources?.recover(hdc, journal, remaining()).orEmpty().toMutableList()
-+                if (resources != null && resources.isComplete() && !resources.verifyArchives(remaining())) {
-+                    recordingIssues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "A preserved recording original is absent or changed.")
++                try {
++                    val readiness = journal.recover(hdc, remaining(), cleanupResources = false)
++                    val resources = journal.recordings
++                    if (readiness.issues.any { it.code != "OWNED_RESOURCES_REMAIN" }) return@use readiness
++                    val recordingIssues = resources?.recover(hdc, journal, remaining()).orEmpty().toMutableList()
++                    if (resources != null && resources.isComplete() && !resources.verifyArchives(remaining())) {
++                        recordingIssues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "A preserved recording original is absent or changed.")
++                    }
++                    if (recordingIssues.isNotEmpty()) return@use journal.snapshot().let { current ->
++                        current.copy(state = "unknown", issues = (current.issues + recordingIssues).distinct())
++                    }
++                    if (resources?.isComplete() == true) {
++                        val closeResolved = resolvedRecordingFailure(gate.closeFailure, resources)
++                        resolvedGate = gate.copy(unresolvedRecording = false,
++                            closeFailure = if (closeResolved) null else gate.closeFailure)
++                    }
++                    journal.recover(hdc, remaining())
++                } catch (error: HdcTimeoutException) {
++                    // A deadline can expire between phases, before the next journal call can record it.
++                    val current = journal.snapshot()
++                    current.copy(state = "unknown", issues = (current.issues + RecoveryIssue(
++                        "RECOVERY_QUERY_FAILED", "The shared recovery deadline expired; resource release remains unconfirmed.")).distinct())
 +                }
-+                if (recordingIssues.isNotEmpty()) return@use journal.snapshot().let { current ->
-+                    current.copy(state = "unknown", issues = (current.issues + recordingIssues).distinct())
-+                }
-+                if (resources?.isComplete() == true) {
-+                    val closeResolved = resolvedRecordingFailure(gate.closeFailure, resources)
-+                    resolvedGate = gate.copy(unresolvedRecording = false,
-+                        closeFailure = if (closeResolved) null else gate.closeFailure)
-+                }
-+                journal.recover(hdc, remaining())
 +            }
 +            val issues = observed.issues.toMutableList()
 +            // A command completion record cannot resolve an unrelated driver/recording close failure.
@@ -6411,6 +6418,541 @@ index 0000000..002a0ab
 +        }
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt
+new file mode 100644
+index 0000000..1f6e5e3
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt
+@@ -0,0 +1,253 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.cli.session.HarmonyOsRecoverySupport
++import maestro.cli.session.HarmonyOsSessionLease
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import java.io.FileOutputStream
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++
++/** Test-only JVM entry point. All HDC commands terminate in FakeHdcRunner; no executable is invoked. */
++object HarmonyOsRecoveryProcessFixture {
++    const val DEVICE = "process-recovery-fixture"
++    val mapper = jacksonObjectMapper()
++    private val video = "A retained byte-for-byte original; decoding is outside this recovery fixture.".toByteArray()
++
++    enum class Scenario { ENDED, START_UNCONFIRMED, CAPTURE_ACTIVE, ARCHIVE_MISSING, ARCHIVE_TAMPERED }
++
++    @JvmStatic fun main(arguments: Array<String>) {
++        require(arguments.size == 4)
++        val root = Path.of(arguments[1]).toAbsolutePath().normalize()
++        val owner = UUID.fromString(arguments[2]).toString()
++        val scenario = Scenario.valueOf(arguments[3])
++        when (arguments[0]) {
++            "hold" -> hold(root, owner, scenario)
++            "recover" -> recover(root, owner, scenario)
++            else -> error("Unknown fixture mode")
++        }
++    }
++
++    private fun hold(root: Path, owner: String, scenario: Scenario) {
++        HarmonyOsSessionSupport.withDeviceLock(DEVICE, root) {
++            val lease = HarmonyOsSessionLease.begin(DEVICE, owner, root, requiresRecordingCleanup = true)
++            val resource = lease.journal.allocateRecording()
++            val uri = "file://media/Photo/123/VID_123/${resource.fileName}"
++            val source = root.resolve("original-bytes.mp4")
++            Files.write(source, video)
++            resource.starting()
++            if (scenario != Scenario.START_UNCONFIRMED) resource.started(51)
++            if (scenario != Scenario.START_UNCONFIRMED && scenario != Scenario.CAPTURE_ACTIVE) {
++                resource.stopping()
++                resource.ended()
++                resource.media(uri)
++                resource.archive(source)
++            }
++            val archive = resource.latestArchive()?.let { lease.journal.path.parent.resolve("recording-originals").resolve(it.name) }
++            if (scenario == Scenario.ARCHIVE_MISSING) Files.delete(checkNotNull(archive))
++            if (scenario == Scenario.ARCHIVE_TAMPERED) Files.write(checkNotNull(archive), "changed retained bytes".toByteArray())
++
++            val remote = FakeHdcRunner(uri, resource.remotePath, source, scenario == Scenario.CAPTURE_ACTIVE)
++            // A real tracked finite call persists its acknowledgement and returned/stopped host call.
++            HdcHarmonyOSDevice(DEVICE, HdcClient("fixture-hdc", remote).withRecoveryJournal(lease.journal))
++                .execute(listOf("hidumper", "-s", "3002", "-a", "-h"), Duration.ofSeconds(2))
++            lease.journal.seal()
++            val attempt = HarmonyOsAgentAttemptStore(root.resolve("attempts")).register(
++                UUID.randomUUID().toString(), UUID.randomUUID().toString(), 1, owner, DEVICE, "action",
++                mapper.readTree("{\"type\":\"back\"}"),
++            )
++            attempt.markRunning()
++            attempt.setCleanup("unknown", listOf(AgentError("environment", "DEVICE_RECOVERY_REQUIRED",
++                "The retained recording needs recovery.", mapOf("recoverySessionId" to owner))))
++            attempt.finishWithError(AgentError("assertion", "ASSERTION_FAILED", "Fixture assertion remains failed."), "failed")
++            val process = ProcessHandle.current()
++            write(root.resolve("checkpoint.json"), mapOf(
++                "schemaVersion" to 1, "pid" to process.pid(),
++                "startedAt" to process.info().startInstant().orElseThrow().toString(),
++                "scenario" to scenario.name, "ownerId" to owner, "deviceId" to DEVICE,
++                "journalPath" to lease.journal.path.toString(), "resourceId" to resource.id,
++                "uri" to uri, "remotePath" to resource.remotePath,
++                "sourcePath" to source.toString(), "sourceSha256" to digest(source),
++                "archivePath" to archive?.toString(), "archiveExists" to (archive != null && Files.exists(archive)),
++                "archiveObservedSha256" to archive?.takeIf { Files.exists(it) }?.let(::digest),
++                "resultPath" to attempt.directory.resolve("result.json").toString(),
++                "resultSha256" to digest(attempt.directory.resolve("result.json")),
++                "runId" to attempt.runId, "attemptId" to attempt.attemptId,
++            ))
++            // Deliberately no lease.finish/journal.close: the parent must prove OS process death.
++            check(CountDownLatch(1).await(120, TimeUnit.SECONDS)) { "Parent did not terminate its fixture within the deadline" }
++        }
++    }
++
++    private fun recover(root: Path, owner: String, scenario: Scenario) {
++        val checkpoint = json(root.resolve("checkpoint.json"))
++        val remote = FakeHdcRunner(checkpoint["uri"].asText(), checkpoint["remotePath"].asText(),
++            Path.of(checkpoint["sourcePath"].asText()), scenario == Scenario.CAPTURE_ACTIVE)
++        val hdc = HdcClient("fixture-hdc", remote)
++        val outcome = HarmonyOsRecoverySupport.recover(DEVICE, owner, hdc, root)
++        val receiptBytes = Files.readAllBytes(outcome.reportPath)
++        check(digest(outcome.reportPath) == outcome.sha256)
++        val receipt = mapper.readTree(receiptBytes)
++        check(receipt["schemaVersion"].asInt() == 2 && receipt["sessionId"].asText() == owner)
++        val snapshot = Path.of(receipt["recordingResources"]["path"].asText())
++        check(digest(snapshot) == receipt["recordingResources"]["sha256"].asText())
++        write(root.resolve("gate-after-recovery.json"), json(gatePath(root)))
++        var nextOwner: String? = null
++        var rejectedCode: String? = null
++        if (outcome.complete) {
++            check(scenario == Scenario.ENDED)
++            val repeated = HarmonyOsRecoverySupport.recover(DEVICE, owner, noHdc(), root)
++            check(repeated.reportPath == outcome.reportPath && repeated.sha256 == outcome.sha256)
++            val next = UUID.randomUUID().toString()
++            nextOwner = next
++            HarmonyOsSessionSupport.withDeviceLock(DEVICE, root) {
++                HarmonyOsSessionLease.begin(DEVICE, next, root).finish(null, noHdc())
++            }
++            check(HarmonyOsSessionSupport.probeDeviceLock(DEVICE, root) == HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE)
++        } else {
++            try {
++                HarmonyOsSessionSupport.withDeviceLock(DEVICE, root) {
++                    HarmonyOsSessionLease.begin(DEVICE, UUID.randomUUID().toString(), root)
++                }
++                error("Unknown recovery unexpectedly permitted a new owner")
++            } catch (error: AgentProtocolException) {
++                rejectedCode = error.error.code
++                check(rejectedCode == "DEVICE_RECOVERY_REQUIRED")
++            }
++        }
++        check(Files.readAllBytes(outcome.reportPath).contentEquals(receiptBytes))
++        write(root.resolve("recovered.json"), mapOf(
++            "schemaVersion" to 1, "pid" to ProcessHandle.current().pid(),
++            "startedAt" to ProcessHandle.current().info().startInstant().orElseThrow().toString(), "ownerId" to owner,
++            "complete" to outcome.complete, "reportPath" to outcome.reportPath.toString(), "sha256" to outcome.sha256,
++            "snapshotPath" to snapshot.toString(), "snapshotSha256" to digest(snapshot),
++            "nextOwner" to nextOwner, "newOwnerRejectedCode" to rejectedCode,
++            "mediaPresent" to remote.present, "mediaDeletes" to remote.deletes, "scratchPresent" to remote.scratchPresent,
++            "receiveCount" to remote.receives, "calls" to remote.calls,
++        ))
++    }
++
++    fun gatePath(root: Path): Path = root.resolve("${HarmonyOsSessionSupport.lockName(DEVICE)}.owner.json")
++    fun json(path: Path): JsonNode = mapper.readTree(path.toFile())
++    fun digest(path: Path): String = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(path))
++        .joinToString("") { "%02x".format(it) }
++    fun noHdc(): HdcClient = HdcClient("fixture-no-hdc", HdcCommandRunner { _, _ -> error("No device command is permitted here") })
++
++    private fun write(path: Path, value: Any) {
++        val pending = path.resolveSibling("${path.fileName}.pending")
++        check(Files.notExists(path) && Files.notExists(pending))
++        FileOutputStream(pending.toFile()).use { output -> output.write(mapper.writeValueAsBytes(value)); output.fd.sync() }
++        Files.move(pending, path, StandardCopyOption.ATOMIC_MOVE)
++    }
++
++    private class FakeHdcRunner(
++        private val uri: String,
++        private val scratch: String,
++        private val source: Path,
++        private val active: Boolean,
++    ) : HdcCommandRunner {
++        var present = true
++        var scratchPresent = false
++        var deletes = 0
++        var receives = 0
++        val calls = mutableListOf<String>()
++
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            check(command.take(3) == listOf("fixture-hdc", "-t", DEVICE))
++            check(timeout > Duration.ZERO)
++            if (command.drop(3).take(2) == listOf("file", "recv")) {
++                check(command.size == 7 && command[5] == scratch && scratchPresent)
++                calls += "receive"
++                receives++
++                Files.write(Path.of(command.last()), Files.readAllBytes(source))
++                return HdcCommandResult(0, "", "")
++            }
++            check(command.size == 5 && command[3] == "shell")
++            val script = command.last()
++            var unquoted = script
++            while ("'\"'\"'" in unquoted) unquoted = unquoted.replace("'\"'\"'", "'")
++            if (unquoted.contains("'aa'")) {
++                calls += "toggle-attempt"
++                error("Recovery must not start or stop a recorder")
++            }
++            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
++            if (marker == null) {
++                val test = Regex("'test' '(-[Lef])' '([^']+)'; __maestro_recovery_status=").find(unquoted)
++                if (test != null) {
++                    check(test.groupValues[2] == scratch)
++                    val flag = test.groupValues[1]
++                    calls += "scratch-test${flag}"
++                    val exists = when (flag) {
++                        "-L" -> false
++                        "-e", "-f" -> scratchPresent
++                        else -> error("Unexpected scratch test flag")
++                    }
++                    val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)?.value
++                        ?: error("Scratch checks require a tracked completion proof")
++                    return HdcCommandResult(0, "\n$acknowledgement${if (exists) 0 else 1}\n", "")
++                }
++                check(unquoted.contains("rmdir") && unquoted.contains(scratch.substringBefore("/files/")))
++                calls += "journal-cleanup"
++                if (unquoted.contains("'$scratch'")) scratchPresent = false
++                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
++                    .findAll(script).last().value
++                return HdcCommandResult(0, nonce, "")
++            }
++            var status = 0
++            val output = when {
++                unquoted.contains("'ps' '-ef'") -> {
++                    calls += "recorder-processes"
++                    "UID PID PPID C STIME TTY TIME CMD\n" +
++                        "1000 51 1 0 00:00 ? 00:00:00 com.huawei.hmos.screenrecorder\n"
++                }
++                unquoted.contains("'hidumper' '-s' '3002' '-a' '-h'") -> {
++                    calls += "capture-state"
++                    "PlayerDistributedService\n--ScreenCaptureServer--:\n" +
++                        (if (active) "-----#0: pid = 51-----\n" else "") + "--NextSection--\n"
++                }
++                unquoted.contains("'mediatool' 'query'") -> {
++                    check(unquoted.contains(uri.substringAfterLast('/')))
++                    calls += "media-query"
++                    if (present) "find 1 result\nuri\n\"$uri\"" else { status = 255; "find 0 result" }
++                }
++                unquoted.contains("'mediatool' 'delete'") -> {
++                    check(unquoted.contains(uri) && present && !active)
++                    calls += "media-delete"; deletes++; present = false
++                    "[SUCCESS] delete success."
++                }
++                unquoted.contains("'mediatool' 'recv'") -> {
++                    check(unquoted.contains("'mediatool' 'recv' '$uri' '$scratch'") && present && !scratchPresent)
++                    calls += "media-export"
++                    scratchPresent = true
++                    "Table Name: Photos\n$scratch"
++                }
++                unquoted.contains("'rm' '-f'") -> {
++                    check(unquoted.contains("'rm' '-f' '$scratch'"))
++                    calls += "scratch-remove"; scratchPresent = false; ""
++                }
++                unquoted.contains("'stat' '-c' '%s'") -> {
++                    check(unquoted.contains("'stat' '-c' '%s' '$scratch'") && scratchPresent)
++                    calls += "scratch-size"; Files.size(source).toString()
++                }
++                else -> {
++                    calls += "unexpected-command"
++                    error("Unexpected fake command; no HDC fallback is available")
++                }
++            }
++            val ack = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)?.value
++                ?: error("Expected a tracked command")
++            return HdcCommandResult(0, "$output\n$marker$status\n\n$ack$status\n", "")
++        }
++    }
++}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessTest.kt
+new file mode 100644
+index 0000000..d1e3f7a
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessTest.kt
+@@ -0,0 +1,270 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.google.common.truth.Truth.assertThat
++import com.google.common.truth.Truth.assertWithMessage
++import maestro.cli.CliError
++import maestro.cli.harmonyos.HarmonyOsRecoveryProcessFixture.Scenario
++import maestro.cli.session.HarmonyOsRecoverySupport
++import maestro.cli.session.HarmonyOsSessionLease
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HdcException
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.Timeout
++import org.junit.jupiter.api.assertThrows
++import java.io.File
++import java.net.URLClassLoader
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Instant
++import java.util.UUID
++import java.util.concurrent.TimeUnit
++
++@Timeout(60)
++class HarmonyOsRecoveryProcessTest {
++    @Test fun `ended archived recording recovers in another JVM after its real owner process exits`() {
++        scenario(Scenario.ENDED)
++    }
++
++    @Test fun `missing start acknowledgement remains blocked after process exit`() {
++        scenario(Scenario.START_UNCONFIRMED)
++    }
++
++    @Test fun `capture still active remains blocked after process exit`() {
++        scenario(Scenario.CAPTURE_ACTIVE)
++    }
++
++    @Test fun `missing registered archive remains blocked after process exit`() {
++        scenario(Scenario.ARCHIVE_MISSING)
++    }
++
++    @Test fun `changed registered archive remains blocked after process exit`() {
++        scenario(Scenario.ARCHIVE_TAMPERED)
++    }
++
++    private fun scenario(mode: Scenario) = TempFileHandler().use { temporary ->
++        val root = temporary.createTempDirectory("harmonyos-process-recovery-").toPath().toAbsolutePath().normalize()
++        val owner = UUID.randomUUID().toString()
++        val held = start(root, owner, mode, "hold")
++        val checkpoint: JsonNode
++        val journalBefore: ByteArray
++        val gateBefore: ByteArray
++        try {
++            checkpoint = awaitCheckpoint(held, root.resolve("checkpoint.json"))
++            assertThat(checkpoint["pid"].longValue()).isEqualTo(held.pid)
++            assertThat(checkpoint["startedAt"].asText()).isEqualTo(held.startedAt.toString())
++            assertThat(checkpoint["ownerId"].asText()).isEqualTo(owner)
++            assertThat(checkpoint["scenario"].asText()).isEqualTo(mode.name)
++            val journalPath = Path.of(checkpoint["journalPath"].asText())
++            journalBefore = Files.readAllBytes(journalPath)
++            gateBefore = Files.readAllBytes(HarmonyOsRecoveryProcessFixture.gatePath(root))
++            val journal = HarmonyOsRecoveryProcessFixture.mapper.readTree(journalBefore)
++            assertThat(journal["sealed"].asBoolean()).isTrue()
++            assertThat(journal["operations"].size()).isEqualTo(1)
++            assertThat(journal["operations"].all { it["completed"].asBoolean() && !it["markerRemoved"].asBoolean() }).isTrue()
++            assertThat(journal["hostCalls"].size()).isEqualTo(1)
++            assertThat(journal["hostCalls"].all { it["returned"].asBoolean() && it["stopped"].asBoolean() }).isTrue()
++            assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root)).isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.BUSY)
++            assertThat(assertThrows<CliError> { beginAndFinish(root) }.cause).isInstanceOf(AgentProtocolException::class.java)
++            // A distinct process also owns the journal OS lock, not only a same-JVM registry entry.
++            assertThrows<HdcException> { HarmonyOSRecoveryJournal.open(journalPath).use { error("Owner lock was not held") } }
++            assertThrows<CliError> { HarmonyOsRecoverySupport.recover(device, owner, HarmonyOsRecoveryProcessFixture.noHdc(), root) }
++            assertThat(Files.readAllBytes(journalPath)).isEqualTo(journalBefore)
++            assertThat(Files.readAllBytes(HarmonyOsRecoveryProcessFixture.gatePath(root))).isEqualTo(gateBefore)
++            verifyCheckpointResource(checkpoint, mode)
++            terminateOwned(held)
++        } finally {
++            terminateOwned(held)
++        }
++
++        assertThat(held.process.isAlive).isFalse()
++        awaitDeviceLockRelease(root)
++        assertThat(Files.readAllBytes(Path.of(checkpoint["journalPath"].asText()))).isEqualTo(journalBefore)
++        assertThat(Files.readAllBytes(HarmonyOsRecoveryProcessFixture.gatePath(root))).isEqualTo(gateBefore)
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root)).isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        val denied = assertThrows<AgentProtocolException> { beginAndFinish(root) }
++        assertThat(denied.error.code).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++        assertThat(denied.error.details?.get("recoverySessionId")).isEqualTo(owner)
++        val resultBefore = Files.readAllBytes(Path.of(checkpoint["resultPath"].asText()))
++        assertThat(HarmonyOsRecoveryProcessFixture.digest(Path.of(checkpoint["resultPath"].asText())))
++            .isEqualTo(checkpoint["resultSha256"].asText())
++
++        val recovery = start(root, owner, mode, "recover")
++        try {
++            assertThat(recovery.process.waitFor(25, TimeUnit.SECONDS)).isTrue()
++            assertWithMessage(Files.readString(recovery.log)).that(recovery.process.exitValue()).isEqualTo(0)
++        } finally { terminateOwned(recovery) }
++        val outcome = json(root.resolve("recovered.json"))
++        assertThat(outcome["pid"].longValue()).isEqualTo(recovery.pid)
++        assertThat(outcome["startedAt"].asText()).isEqualTo(recovery.startedAt.toString())
++        assertThat(recovery.pid != held.pid || recovery.startedAt != held.startedAt).isTrue()
++        assertThat(outcome["ownerId"].asText()).isEqualTo(owner)
++        val receiptPath = Path.of(outcome["reportPath"].asText())
++        assertThat(HarmonyOsRecoveryProcessFixture.digest(receiptPath)).isEqualTo(outcome["sha256"].asText())
++        val receipt = json(receiptPath)
++        assertThat(receipt["schemaVersion"].asInt()).isEqualTo(2)
++        assertThat(receipt["deviceId"].asText()).isEqualTo(device)
++        assertThat(receipt["sessionId"].asText()).isEqualTo(owner)
++        assertThat(receipt["reason"].asText()).isEqualTo("recovery")
++        assertThat(receipt["previousState"].asText()).isEqualTo("active")
++        val snapshotPath = Path.of(outcome["snapshotPath"].asText())
++        assertThat(HarmonyOsRecoveryProcessFixture.digest(snapshotPath)).isEqualTo(outcome["snapshotSha256"].asText())
++        assertThat(receipt["recordingResources"]["sha256"].asText()).isEqualTo(outcome["snapshotSha256"].asText())
++        val snapshot = json(snapshotPath)
++        assertThat(snapshot["ownerId"].asText()).isEqualTo(owner)
++        assertThat(snapshot["deviceId"].asText()).isEqualTo(device)
++        assertThat(snapshot["resources"].size()).isEqualTo(1)
++        val recoveredGate = json(root.resolve("gate-after-recovery.json"))
++        assertThat(recoveredGate["ownerSessionId"].asText()).isEqualTo(owner)
++        assertThat(recoveredGate["reportSha256"].asText()).isEqualTo(outcome["sha256"].asText())
++        assertThat(recoveredGate["reportPath"].asText()).isEqualTo(receiptPath.toString())
++
++        if (mode == Scenario.ENDED) {
++            assertThat(outcome["complete"].asBoolean()).isTrue()
++            assertThat(receipt["state"].asText()).isEqualTo("complete")
++            assertThat(receipt["pendingOperations"].asInt()).isEqualTo(0)
++            assertThat(receipt["temporaryFiles"].asInt()).isEqualTo(0)
++            assertThat(receipt["issues"].size()).isEqualTo(0)
++            assertThat(receipt["unresolvedRecording"].asBoolean()).isFalse()
++            assertThat(snapshot["resources"].all { it["clean"].asBoolean() && it["mediaRemoved"].asBoolean() }).isTrue()
++            assertThat(outcome["mediaDeletes"].asInt()).isEqualTo(1)
++            assertThat(outcome["receiveCount"].asInt()).isEqualTo(1)
++            assertThat(outcome["mediaPresent"].asBoolean()).isFalse()
++            assertThat(outcome["scratchPresent"].asBoolean()).isFalse()
++            assertThat(outcome["calls"].map(JsonNode::asText)).containsAtLeast("capture-state", "media-export", "receive", "media-delete", "journal-cleanup").inOrder()
++            assertThat(outcome["calls"].map(JsonNode::asText))
++                .containsAtLeast("scratch-test-L", "scratch-test-e", "media-export", "receive", "scratch-test-L", "scratch-test-f").inOrder()
++            assertThat(recoveredGate["state"].asText()).isEqualTo("clean")
++            val nextGate = json(HarmonyOsRecoveryProcessFixture.gatePath(root))
++            assertThat(nextGate["ownerSessionId"].asText()).isEqualTo(outcome["nextOwner"].asText())
++            assertThat(nextGate["ownerSessionId"].asText()).isNotEqualTo(owner)
++            assertThat(nextGate["state"].asText()).isEqualTo("clean")
++            val nextReceipt = Path.of(nextGate["reportPath"].asText())
++            assertThat(HarmonyOsRecoveryProcessFixture.digest(nextReceipt)).isEqualTo(nextGate["reportSha256"].asText())
++            assertThat(json(nextReceipt)["reason"].asText()).isEqualTo("session_close")
++            assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root)).isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE)
++        } else {
++            assertThat(outcome["complete"].asBoolean()).isFalse()
++            assertThat(receipt["state"].asText()).isEqualTo("unknown")
++            assertThat(outcome["newOwnerRejectedCode"].asText()).isEqualTo("DEVICE_RECOVERY_REQUIRED")
++            assertThat(outcome["nextOwner"].isNull).isTrue()
++            assertThat(outcome["mediaDeletes"].asInt()).isEqualTo(0)
++            assertThat(outcome["receiveCount"].asInt()).isEqualTo(0)
++            assertThat(outcome["mediaPresent"].asBoolean()).isTrue()
++            assertThat(outcome["scratchPresent"].asBoolean()).isFalse()
++            assertThat(snapshot["resources"][0]["clean"].asBoolean()).isFalse()
++            assertThat(recoveredGate["state"].asText()).isEqualTo("quarantined")
++            val codes = receipt["issues"].map { it["code"].asText() }
++            when (mode) {
++                Scenario.START_UNCONFIRMED -> assertThat(codes).contains("RECORDING_CAPTURE_UNCONFIRMED")
++                Scenario.CAPTURE_ACTIVE -> {
++                    assertThat(codes).contains("RECORDING_CAPTURE_ACTIVE")
++                    assertThat(codes).doesNotContain("RECORDING_CAPTURE_UNCONFIRMED")
++                    // These are the recovery JVM's calls, not the original owner's checkpoint query.
++                    assertThat(outcome["calls"].map(JsonNode::asText))
++                        .containsExactly("recorder-processes", "capture-state").inOrder()
++                    val retained = snapshot["resources"][0]
++                    assertThat(retained["startAcknowledged"].asBoolean()).isTrue()
++                    assertThat(retained["captureEnded"].asBoolean()).isFalse()
++                    assertThat(retained["stopRequested"].asBoolean()).isFalse()
++                    assertThat(retained["archives"].size()).isEqualTo(0)
++                    assertThat(retained["mediaRemoved"].asBoolean()).isFalse()
++                }
++                else -> assertThat(codes).contains("RECORDING_ARCHIVE_UNCONFIRMED")
++            }
++            assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root)).isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        }
++        assertThat(Files.readAllBytes(Path.of(checkpoint["resultPath"].asText()))).isEqualTo(resultBefore)
++        assertThat(HarmonyOsRecoveryProcessFixture.digest(Path.of(checkpoint["sourcePath"].asText())))
++            .isEqualTo(checkpoint["sourceSha256"].asText())
++        if (!checkpoint["archivePath"].isNull) {
++            val archive = Path.of(checkpoint["archivePath"].asText())
++            assertThat(Files.exists(archive)).isEqualTo(checkpoint["archiveExists"].asBoolean())
++            if (Files.exists(archive)) assertThat(HarmonyOsRecoveryProcessFixture.digest(archive))
++                .isEqualTo(checkpoint["archiveObservedSha256"].asText())
++        }
++        val result = json(Path.of(checkpoint["resultPath"].asText()))["data"]
++        assertThat(result["status"].asText()).isEqualTo("failed")
++        assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++    }
++
++    private fun verifyCheckpointResource(checkpoint: JsonNode, mode: Scenario) {
++        val resource = json(Path.of(checkpoint["journalPath"].asText()).resolveSibling("recording-resources.json"))["resources"].single()
++        assertThat(resource["id"].asText()).isEqualTo(checkpoint["resourceId"].asText())
++        assertThat(resource["startRequested"].asBoolean()).isTrue()
++        assertThat(resource["clean"].asBoolean()).isFalse()
++        assertThat(resource["startAcknowledged"].asBoolean()).isEqualTo(mode != Scenario.START_UNCONFIRMED)
++        assertThat(resource["captureEnded"].asBoolean()).isEqualTo(mode !in setOf(Scenario.START_UNCONFIRMED, Scenario.CAPTURE_ACTIVE))
++        if (mode == Scenario.ENDED) {
++            assertThat(resource["uri"].asText()).isEqualTo(checkpoint["uri"].asText())
++            assertThat(resource["archives"].size()).isEqualTo(1)
++            val archive = Path.of(checkpoint["archivePath"].asText())
++            assertThat(Files.size(archive)).isEqualTo(resource["archiveSize"].longValue())
++            assertThat(HarmonyOsRecoveryProcessFixture.digest(archive)).isEqualTo(resource["archiveSha256"].asText())
++        }
++    }
++
++    private fun beginAndFinish(root: Path) = HarmonyOsSessionSupport.withDeviceLock(device, root) {
++        HarmonyOsSessionLease.begin(device, UUID.randomUUID().toString(), root).finish(null, HarmonyOsRecoveryProcessFixture.noHdc())
++    }
++
++    private fun awaitCheckpoint(child: Child, checkpoint: Path): JsonNode {
++        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
++        while (!Files.exists(checkpoint) && child.process.isAlive && System.nanoTime() < deadline) Thread.sleep(20)
++        assertWithMessage(Files.readString(child.log)).that(Files.exists(checkpoint)).isTrue()
++        assertThat(child.process.isAlive).isTrue()
++        return json(checkpoint)
++    }
++
++    private fun awaitDeviceLockRelease(root: Path) {
++        // Windows may report process termination before its file locks become observable as free.
++        // Recovery is never started while the real OS lock is still busy.
++        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
++        while (HarmonyOsSessionSupport.probeDeviceLock(device, root) == HarmonyOsSessionSupport.DeviceLockStatus.BUSY &&
++            System.nanoTime() < deadline) Thread.sleep(20)
++    }
++
++    private data class Child(val process: Process, val pid: Long, val startedAt: Instant, val log: Path)
++
++    private fun start(root: Path, owner: String, mode: Scenario, action: String): Child {
++        val paths = linkedSetOf<String>()
++        var loader: ClassLoader? = HarmonyOsRecoveryProcessFixture::class.java.classLoader
++        while (loader != null) {
++            (loader as? URLClassLoader)?.urLs?.filter { it.protocol == "file" }?.forEach { paths += Path.of(it.toURI()).toString() }
++            loader = loader.parent
++        }
++        paths += System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotBlank)
++        paths += Path.of(HarmonyOsRecoveryProcessFixture::class.java.protectionDomain.codeSource.location.toURI()).toString()
++        fun argument(value: String): String = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++        val args = root.resolve("$action-java.args")
++        Files.writeString(args, listOf("-Dfile.encoding=UTF-8", "-cp", paths.joinToString(File.pathSeparator),
++            HarmonyOsRecoveryProcessFixture::class.java.name, action, root.toString(), owner, mode.name)
++            .joinToString("\n", transform = ::argument))
++        val windows = System.getProperty("os.name").startsWith("Windows")
++        val java = Path.of(System.getProperty("java.home"), "bin", if (windows) "java.exe" else "java").toString()
++        val log = root.resolve("$action-process.log")
++        val process = ProcessBuilder(java, "@$args").redirectErrorStream(true).redirectOutput(log.toFile()).start()
++        val identity = process.info().startInstant()
++        if (identity.isEmpty) {
++            process.destroyForcibly()
++            check(process.waitFor(5, TimeUnit.SECONDS)) { "Own child could not be stopped after missing process identity" }
++            error("Child process did not expose a start time")
++        }
++        return Child(process, process.pid(), identity.get(), log)
++    }
++
++    private fun terminateOwned(child: Child) {
++        if (!child.process.isAlive) return
++        check(child.process.pid() == child.pid && child.process.info().startInstant().orElse(null) == child.startedAt) {
++            "Refusing to terminate a process whose identity changed"
++        }
++        child.process.destroyForcibly()
++        check(child.process.waitFor(5, TimeUnit.SECONDS)) { "Own child did not exit within five seconds" }
++    }
++
++    private fun json(path: Path) = HarmonyOsRecoveryProcessFixture.json(path)
++    private val device = HarmonyOsRecoveryProcessFixture.DEVICE
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt
 new file mode 100644
 index 0000000..7e8da31
@@ -6577,10 +7119,10 @@ index 0000000..7e8da31
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 new file mode 100644
-index 0000000..4f4ace8
+index 0000000..c041b93
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,481 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.node.ObjectNode
@@ -6649,6 +7191,24 @@ index 0000000..4f4ace8
 +        assertThat(repeated.sha256).isEqualTo(recovered.sha256)
 +        assertThat(gate(root)["requiresRecovery"].asBoolean()).isFalse()
 +        normalClose(root, uuid())
++    }
++
++    @Test fun `a deadline exhausted between recovery phases retains a receipt and blocks handoff`() = directory { root ->
++        val owner = uuid()
++        quarantine(root, owner)
++        val originalPath = Path.of(gate(root)["reportPath"].asText())
++        val original = Files.readAllBytes(originalPath)
++        val timedOut = HarmonyOsRecoverySupport.recover(device, owner, noHdc, root, Duration.ofNanos(1))
++        assertThat(timedOut.complete).isFalse()
++        assertThat(timedOut.report["state"]).isEqualTo("unknown")
++        assertThat(timedOut.report["issues"].toString()).contains("RECOVERY_QUERY_FAILED")
++        assertThat(Files.readAllBytes(originalPath)).isEqualTo(original)
++        assertThat(gate(root)["reportPath"].asText()).isEqualTo(timedOut.reportPath.toString())
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        val unknown = Files.readAllBytes(timedOut.reportPath)
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).complete).isTrue()
++        assertThat(Files.readAllBytes(timedOut.reportPath)).isEqualTo(unknown)
 +    }
 +
 +    @Test fun `uncertainty flag is durable before the session block returns`() = directory { root ->
@@ -6809,6 +7369,74 @@ index 0000000..4f4ace8
 +        assertThat(HarmonyOsRecoverySupport.recover(device, owner, noHdc, root).complete).isTrue()
 +    }
 +
++    @Test fun `fresh end observation preserves a first original before a later recovery can hand off`() = directory { root ->
++        val owner = uuid()
++        var uri = ""
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = true)
++            val resource = lease.journal.allocateRecording()
++            resource.starting(); resource.started(51); resource.stopping()
++            uri = "file://media/Photo/123/VID_123/${resource.fileName}"
++            val error = IllegalStateException("Stop reply was lost; original close remains failed")
++            resource.failed(error)
++            assertThrows<AgentProtocolException> { lease.finish(error, noHdc) }
++        }
++        val originalReceipt = Path.of(gate(root)["reportPath"].asText())
++        val originalBytes = Files.readAllBytes(originalReceipt)
++        val remote = RecordingRemote(uri, "first preserved original".toByteArray())
++        val hdc = HdcClient("fake", remote)
++        val first = HarmonyOsRecoverySupport.recover(device, owner, hdc, root)
++        assertThat(first.complete).isFalse()
++        assertThat(first.report["issues"].toString()).contains("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++        assertThat(remote.exports).isEqualTo(1)
++        assertThat(remote.deletes).isEqualTo(0)
++        assertThat(gate(root)["closeFailure"]["code"].asText()).isEqualTo("RECORDING_RESOURCE_CLEANUP_FAILED")
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++        val firstBytes = Files.readAllBytes(first.reportPath)
++        val snapshot = mapper.readTree(first.reportPath.toFile())["recordingResources"]
++        val recorded = mapper.readTree(Path.of(snapshot["path"].asText()).toFile())["resources"][0]
++        assertThat(recorded["captureEnded"].booleanValue()).isTrue()
++        assertThat(recorded["archives"].size()).isEqualTo(1)
++        assertThat(recorded["clean"].booleanValue()).isFalse()
++
++        val second = HarmonyOsRecoverySupport.recover(device, owner, hdc, root)
++        assertThat(second.complete).isTrue()
++        assertThat(remote.exports).isEqualTo(2)
++        assertThat(remote.deletes).isEqualTo(1)
++        assertThat(gate(root)["closeFailure"].isNull).isTrue()
++        assertThat(Files.readAllBytes(originalReceipt)).isEqualTo(originalBytes)
++        assertThat(Files.readAllBytes(first.reportPath)).isEqualTo(firstBytes)
++        normalClose(root, uuid())
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.AVAILABLE)
++    }
++
++    @Test fun `fresh media recovery cannot resolve an unrelated close error`() = directory { root ->
++        val owner = uuid()
++        var uri = ""
++        HarmonyOsSessionSupport.withDeviceLock(device, root) {
++            val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = true)
++            val resource = lease.journal.allocateRecording()
++            resource.starting(); resource.started(51)
++            uri = "file://media/Photo/123/VID_123/${resource.fileName}"
++            val error = IllegalStateException("Recording close failed")
++            resource.failed(error)
++            error.addSuppressed(IllegalStateException("Unrelated driver close failed"))
++            assertThrows<AgentProtocolException> { lease.finish(error, noHdc) }
++        }
++        val remote = RecordingRemote(uri)
++        val hdc = HdcClient("fake", remote)
++        assertThat(HarmonyOsRecoverySupport.recover(device, owner, hdc, root).complete).isFalse()
++        val second = HarmonyOsRecoverySupport.recover(device, owner, hdc, root)
++        assertThat(second.complete).isFalse()
++        assertThat(second.report["issues"].toString()).contains("DRIVER_CLEANUP_FAILED")
++        assertThat(remote.deletes).isEqualTo(1)
++        assertThat(gate(root)["closeFailure"].isNull).isFalse()
++        assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++            .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++    }
++
 +    @Test fun `recovery cannot overlap a live owner or a CLI holding the same device lock`() = directory { root ->
 +        val owner = uuid()
 +        quarantine(root, owner)
@@ -6931,6 +7559,8 @@ index 0000000..4f4ace8
 +    private class RecordingRemote(private val uri: String, private val video: ByteArray = "raw".toByteArray()) : HdcCommandRunner {
 +        var present = true
 +        var deletes = 0
++        var exports = 0
++        private var scratchPresent = false
 +        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
 +            if (command.contains("recv") && command.contains("file")) {
 +                Files.write(Path.of(command.last()), video)
@@ -6940,25 +7570,34 @@ index 0000000..4f4ace8
 +            var unquoted = script
 +            while ("'\"'\"'" in unquoted) unquoted = unquoted.replace("'\"'\"'", "'")
 +            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
-+            if (marker == null) {
++            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)?.value
++            if (marker == null && acknowledgement == null) {
 +                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
 +                return HdcCommandResult(0, nonce, "")
 +            }
 +            var status = 0
 +            val output = when {
++                unquoted.contains("'ps' '-ef'") -> "UID PID PPID C STIME TTY TIME CMD\n"
++                unquoted.contains("'test' '-L'") -> { status = 1; "" }
++                unquoted.contains("'test' '-e'") || unquoted.contains("'test' '-f'") -> {
++                    status = if (scratchPresent) 0 else 1; ""
++                }
 +                script.contains("hidumper") -> "PlayerDistributedService\n--ScreenCaptureServer--:\n--NextSection--\n"
 +                script.contains("mediatool") && script.contains("query") -> if (present) "find 1 result\nuri\n\"$uri\"" else {
 +                    status = 255; "find 0 result"
 +                }
 +                script.contains("mediatool") && script.contains("delete") -> { present = false; deletes++; "[SUCCESS] delete success." }
-+                script.contains("mediatool") && script.contains("recv") -> "Table Name: Photos\n" +
-+                    Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
-+                unquoted.contains("'rm' '-f'") -> ""
++                script.contains("mediatool") && script.contains("recv") -> {
++                    check(!scratchPresent) { "The system exporter refuses an existing destination." }
++                    scratchPresent = true; exports++
++                    "Table Name: Photos\n" + Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
++                }
++                unquoted.contains("'rm' '-f'") -> { scratchPresent = false; "" }
 +                unquoted.contains("'stat' '-c'") -> video.size.toString()
 +                else -> error("Unexpected command $command")
 +            }
-+            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)!!.value
-+            return HdcCommandResult(0, "$output\n$marker$status\n\n$acknowledgement$status\n", "")
++            val deviceOutput = if (marker == null) output else "$output\n$marker$status\n"
++            return HdcCommandResult(0, "$deviceOutput\n${checkNotNull(acknowledgement)}$status\n", "")
 +        }
 +    }
 +    private fun directory(block: (Path) -> Unit) = TempFileHandler().use { files ->
@@ -9062,10 +9701,10 @@ index 0000000..b7ea2b2
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
-index 0000000..37ca2ae
+index 0000000..f8ced01
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,453 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -9150,8 +9789,13 @@ index 0000000..37ca2ae
 +    @Synchronized fun ownsFailure(id: String, fingerprint: String): Boolean =
 +        state.resources.any { it.id == id && it.failureFingerprint == fingerprint }
 +
-+    /** G0 only: never toggles a recorder. Capture completion must already have durable evidence. */
++    /** Never toggles a recorder. Only acknowledged starts can acquire fresh capture-end evidence. */
 +    @Synchronized fun recover(hdc: HdcClient, journal: HarmonyOSRecoveryJournal, timeout: Duration): List<RecoveryIssue> {
++        if (journal.recordings !== this || journal.deviceId != state.deviceId || journal.ownerId != state.ownerId) {
++            return listOf(RecoveryIssue("RECORDING_OWNER_MISMATCH", "The recording resources do not belong to this recovery owner."))
++        }
++        val readiness = journal.snapshot().issues.filter { it.code != "OWNED_RESOURCES_REMAIN" }
++        if (readiness.isNotEmpty()) return readiness
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        fun remaining(): Duration {
 +            val left = deadline - System.nanoTime()
@@ -9162,45 +9806,70 @@ index 0000000..37ca2ae
 +        val device = HdcHarmonyOSDevice(state.deviceId, recoveryClient)
 +        val issues = mutableListOf<RecoveryIssue>()
 +        for (resource in state.resources.filterNot { it.clean }) {
++            val pending = journal.snapshot().issues.filter { it.code != "OWNED_RESOURCES_REMAIN" }
++            if (pending.isNotEmpty()) { issues += pending; break }
 +            try {
 +                if (!resource.startRequested) { resource.clean = true; persist(); continue }
-+                if (!resource.startAcknowledged || !resource.captureEnded || resource.ownerPid == null) {
-+                    issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} has no confirmed capture end; recovery never sends a stop toggle.")
++                if (!resource.startAcknowledged || resource.ownerPid == null) {
++                    issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} has no confirmed start ownership; recovery never sends a stop toggle.")
 +                    continue
++                }
++                check(journal.ownsTemporaryFile(resource.remotePath)) { "The recording scratch is not registered to this journal." }
++                val neverArchived = resource.archiveName == null && resource.archiveSize == null &&
++                    resource.archiveSha256 == null && resource.archives.isEmpty()
++                if (!neverArchived && !archiveValid(resource, deadline)) {
++                    issues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "Recording ${resource.id} has no intact retained original.")
++                    continue
++                }
++                if (!resource.captureEnded || neverArchived) {
++                    val uri = confirmEndedMedia(device, resource, ::remaining)
++                    resource.captureEnded = true
++                    resource.uri = uri
++                    persist()
++                    if (neverArchived) {
++                        preserveInitialArchive(device, recoveryClient, journal, resource, uri, deadline, ::remaining)
++                        issues += RecoveryIssue("RECORDING_ARCHIVED_RECHECK_REQUIRED", "Recording ${resource.id} was preserved; a later explicit recovery must independently compare its media before deletion.")
++                        continue
++                    }
 +                }
 +                if (!capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isEmpty()) {
 +                    issues += RecoveryIssue("RECORDING_CAPTURE_ACTIVE", "A capture is active; retained recording recovery was deferred.")
 +                    continue
 +                }
-+                // G0 requires a durable byte-for-byte archive made before retention or deletion.
-+                // An absent or changed archive cannot authorize deletion of the only device copy.
-+                if (!archiveValid(resource, deadline)) {
-+                    issues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "Recording ${resource.id} has no intact retained original.")
-+                    continue
++                val scratchPresent = scratchExists(recoveryClient, journal, resource, ::remaining)
++                if (scratchPresent) {
++                    val preserved = receiveScratch(device, recoveryClient, journal, resource, deadline, ::remaining,
++                        allowEmpty = resource.archives.any { it.size == 0L }) { local, size, hash ->
++                        val matches = resource.archives.any { it.size == size && it.sha256 == hash }
++                        if (!matches) {
++                            if (capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isNotEmpty()) throw CaptureActive()
++                            archiveResource(resource, local, deadline)
++                        }
++                        matches
++                    }
++                    if (!preserved) {
++                        issues += RecoveryIssue("RECORDING_SCRATCH_ARCHIVED_RECHECK_REQUIRED", "An unpreserved recording export was archived; a later explicit recovery must independently compare its media before cleanup.")
++                        continue
++                    }
 +                }
 +                val uri = query(device, resource, remaining())
 +                if (uri != null) {
 +                    check(uri == resource.uri) { "The retained recording URI changed." }
-+                    val unchanged = TempFileHandler().use { temporary ->
-+                        val local = temporary.createTempDirectory("maestro-recording-recovery-").toPath().resolve(resource.fileName)
-+                        // mediatool refuses an existing destination, including an export left
-+                        // by an interrupted recovery. Only this registered scratch is replaced;
-+                        // the owned media and every verified local original remain intact.
++                    if (scratchPresent) {
++                        // This exact export was received completely and matched a verified
++                        // archive above. An interrupted later export must pass that check again.
 +                        check(device.execute(listOf("rm", "-f", resource.remotePath), remaining()).isBlank()) {
 +                            "Recording export scratch removal returned unexpected output."
 +                        }
-+                        val exported = device.execute(listOf("mediatool", "recv", uri, resource.remotePath), remaining())
-+                        check(exported.lineSequence().map(String::trim).filter(String::isNotEmpty).toList() ==
-+                            listOf("Table Name: Photos", resource.remotePath)) { "Recording export was not confirmed." }
-+                        val before = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
-+                        require(before in 0..MAX_ARCHIVE_BYTES) { "Recording exceeds the recovery byte limit." }
-+                        recoveryClient.receiveFile(state.deviceId, resource.remotePath, local, remaining())
-+                        val after = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
-+                        require(Files.isRegularFile(local, LinkOption.NOFOLLOW_LINKS) && Files.size(local) <= MAX_ARCHIVE_BYTES)
-+                        val hash = digest(local, deadline)
-+                        val matches = before == after && Files.size(local) == before &&
-+                            before == resource.archiveSize && hash == resource.archiveSha256
-+                        if (!matches) archiveResource(resource, local, deadline)
++                    }
++                    exportMedia(device, resource, uri, ::remaining)
++                    val unchanged = receiveScratch(device, recoveryClient, journal, resource, deadline, ::remaining,
++                        allowEmpty = resource.archives.any { it.size == 0L }) { local, size, hash ->
++                        val matches = size == resource.archiveSize && hash == resource.archiveSha256
++                        if (!matches) {
++                            if (capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isNotEmpty()) throw CaptureActive()
++                            archiveResource(resource, local, deadline)
++                        }
 +                        matches
 +                    }
 +                    if (!unchanged) {
@@ -9213,17 +9882,104 @@ index 0000000..37ca2ae
 +                    check(deletion.trim() == "[SUCCESS] delete success.") { "Media deletion was not acknowledged." }
 +                    check(query(device, resource, remaining()) == null) { "Retained recording media still exists." }
 +                }
++                if (uri == null && capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isNotEmpty()) throw CaptureActive()
 +                resource.mediaRemoved = true
 +                persist()
 +                // Remote scratch remains in the ordinary journal until the final cleanup phase.
 +                resource.clean = true
 +                persist()
++            } catch (error: CaptureActive) {
++                issues += RecoveryIssue("RECORDING_CAPTURE_ACTIVE", error.message!!)
 +            } catch (error: Exception) {
 +                if (error is InterruptedException) Thread.currentThread().interrupt()
 +                issues += RecoveryIssue("RECORDING_RECOVERY_UNCONFIRMED", error.message ?: error.javaClass.simpleName)
 +            }
 +        }
 +        return issues
++    }
++
++    private class CaptureActive : IllegalStateException("A capture is active; recording recovery was deferred.")
++
++    private fun confirmEndedMedia(device: HdcHarmonyOSDevice, resource: Resource, remaining: () -> Duration): String {
++        fun observe(): String {
++            val processes = recorderPids(device.execute(listOf("ps", "-ef"), remaining()))
++            check(processes.isEmpty() || processes == setOf(resource.ownerPid)) { "A foreign recorder process is present." }
++            if (capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isNotEmpty()) throw CaptureActive()
++            val uri = checkNotNull(query(device, resource, remaining())) { "The owned recording media has not been found." }
++            check(resource.uri == null || resource.uri == uri) { "The retained recording URI changed." }
++            return uri
++        }
++        val uri = observe()
++        check(observe() == uri) { "Recording media identity changed during the capture-end check." }
++        return uri
++    }
++
++    private fun preserveInitialArchive(
++        device: HdcHarmonyOSDevice, client: HdcClient, journal: HarmonyOSRecoveryJournal,
++        resource: Resource, uri: String, deadline: Long, remaining: () -> Duration,
++    ) {
++        if (!scratchExists(client, journal, resource, remaining)) exportMedia(device, resource, uri, remaining)
++        receiveScratch(device, client, journal, resource, deadline, remaining) { local, _, _ ->
++            check(confirmEndedMedia(device, resource, remaining) == uri)
++            archiveResource(resource, local, deadline)
++        }
++    }
++
++    private fun scratchTest(client: HdcClient, journal: HarmonyOSRecoveryJournal, remote: String, flag: String, remaining: () -> Duration): Boolean {
++        check(journal.ownsTemporaryFile(remote)) { "Recording scratch is not registered to this journal." }
++        val result = try {
++            client.shell(state.deviceId, listOf("test", flag, remote), remaining())
++        } catch (error: HdcCommandException) {
++            if (error.confirmedRemoteExitCode != 1 || error.result.exitCode != 1 ||
++                error.result.stdout.isNotEmpty() || error.result.stderr.isNotEmpty()) throw error
++            return false
++        }
++        check(result.exitCode == 0 && result.stdout.isEmpty() && result.stderr.isEmpty()) { "Recording scratch check was not confirmed." }
++        return true
++    }
++
++    private fun scratchExists(client: HdcClient, journal: HarmonyOSRecoveryJournal, resource: Resource, remaining: () -> Duration): Boolean {
++        check(!scratchTest(client, journal, resource.remotePath, "-L", remaining)) { "Recording scratch is a symbolic link." }
++        if (!scratchTest(client, journal, resource.remotePath, "-e", remaining)) return false
++        check(scratchTest(client, journal, resource.remotePath, "-f", remaining)) { "Recording scratch is not a regular file." }
++        return true
++    }
++
++    private fun exportMedia(device: HdcHarmonyOSDevice, resource: Resource, uri: String, remaining: () -> Duration) {
++        val exported = device.execute(listOf("mediatool", "recv", uri, resource.remotePath), remaining())
++        check(exported.lineSequence().map(String::trim).filter(String::isNotEmpty).toList() ==
++            listOf("Table Name: Photos", resource.remotePath)) { "Recording export was not confirmed." }
++    }
++
++    private fun <T> receiveScratch(
++        device: HdcHarmonyOSDevice, client: HdcClient, journal: HarmonyOSRecoveryJournal,
++        resource: Resource, deadline: Long, remaining: () -> Duration, allowEmpty: Boolean = false, consume: (Path, Long, String) -> T,
++    ): T = TempFileHandler().use { temporary ->
++            val local = temporary.createTempDirectory("maestro-recording-recovery-").toPath().resolve(resource.fileName)
++            val before = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
++            require(before >= (if (allowEmpty) 0 else 1) && before <= MAX_ARCHIVE_BYTES) { "Recording scratch is empty or exceeds the recovery byte limit." }
++            client.receiveFile(state.deviceId, resource.remotePath, local, remaining())
++            val after = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
++            require(before == after && Files.isRegularFile(local, LinkOption.NOFOLLOW_LINKS) && Files.size(local) == before) {
++                "Recording scratch changed or its transfer was incomplete."
++            }
++            check(!scratchTest(client, journal, resource.remotePath, "-L", remaining) &&
++                scratchTest(client, journal, resource.remotePath, "-f", remaining)) { "Recording scratch type changed during transfer." }
++            consume(local, before, digest(local, deadline))
++        }
++
++    private fun recorderPids(output: String): Set<Int> {
++        val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
++        check(lines.firstOrNull()?.split(Regex("\\s+")) == listOf("UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD")) {
++            "Recorder process status is unrecognized."
++        }
++        return lines.drop(1).mapNotNull { line ->
++            val columns = line.split(Regex("\\s+"), limit = 8)
++            check(columns.size == 8) { "Recorder process status is incomplete." }
++            if (columns[7] == "com.huawei.hmos.screenrecorder" || columns[7].startsWith("com.huawei.hmos.screenrecorder:")) {
++                columns[1].toIntOrNull()?.takeIf { it > 0 } ?: error("Recorder process PID is invalid.")
++            } else null
++        }.toSet()
 +    }
 +
 +    @Synchronized fun verifyArchives(timeout: Duration = Duration.ofSeconds(30)): Boolean {
@@ -9404,10 +10160,10 @@ index 0000000..37ca2ae
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..65cdd0c
+index 0000000..9bc7757
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,425 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -9520,6 +10276,11 @@ index 0000000..65cdd0c
 +        requireOwnedFile(remote)
 +        state.temporaryFiles.remove(remote)
 +        persist()
++    }
++
++    @Synchronized internal fun ownsTemporaryFile(remote: String): Boolean {
++        ensureOpen()
++        return remote in state.temporaryFiles
 +    }
 +
 +    internal fun shell(arguments: List<String>, recoverable: Boolean, allowSealed: Boolean = false, execute: (List<String>) -> HdcCommandResult): HdcCommandResult {
@@ -9830,10 +10591,10 @@ index 0000000..65cdd0c
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..a554bdc
+index 0000000..bb00cab
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,201 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -9922,7 +10683,20 @@ index 0000000..a554bdc
 +            require(journal.deviceId == deviceId) { "Recovery journal belongs to another target." }
 +            if (resourceRecovery) {
 +                require(finite) { "Resource recovery accepts only declared finite commands." }
-+                return journal.shell(arguments, finite, allowSealed = true) { wrapped -> rawShell(deviceId, wrapped, timeout, true, allowSealed = true) }
++                checkResourceRecoveryReady(journal)
++                val result = try {
++                    journal.shell(arguments, finite, allowSealed = true) { wrapped -> rawShell(deviceId, wrapped, timeout, true, allowSealed = true) }
++                } catch (error: HdcCommandException) {
++                    // An acknowledged nonzero status can be a valid absence result. It is
++                    // safe to interpret only after its native host invocation has ended.
++                    try { checkResourceRecoveryReady(journal) } catch (notReady: Exception) {
++                        notReady.addSuppressed(error)
++                        throw notReady
++                    }
++                    throw error
++                }
++                checkResourceRecoveryReady(journal)
++                return result
 +            }
 +            return journal.shell(arguments, finite) { wrapped -> rawShell(deviceId, wrapped, timeout, true) }
 +        }
@@ -9953,7 +10727,14 @@ index 0000000..a554bdc
 +            "An absolute device file path is required"
 +        }
 +        recoveryJournal?.let { require(it.deviceId == deviceId) { "Recovery journal belongs to another target." } }
++        if (resourceRecovery) checkResourceRecoveryReady(checkNotNull(recoveryJournal))
 +        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null, allowSealed = resourceRecovery)
++            .also { if (resourceRecovery) checkResourceRecoveryReady(checkNotNull(recoveryJournal)) }
++    }
++
++    private fun checkResourceRecoveryReady(journal: HarmonyOSRecoveryJournal) {
++        val issues = journal.snapshot().issues.filter { it.code != "OWNED_RESOURCES_REMAIN" }
++        check(issues.isEmpty()) { "Resource recovery is not quiescent: ${issues.joinToString { it.code }}" }
 +    }
 +
 +    private fun execute(arguments: List<String>, timeout: Duration, trackHost: Boolean = false,
@@ -9977,6 +10758,7 @@ index 0000000..a554bdc
 +                (arguments == listOf("hidumper", "-s", "3002", "-a", "-h")) ||
 +                (arguments == listOf("bm", "dump", "-n", "com.huawei.hmos.screenrecorder")) ||
 +                (arguments.take(3) == listOf("stat", "-c", "%s") && arguments.size == 4 && recordingScratch(arguments[3])) ||
++                (arguments.size == 3 && arguments[0] == "test" && arguments[1] in setOf("-L", "-e", "-f") && recordingScratch(arguments[2])) ||
 +                (arguments.take(2) == listOf("mediatool", "query") && arguments.size == 4 &&
 +                    arguments[2].matches(Regex("maestro-recording-[0-9a-f]{32}\\.mp4")) && arguments[3] == "-u") ||
 +                (arguments.take(2) == listOf("mediatool", "delete") && arguments.size == 3 && recordingMedia(arguments[2])) ||
@@ -11373,10 +12155,10 @@ index 0000000..8eafe89
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..af1549b
+index 0000000..fcc887d
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,1105 @@
+@@ -0,0 +1,1109 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -11923,14 +12705,18 @@ index 0000000..af1549b
 +                HarmonyOSRecoveryJournal.open(journalPath).use { reopened ->
 +                    val resources = checkNotNull(reopened.recordings)
 +                    val issues = resources.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(3))
-+                    assertThat(issues.map { it.code }).containsExactly("RECORDING_ARCHIVE_UNCONFIRMED")
++                    assertThat(issues.map { it.code }).containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
 +                    assertThat(resources.isComplete()).isFalse()
-+                    assertThat(resources.verifyArchives()).isFalse()
++                    assertThat(resources.verifyArchives()).isTrue()
++                    val preserved = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++                    val original = resources.path.parent.resolve("recording-originals").resolve(preserved["archiveName"].asText())
++                    assertThat(Files.readAllBytes(original)).isEqualTo(device.video)
 +                    val failure = checkNotNull(marker)
 +                    assertThat(resources.resolvesFailure(failure.recordingId, failure.fingerprint)).isFalse()
 +                }
 +                assertThat(remote.deleted).isEmpty()
-+                assertThat(remote.commands.none { it.contains("'mediatool'") || it.contains("'aa'") || it.contains("kill") }).isTrue()
++                assertThat(remote.exports).isEqualTo(1)
++                assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
 +            }
 +        }
 +    }
@@ -12969,14 +13755,15 @@ index 0000000..93af213
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
-index 0000000..a06a0e5
+index 0000000..5943dcf
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,686 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
 +import org.junit.jupiter.api.Test
 +import org.junit.jupiter.api.assertThrows
 +import org.junit.jupiter.api.io.TempDir
@@ -12984,13 +13771,14 @@ index 0000000..a06a0e5
 +import java.nio.file.Path
 +import java.time.Duration
 +import java.util.UUID
++import java.util.concurrent.TimeUnit
 +
 +class HarmonyOSRecordingResourceJournalTest {
 +    @TempDir lateinit var directory: Path
 +    private val mapper = jacksonObjectMapper()
 +    private fun create() = HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString())
 +
-+    @Test fun `latest archive metadata is a copy of registered values and does not revalidate files`() {
++    @Test fun `latest archive metadata is a copy of registered values and does not revalidate files`(): Unit {
 +        create().use { journal ->
 +            journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
@@ -13017,7 +13805,7 @@ index 0000000..a06a0e5
 +        }
 +    }
 +
-+    @Test fun `completed retained media is removed after restart with its original unchanged`() {
++    @Test fun `completed retained media is removed after restart with its original unchanged`(): Unit {
 +        val journal = create()
 +        val resources = journal.enableRecordingResources()
 +        val recording = journal.allocateRecording()
@@ -13048,12 +13836,11 @@ index 0000000..a06a0e5
 +        assertThat(Files.readAllBytes(archive)).isEqualTo(bytes)
 +    }
 +
-+    @Test fun `absent capture end cannot be inferred from an idle device`() {
++    @Test fun `unacknowledged start cannot be recovered from an idle device`(): Unit {
 +        create().use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
 +            recording.starting()
-+            recording.started(51)
 +            journal.seal()
 +            val noQuery = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device mutation or query is needed") })
 +            assertThat(resources.recover(noQuery, journal, Duration.ofSeconds(1)).map { it.code }).contains("RECORDING_CAPTURE_UNCONFIRMED")
@@ -13061,8 +13848,8 @@ index 0000000..a06a0e5
 +        }
 +    }
 +
-+    @Test fun `active capture corrupted archive or changed URI cannot delete media`() {
-+        for (scenario in listOf("active", "archive", "uri")) {
++    @Test fun `active capture corrupted archive or changed URI cannot delete media`(): Unit {
++        for (scenario in listOf("active", "archive", "missing", "uri")) {
 +            val root = Files.createDirectory(directory.resolve(scenario))
 +            HarmonyOSRecoveryJournal.create(root.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString()).use { journal ->
 +                val resources = journal.enableRecordingResources()
@@ -13076,6 +13863,9 @@ index 0000000..a06a0e5
 +                if (scenario == "archive") {
 +                    Files.list(root.resolve("recording-originals")).use { Files.writeString(it.findFirst().orElseThrow(), "changed") }
 +                }
++                if (scenario == "missing") {
++                    Files.list(root.resolve("recording-originals")).use { Files.delete(it.findFirst().orElseThrow()) }
++                }
 +                val remote = MediaRemote(if (scenario == "uri") uri.replace("/123/", "/999/") else uri)
 +                remote.active = scenario == "active"
 +                journal.seal()
@@ -13086,7 +13876,7 @@ index 0000000..a06a0e5
 +        }
 +    }
 +
-+    @Test fun `failed delete acknowledgement can be reconciled without another delete`() {
++    @Test fun `failed delete acknowledgement can be reconciled without another delete`(): Unit {
 +        create().use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
@@ -13105,7 +13895,7 @@ index 0000000..a06a0e5
 +        }
 +    }
 +
-+    @Test fun `changed source keeps both originals and needs a later stable comparison before deletion`() {
++    @Test fun `changed source keeps both originals and needs a later stable comparison before deletion`(): Unit {
 +        create().use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
@@ -13127,11 +13917,11 @@ index 0000000..a06a0e5
 +            assertThat(journal.recover(HdcClient("fake", remote), cleanupResources = false).pendingOperations).isEqualTo(0)
 +            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(2))).isEmpty()
 +            assertThat(remote.deleted).containsExactly(uri)
-+            assertThat(remote.scratchRemoved).containsExactly(recording.remotePath, recording.remotePath)
++            assertThat(remote.scratchRemoved).containsExactly(recording.remotePath)
 +        }
 +    }
 +
-+    @Test fun `lost scratch removal reply remains unknown until its command proof is reconciled`() {
++    @Test fun `lost scratch removal reply remains unknown until its command proof is reconciled`(): Unit {
 +        create().use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
@@ -13156,7 +13946,7 @@ index 0000000..a06a0e5
 +        }
 +    }
 +
-+    @Test fun `stop intent survives reopening and never permits a second dispatch`() {
++    @Test fun `stop intent survives reopening and never permits a second dispatch`(): Unit {
 +        create().use { journal ->
 +            val resources = journal.enableRecordingResources()
 +            val recording = journal.allocateRecording()
@@ -13165,12 +13955,373 @@ index 0000000..a06a0e5
 +            assertThrows<IllegalStateException> { recording.stopping() }
 +        }
 +        HarmonyOSRecoveryJournal.open(directory.resolve("recovery-journal.json")).use { journal ->
-+            val noQuery = HdcClient("fake", HdcCommandRunner { _, _ -> error("No toggle") })
-+            assertThat(journal.recordings!!.recover(noQuery, journal, Duration.ofSeconds(1))).isNotEmpty()
++            val resource = mapper.readTree(journal.recordings!!.path.toFile())["resources"][0]
++            val remote = MediaRemote("file://media/Photo/123/VID_123/${resource["fileName"].asText()}").apply { present = false }
++            assertThat(journal.recordings!!.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(1))).isNotEmpty()
++            assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
 +        }
 +    }
 +
-+    @Test fun `missing required recording fields and foreign ownership fail closed`() {
++    @Test fun `confirmed end is archived first and only a reopened recovery may delete`(): Unit {
++        for (stopRequested in listOf(false, true)) {
++            val root = Files.createDirectory(directory.resolve("stop-$stopRequested"))
++            val fixture = pending(root)
++            val bytes = "first independently preserved recording".toByteArray()
++            fixture.remote.video = bytes
++            if (stopRequested) fixture.recording.stopping()
++            fixture.journal.seal()
++            fixture.journal.use { journal ->
++                val result = fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))
++                assertThat(result.map { it.code }).containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++                assertThat(entry(fixture.resources)["captureEnded"].booleanValue()).isTrue()
++                assertThat(entry(fixture.resources)["stopRequested"].booleanValue()).isEqualTo(stopRequested)
++                assertThat(fixture.resources.verifyArchives()).isTrue()
++                assertThat(archiveBytes(fixture.resources)).containsExactly(bytes.toList())
++                assertThat(fixture.remote.deleted).isEmpty()
++                assertThat(fixture.remote.scratchRemoved).isEmpty()
++                assertThat(fixture.remote.exports).isEqualTo(1)
++            }
++            HarmonyOSRecoveryJournal.open(fixture.journal.path).use { journal ->
++                assertThat(journal.recordings!!.recover(fixture.client, journal, Duration.ofSeconds(2))).isEmpty()
++                assertThat(journal.recordings!!.isComplete()).isTrue()
++                assertThat(archiveBytes(journal.recordings!!)).containsExactly(bytes.toList())
++            }
++            assertThat(fixture.remote.exports).isEqualTo(2)
++            assertThat(fixture.remote.deleted).containsExactly(fixture.uri)
++            assertThat(fixture.remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
++        }
++    }
++
++    @Test fun `existing scratch is preserved before a changed export and both originals survive`(): Unit {
++        val fixture = pending(directory)
++        val first = "old failed export A".toByteArray()
++        val second = "later media B with other bytes".toByteArray()
++        fixture.remote.apply { scratchPresent = true; scratchBytes = first; video = second }
++        fixture.journal.seal()
++        fixture.journal.use { journal ->
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                .containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++            assertThat(archiveBytes(fixture.resources)).containsExactly(first.toList())
++            assertThat(fixture.remote.exports).isEqualTo(0)
++            assertThat(fixture.remote.scratchRemoved).isEmpty()
++        }
++        HarmonyOSRecoveryJournal.open(fixture.journal.path).use { journal ->
++            val resources = journal.recordings!!
++            assertThat(resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code }).containsExactly("RECORDING_MEDIA_CHANGED")
++            assertThat(archiveBytes(resources)).containsExactly(first.toList(), second.toList()).inOrder()
++            assertThat(fixture.remote.deleted).isEmpty()
++            assertThat(resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isEmpty()
++            assertThat(archiveBytes(resources)).containsExactly(first.toList(), second.toList()).inOrder()
++            assertThat(fixture.remote.deleted).containsExactly(fixture.uri)
++        }
++    }
++
++    @Test fun `export interrupted before archive is received after reopening without replacement`(): Unit {
++        val fixture = pending(directory)
++        val first = "export A before the interrupted receive".toByteArray()
++        fixture.remote.apply { video = first; shortReceive = true }
++        fixture.journal.seal()
++        fixture.journal.use { journal ->
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++            assertThat(entry(fixture.resources)["archives"].size()).isEqualTo(0)
++            assertThat(fixture.remote.scratchBytes!!.toList()).isEqualTo(first.toList())
++        }
++        fixture.remote.apply { video = "B must not replace A".toByteArray(); shortReceive = false }
++        HarmonyOSRecoveryJournal.open(fixture.journal.path).use { journal ->
++            assertThat(journal.recordings!!.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                .containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++            assertThat(archiveBytes(journal.recordings!!)).containsExactly(first.toList())
++            assertThat(fixture.remote.exports).isEqualTo(1)
++            assertThat(fixture.remote.scratchRemoved).isEmpty()
++            assertThat(fixture.remote.deleted).isEmpty()
++        }
++    }
++
++    @Test fun `idle without media foreign processes active captures and changed observations cannot confirm end`(): Unit {
++        for (scenario in listOf("missing", "foreign", "multiple", "active", "late", "malformed", "uri")) {
++            val fixture = pending(Files.createDirectory(directory.resolve(scenario)))
++            fixture.remote.apply {
++                when (scenario) {
++                    "missing" -> present = false
++                    "foreign" -> recorderProcesses = setOf(99)
++                    "multiple" -> recorderProcesses = setOf(51, 99)
++                    "active" -> active = true
++                    "late" -> activeAtCaptureRead = 2
++                    "malformed" -> malformedProcesses = true
++                    "uri" -> changedUriAtQuery = 2
++                }
++            }
++            fixture.journal.seal()
++            fixture.journal.use { journal ->
++                assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++                assertThat(entry(fixture.resources)["captureEnded"].booleanValue()).isFalse()
++                assertThat(entry(fixture.resources)["uri"].isNull).isTrue()
++                assertThat(entry(fixture.resources)["archives"].size()).isEqualTo(0)
++                assertThat(fixture.remote.exports).isEqualTo(0)
++                assertThat(fixture.remote.deleted).isEmpty()
++            }
++        }
++    }
++
++    @Test fun `capture returning during transfer cannot archive or delete`(): Unit {
++        val fixture = pending(directory)
++        fixture.remote.activeAtCaptureRead = 3
++        fixture.journal.seal()
++        fixture.journal.use { journal ->
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                .containsExactly("RECORDING_CAPTURE_ACTIVE")
++            assertThat(entry(fixture.resources)["archives"].size()).isEqualTo(0)
++            assertThat(fixture.remote.deleted).isEmpty()
++            assertThat(fixture.remote.scratchRemoved).isEmpty()
++        }
++    }
++
++    @Test fun `uncertain scratch types sizes and test replies never permit initial archival`(): Unit {
++        for (scenario in listOf("link", "directory", "empty", "short", "stat", "stderr", "stdout", "exit", "lost")) {
++            val fixture = pending(Files.createDirectory(directory.resolve(scenario)))
++            fixture.remote.apply {
++                scratchPresent = true
++                when (scenario) {
++                    "link" -> scratchLink = true
++                    "directory" -> scratchRegular = false
++                    "empty" -> video = byteArrayOf()
++                    "short" -> shortReceive = true
++                    "stat" -> unstableStat = true
++                    "stderr" -> testStderr = "unexpected diagnostic"
++                    "stdout" -> testStdout = " "
++                    "exit" -> testExit = 2
++                    "lost" -> loseTestReply = true
++                }
++            }
++            fixture.journal.seal()
++            fixture.journal.use { journal ->
++                assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++                assertThat(entry(fixture.resources)["archives"].size()).isEqualTo(0)
++                assertThat(fixture.remote.exports).isEqualTo(0)
++                assertThat(fixture.remote.deleted).isEmpty()
++                assertThat(fixture.remote.scratchRemoved).isEmpty()
++            }
++        }
++    }
++
++    @Test fun `lost stop response must be reconciled before resource queries`(): Unit {
++        val fixture = pending(directory)
++        fixture.recording.stopping()
++        fixture.remote.loseStopReply = true
++        val device = HdcHarmonyOSDevice("device", fixture.client.withRecoveryJournal(fixture.journal))
++        assertThrows<HdcException> { device.execute(listOf("aa", "start", "-b", "recorder"), Duration.ofSeconds(1)) }
++        fixture.journal.seal()
++        fixture.journal.use { journal ->
++            val before = fixture.remote.commands.size
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                .contains("REMOTE_COMPLETION_UNCONFIRMED")
++            assertThat(fixture.remote.commands).hasSize(before)
++            assertThat(journal.recover(fixture.client, cleanupResources = false).pendingOperations).isEqualTo(0)
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                .containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++            assertThat(fixture.remote.commands.count { it.contains("'aa'") }).isEqualTo(1)
++        }
++    }
++
++    @Test fun `foreign active and unregistered journals cannot advance resource recovery`(): Unit {
++        for (scenario in listOf("foreign", "active", "host", "unregistered")) {
++            val root = Files.createDirectory(directory.resolve(scenario))
++            val fixture = pending(root)
++            fixture.journal.use { journal ->
++                if (scenario == "host") journal.hostCall { observe ->
++                    val process = ProcessHandle.current()
++                    observe(HarmonyOSRecoveryJournal.HostProcess(process.pid(), process.info().startInstant().orElseThrow().toString()))
++                }
++                if (scenario != "active") journal.seal()
++                if (scenario == "unregistered") journal.forgetTemporaryFile(fixture.recording.remotePath)
++                if (scenario == "foreign") {
++                    val otherRoot = Files.createDirectory(root.resolve("other"))
++                    HarmonyOSRecoveryJournal.create(otherRoot.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString()).use { other ->
++                        other.seal()
++                        assertThat(fixture.resources.recover(fixture.client, other, Duration.ofSeconds(1)).map { it.code })
++                            .containsExactly("RECORDING_OWNER_MISMATCH")
++                    }
++                } else assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(1))).isNotEmpty()
++                assertThat(fixture.remote.commands).isEmpty()
++            }
++        }
++    }
++
++    @Test fun `finite scratch tests accept only the three exact recording shapes`(): Unit {
++        val remote = "/data/local/tmp/maestro-session-${UUID.randomUUID()}/files/recording-${UUID.randomUUID()}.mp4"
++        for (flag in listOf("-L", "-e", "-f")) assertThat(HdcClient.finiteCommand(listOf("test", flag, remote))).isTrue()
++        for (arguments in listOf(listOf("test", "-d", remote), listOf("test", "-e", "/data/local/tmp/other"),
++            listOf("test", "-e", remote, "-o", "true"), listOf("test", "-e", remote + "/../outside"))) {
++            assertThat(HdcClient.finiteCommand(arguments)).isFalse()
++        }
++    }
++
++    @Test fun `a new pending operation prevents all later recording resources from advancing`(): Unit {
++        val fixture = pending(directory)
++        val second = fixture.journal.allocateRecording()
++        second.starting(); second.started(51); second.ended()
++        val secondUri = "file://media/Photo/456/VID_456/${second.fileName}"
++        second.media(secondUri)
++        val original = directory.resolve("second-original.mp4")
++        Files.write(original, fixture.remote.video)
++        second.archive(original)
++        fixture.remote.extraUris[second.fileName] = secondUri
++        fixture.remote.loseTestReply = true
++        fixture.journal.seal()
++        fixture.journal.use { journal ->
++            val result = fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))
++            assertThat(result.map { it.code }).contains("REMOTE_COMPLETION_UNCONFIRMED")
++            assertThat(fixture.remote.commands.none { it.contains(second.fileName) || it.contains(second.remotePath) }).isTrue()
++            assertThat(fixture.remote.deleted).isEmpty()
++            assertThat(mapper.readTree(fixture.resources.path.toFile())["resources"][1]["clean"].booleanValue()).isFalse()
++            val before = fixture.remote.commands.size
++            assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++            assertThat(fixture.remote.commands).hasSize(before)
++            assertThat(journal.recover(fixture.client, cleanupResources = false).pendingOperations).isEqualTo(0)
++            fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))
++            assertThat(fixture.remote.commands.any { it.contains(second.fileName) }).isTrue()
++            assertThat(fixture.remote.deleted).containsExactly(secondUri)
++        }
++    }
++
++    @Test fun `failed comparison retains complete scratch before later media changes or disappears`(): Unit {
++        for (missingMedia in listOf(false, true)) {
++            val root = Files.createDirectory(directory.resolve("missing-$missingMedia"))
++            val fixture = pending(root)
++            val first = "verified original A".toByteArray()
++            val second = "complete B despite a short receive".toByteArray()
++            val third = "later source C must not overwrite B".toByteArray()
++            fixture.recording.ended(); fixture.recording.media(fixture.uri)
++            val original = root.resolve("A.mp4")
++            Files.write(original, first); fixture.recording.archive(original)
++            fixture.remote.apply { video = second; shortReceive = true }
++            fixture.journal.seal()
++            fixture.journal.use { journal ->
++                assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++                assertThat(archiveBytes(fixture.resources)).containsExactly(first.toList())
++                assertThat(fixture.remote.scratchBytes!!.toList()).isEqualTo(second.toList())
++            }
++            fixture.remote.apply { video = third; shortReceive = false; present = !missingMedia }
++            HarmonyOSRecoveryJournal.open(fixture.journal.path).use { journal ->
++                val resources = journal.recordings!!
++                assertThat(resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                    .containsExactly("RECORDING_SCRATCH_ARCHIVED_RECHECK_REQUIRED")
++                assertThat(archiveBytes(resources)).containsExactly(first.toList(), second.toList()).inOrder()
++                assertThat(fixture.remote.exports).isEqualTo(1)
++                assertThat(fixture.remote.scratchRemoved).isEmpty()
++                assertThat(fixture.remote.deleted).isEmpty()
++                if (!missingMedia) {
++                    assertThat(resources.recover(fixture.client, journal, Duration.ofSeconds(2)).map { it.code })
++                        .containsExactly("RECORDING_MEDIA_CHANGED")
++                    assertThat(archiveBytes(resources)).containsExactly(first.toList(), second.toList(), third.toList()).inOrder()
++                }
++                assertThat(resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isEmpty()
++                assertThat(resources.isComplete()).isTrue()
++                assertThat(fixture.remote.deleted).hasSize(if (missingMedia) 0 else 1)
++            }
++        }
++    }
++
++    @Test fun `only an already verified empty archive permits empty scratch recovery`(): Unit {
++        for (emptyArchive in listOf(false, true)) {
++            val root = Files.createDirectory(directory.resolve("empty-archive-$emptyArchive"))
++            val fixture = pending(root)
++            fixture.recording.ended(); fixture.recording.media(fixture.uri)
++            val original = root.resolve("original.mp4")
++            Files.write(original, if (emptyArchive) byteArrayOf() else "nonempty original".toByteArray())
++            fixture.recording.archive(original)
++            fixture.remote.apply { scratchPresent = true; video = byteArrayOf() }
++            fixture.journal.seal()
++            fixture.journal.use { journal ->
++                val issues = fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))
++                if (emptyArchive) {
++                    assertThat(issues).isEmpty()
++                    assertThat(fixture.resources.isComplete()).isTrue()
++                    assertThat(fixture.remote.deleted).containsExactly(fixture.uri)
++                } else {
++                    assertThat(issues).isNotEmpty()
++                    assertThat(fixture.remote.deleted).isEmpty()
++                    assertThat(fixture.remote.scratchRemoved).isEmpty()
++                }
++                assertThat(entry(fixture.resources)["archives"].size()).isEqualTo(1)
++            }
++        }
++    }
++
++    @Test fun `a surviving native invocation blocks success and acknowledged absence before resource progress`(): Unit {
++        for (phase in listOf("status", "receive", "absent-test", "absent-media")) {
++            val root = Files.createDirectory(directory.resolve(phase))
++            val fixture = pending(root)
++            if (phase == "absent-media") {
++                fixture.recording.ended(); fixture.recording.media(fixture.uri)
++                val original = root.resolve("original.mp4")
++                Files.write(original, fixture.remote.video); fixture.recording.archive(original)
++                fixture.remote.present = false
++            }
++            fixture.journal.seal()
++            val child = ProcessBuilder(HdcProcessTestChild.command("sleep", root.resolve("native.pid").toString())).start()
++            try {
++                var observed = false
++                fixture.remote.afterReply = { command ->
++                    val script = command.last()
++                    val selected = when (phase) {
++                        "status" -> script.contains("'ps'")
++                        "receive" -> command.contains("file") && command.contains("recv")
++                        "absent-test" -> script.contains("'test'")
++                        else -> script.contains("mediatool") && script.contains("query")
++                    }
++                    if (selected && !observed) {
++                        observed = true
++                        fixture.journal.hostCall(allowSealed = true) { report ->
++                            report(HarmonyOSRecoveryJournal.HostProcess(child.pid(), child.info().startInstant().orElseThrow().toString()))
++                        }
++                    }
++                }
++                fixture.journal.use { journal ->
++                    assertThat(fixture.resources.recover(fixture.client, journal, Duration.ofSeconds(2))).isNotEmpty()
++                    assertThat(observed).isTrue()
++                    assertThat(child.isAlive).isTrue()
++                    assertThat(journal.snapshot().issues.map { it.code }).contains("HOST_PROCESS_UNCONFIRMED")
++                    val resource = entry(fixture.resources)
++                    if (phase == "status") assertThat(resource["captureEnded"].booleanValue()).isFalse()
++                    assertThat(resource["archives"].size()).isEqualTo(if (phase == "absent-media") 1 else 0)
++                    assertThat(resource["mediaRemoved"].booleanValue()).isFalse()
++                    assertThat(resource["clean"].booleanValue()).isFalse()
++                    assertThat(fixture.remote.deleted).isEmpty()
++                    val commands = fixture.remote.commands.size
++                    val receives = fixture.remote.receives
++                    val recovery = fixture.client.forResourceRecovery(journal)
++                    assertThrows<IllegalStateException> { recovery.shell("device", listOf("ps", "-ef")) }
++                    assertThrows<IllegalStateException> { recovery.receiveFile("device", fixture.recording.remotePath, root.resolve("blocked.mp4")) }
++                    assertThat(fixture.remote.commands).hasSize(commands)
++                    assertThat(fixture.remote.receives).isEqualTo(receives)
++                }
++            } finally {
++                child.destroyForcibly()
++                check(child.waitFor(5, TimeUnit.SECONDS)) { "The local test process did not terminate." }
++                fixture.journal.close()
++            }
++        }
++    }
++
++    private data class Pending(val journal: HarmonyOSRecoveryJournal, val resources: HarmonyOSRecordingResourceJournal,
++        val recording: HarmonyOSRecordingResourceJournal.Recording, val uri: String, val remote: MediaRemote) {
++        val client get() = HdcClient("fake", remote)
++    }
++    private fun pending(root: Path): Pending {
++        val journal = HarmonyOSRecoveryJournal.create(root.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString())
++        val resources = journal.enableRecordingResources()
++        val recording = journal.allocateRecording()
++        recording.starting(); recording.started(51)
++        val uri = "file://media/Photo/123/VID_123/${recording.fileName}"
++        return Pending(journal, resources, recording, uri, MediaRemote(uri))
++    }
++    private fun entry(resources: HarmonyOSRecordingResourceJournal) = mapper.readTree(resources.path.toFile())["resources"][0]
++    private fun archiveBytes(resources: HarmonyOSRecordingResourceJournal): List<List<Byte>> = entry(resources)["archives"].map {
++        Files.readAllBytes(resources.path.parent.resolve("recording-originals").resolve(it["name"].asText())).toList()
++    }
++
++    @Test fun `missing required recording fields and foreign ownership fail closed`(): Unit {
 +        create().use { it.enableRecordingResources() }
 +        val file = directory.resolve("recording-resources.json")
 +        val valid = Files.readString(file)
@@ -13186,6 +14337,26 @@ index 0000000..a06a0e5
 +        var loseDeleteReply = false
 +        var loseScratchReply = false
 +        var scratchPresent = false
++        var scratchBytes: ByteArray? = null
++        var scratchLink = false
++        var scratchRegular = true
++        var recorderProcesses = setOf(51)
++        var malformedProcesses = false
++        var activeAtCaptureRead: Int? = null
++        var changedUriAtQuery: Int? = null
++        var shortReceive = false
++        var unstableStat = false
++        var testExit: Int? = null
++        var testStdout = ""
++        var testStderr = ""
++        var loseTestReply = false
++        var loseStopReply = false
++        val extraUris = mutableMapOf<String, String>()
++        var afterReply: (List<String>) -> Unit = {}
++        var receives = 0
++        private var captureReads = 0
++        private var queries = 0
++        private var stats = 0
 +        var exports = 0
 +        var video = "raw".toByteArray()
 +        val deleted = mutableListOf<String>()
@@ -13194,7 +14365,10 @@ index 0000000..a06a0e5
 +        private val proofs = mutableMapOf<String, String>()
 +        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
 +            if (command.contains("recv") && command.contains("file")) {
-+                Files.write(Path.of(command.last()), video)
++                receives++
++                val bytes = scratchBytes ?: video
++                Files.write(Path.of(command.last()), if (shortReceive) bytes.copyOf(bytes.size - 1) else bytes)
++                afterReply(command)
 +                return HdcCommandResult(0, "", "")
 +            }
 +            val script = command.last()
@@ -13202,8 +14376,9 @@ index 0000000..a06a0e5
 +            var unquoted = script
 +            while ("'\"'\"'" in unquoted) unquoted = unquoted.replace("'\"'\"'", "'")
 +            val removesScratch = unquoted.contains("'rm' '-f'")
++            val isTest = unquoted.contains("'test'")
 +            val marker = Regex("MAESTRO_EXIT_[a-f0-9]+=").find(script)?.value
-+            if (marker == null) {
++            if (marker == null && !isTest) {
 +                if (script.contains("cat ")) {
 +                    val proof = proofs.entries.single { script.contains("/${it.key}/done") }.value
 +                    return HdcCommandResult(0, proof, "")
@@ -13213,30 +14388,50 @@ index 0000000..a06a0e5
 +            }
 +            var status = 0
 +            val output = when {
-+                script.contains("hidumper") -> "PlayerDistributedService\n--ScreenCaptureServer--:" +
-+                    (if (active) "-----#0: pid = 51-----\n" else "") + "\n--NextSection--\n"
-+                script.contains("mediatool") && script.contains("query") -> if (present) "find 1 result\nuri\n\"$uri\"" else {
-+                    status = 255; "find 0 result"
++                isTest -> {
++                    val flag = Regex("'test' '(-[Lef])'").find(unquoted)!!.groupValues[1]
++                    val exists = when (flag) { "-L" -> scratchLink; "-e" -> scratchPresent; else -> scratchPresent && scratchRegular }
++                    status = testExit ?: if (exists) 0 else 1
++                    testStdout
++                }
++                unquoted.contains("'ps' '-ef'") -> if (malformedProcesses) "unknown process table" else
++                    "UID PID PPID C STIME TTY TIME CMD\n" + recorderProcesses.joinToString("\n") { "user $it 1 0 00:00 ? 0:00 com.huawei.hmos.screenrecorder" }
++                script.contains("hidumper") -> {
++                    captureReads++
++                    "PlayerDistributedService\n--ScreenCaptureServer--:" +
++                        (if (active || activeAtCaptureRead?.let { captureReads >= it } == true) "-----#0: pid = 51-----\n" else "") + "\n--NextSection--\n"
++                }
++                script.contains("mediatool") && script.contains("query") -> {
++                    queries++
++                    val fileName = Regex("maestro-recording-[0-9a-f]{32}\\.mp4").find(unquoted)!!.value
++                    val baseUri = extraUris[fileName] ?: uri
++                    val observedUri = if (changedUriAtQuery?.let { queries >= it } == true) baseUri.replace("/123/", "/999/") else baseUri
++                    if (present) "find 1 result\nuri\n\"$observedUri\"" else { status = 255; "find 0 result" }
 +                }
 +                script.contains("mediatool") && script.contains("delete") -> {
-+                    deleted += uri; present = false
++                    deleted += Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-[0-9a-f]{32}\\.mp4").find(unquoted)!!.value
++                    present = false
 +                    "[SUCCESS] delete success."
 +                }
 +                removesScratch -> {
 +                    scratchRemoved += Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
 +                    scratchPresent = false
++                    scratchBytes = null
 +                    ""
 +                }
 +                script.contains("mediatool") && script.contains("recv") -> {
 +                    val remote = Regex("/data/local/tmp/maestro-session-[0-9a-f-]{36}/files/recording-[0-9a-f-]{36}\\.mp4").find(script)!!.value
 +                    if (scratchPresent) { status = 255; "[FAIL] file has exist. file:$remote" }
-+                    else { scratchPresent = true; exports++; "Table Name: Photos\n$remote" }
++                    else { scratchPresent = true; scratchBytes = video.copyOf(); exports++; "Table Name: Photos\n$remote" }
 +                }
-+                unquoted.contains("'stat' '-c'") -> video.size.toString()
++                unquoted.contains("'stat' '-c'") -> { stats++; ((scratchBytes ?: video).size + if (unstableStat && stats % 2 == 0) 1 else 0).toString() }
++                unquoted.contains("'aa' 'start'") -> "start ability successfully."
 +                else -> error("Unexpected recovery command: $command")
 +            }
 +            val proof = Regex("[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f-]{36}:[0-9a-f]{64}:[0-9a-f-]{36}").find(script)!!.value
 +            proofs[proof.split(':')[2]] = "$proof:$status"
++            if (loseTestReply && isTest) { loseTestReply = false; throw HdcException("Scratch test response lost") }
++            if (loseStopReply && unquoted.contains("'aa' 'start'")) { loseStopReply = false; throw HdcException("Stop response lost") }
 +            if (loseDeleteReply && script.contains("mediatool") && script.contains("delete")) {
 +                loseDeleteReply = false; throw HdcException("Delete response lost")
 +            }
@@ -13244,7 +14439,9 @@ index 0000000..a06a0e5
 +                loseScratchReply = false; throw HdcException("Scratch removal response lost")
 +            }
 +            val acknowledgement = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)!!.value
-+            return HdcCommandResult(0, "$output\n$marker$status\n\n$acknowledgement$status\n", "")
++            val innerStatus = if (marker == null) "" else "\n$marker$status\n"
++            afterReply(command)
++            return HdcCommandResult(0, "$output$innerStatus\n$acknowledgement$status\n", if (isTest) testStderr else "")
 +        }
 +    }
 +}

@@ -161,6 +161,24 @@ test('cancel demonstration waits for recovery proof and keeps original cancelled
   assert(methods.indexOf('agent.release') < methods.indexOf('agent.recover'));
 });
 
+test('recovery may outlast the ordinary request budget but cannot extend the caller budget', async t => {
+  const sufficient = await fixture(t, 'recovery-needed-delayed', { requestTimeoutMs: 100 });
+  const completed = await runWorkflow(configuration(sufficient));
+  assert.equal(completed.status, 'passed');
+  assert.equal(completed.recovery.length, 1);
+  assert.equal((await sufficient.requests()).filter(request => request.method === 'agent.recover').length, 1);
+
+  const limited = await fixture(t, 'recovery-needed-delayed');
+  const unknown = await runWorkflow(configuration(limited, { timeoutMs: 100,
+    onHandoff: () => { throw new Error('A late recovery response cannot authorize handoff'); } }));
+  assert.equal(unknown.status, 'unknown');
+  assert.equal(unknown.handoff, null);
+  assert(unknown.errors.some(error => error.name === 'RequestTimeoutError'));
+  const sent = await limited.requests();
+  assert.equal(sent.filter(request => request.method === 'agent.recover').length, 1);
+  assert.equal(sent.filter(request => request.method === 'agent.action').length, 0);
+});
+
 test('unknown recovery prevents handoff and does not retry cleanup or the action', async t => {
   const f = await fixture(t, 'cancel-unknown');
   const result = await runWorkflow(configuration(f, { cancelAfterMs: 0, onHandoff: () => { throw new Error('Unsafe handoff'); } }));

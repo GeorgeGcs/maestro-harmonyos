@@ -84,7 +84,8 @@ export async function runWorkflow({ client, deviceId, appId, abilityName, module
   }
   async function recovery(targetSession) {
     if (!uuid.test(targetSession)) throw new Error('Invalid recovery session identity.');
-    const document = await client.request('agent.recover', { deviceId, sessionId: targetSession });
+    // Leave room for the backend's 30-second recovery budget and its final receipt, without extending the caller's budget.
+    const document = await client.request('agent.recover', { deviceId, sessionId: targetSession }, { timeoutMs: Math.min(timeoutMs, 45_000) });
     summary.recovery.push(document);
     await saveJson(path.join(directory, `recovery-${summary.recovery.length}.json`), document);
     const value = document.data;
