@@ -53,7 +53,7 @@ param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts,
 $ErrorActionPreference = 'Stop'
 [IO.File]::AppendAllText((Join-Path $env:VALIDATION_FIXTURE_ROOT 'calls.txt'), "called`n")
 if ($env:VALIDATION_FIXTURE_MODE -eq 'hard-stop') { [Environment]::Exit(87) }
-$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } default { @('pass', 'pass') } }
+$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } 'unconfirmed' { @('unknown-cleanup', 'not-run') } default { @('pass', 'pass') } }
 $request = Join-Path $Artifacts 'fixture-request.json'
 $value = @{ artifacts=$Artifacts; flowPath=$FlowPath; repeat=[int]$Repeat; deviceId=$DeviceIds[0]; pointerPath=$ReportPointerPath;
     controlDirectory=$ControlRecordDirectory; invocationId=$MatrixInvocationId; recoveryRoot=$env:VALIDATION_FIXTURE_RECOVERY; modes=@($modes) }
@@ -66,17 +66,26 @@ exit $LASTEXITCODE
     Assert-Test ($result.calls -eq 2) ('Both units should dispatch: ' + $result.output)
     Assert-Test ($result.summary.slots.Count -eq 4 -and @($result.summary.slots | Where-Object { $_.firstPassStatus -eq 'passed' }).Count -eq 4) 'All planned passes must be retained.'
     Assert-Test ($result.code -eq 1 -and -not $result.summary.qualified -and $result.reservation.state -eq 'released') 'Unreviewed successful execution must remain unqualified with a released device.'
+    Assert-Test ($result.reservation.execution -eq 'passed') 'Confirmed clean success must retain passed execution.'
     $passed++; Write-Output 'PASS all units, persistent release, and explicit review'
 
     $result = Invoke-Case 'cancel' 'cancel'
     Assert-Test ($result.calls -eq 1 -and $result.summary.slots.Count -eq 4) ('Cancelled batch should stop the next unit: ' + $result.output)
     Assert-Test ($result.summary.groups[0].cancelled -eq 1 -and $result.summary.groups[1].notRun -eq 2) 'Cancelled and unexecuted slots must remain in the denominator.'
+    Assert-Test ($result.reservation.execution -eq 'unknown') 'A stopped device must not become an ordinary failed execution merely because matrix returned exit 1.'
     $passed++; Write-Output 'PASS cancellation stops subsequent unit without reducing denominator'
 
     $result = Invoke-Case 'failure' 'fail'
     Assert-Test ($result.calls -eq 2 -and $result.reservation.state -eq 'released') ('Clean ordinary failure should permit subsequent units: ' + $result.output)
     Assert-Test ($result.code -eq 1 -and $result.summary.batches[0].matrixExitCode -eq 1) 'Original failure exit must remain visible.'
+    Assert-Test ($result.reservation.execution -eq 'failed') 'Confirmed clean assertion failure must retain failed execution.'
     $passed++; Write-Output 'PASS clean failure continues and preserves original exit code'
+
+    $result = Invoke-Case 'unconfirmed' 'unconfirmed'
+    Assert-Test ($result.calls -eq 1 -and $result.code -eq 1 -and $result.summary.batches[0].status -eq 'completed') ('Unconfirmed cleanup should stop later dispatch after matrix returns: ' + $result.output)
+    Assert-Test ($result.reservation.state -eq 'needs_inspection' -and $result.reservation.execution -eq 'unknown') 'A completed matrix cannot convert unconfirmed cleanup into a known failed execution.'
+    Assert-Test ($result.summary.groups[1].notRun -eq 2 -and -not $result.summary.batches[0].releaseConfirmed) 'Unconfirmed cleanup must keep the next unit unexecuted and preserve its denominator.'
+    $passed++; Write-Output 'PASS completed matrix with unconfirmed cleanup preserves unknown execution'
 
     $result = Invoke-Case 'killed' 'hard-stop'
     Assert-Test ($result.code -eq 87 -and $result.calls -eq 1 -and $result.reservation.state -eq 'running') ('Hard stop must retain blocking ownership: ' + $result.output)

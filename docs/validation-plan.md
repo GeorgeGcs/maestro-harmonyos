@@ -181,7 +181,7 @@ node .\scripts\validation\main.mjs D:\maestro-plans\review-request.json
 
 ## 正式计划与故障处理
 
-`purpose=formal` 还要求：`confirmation.status=confirmed`，提供已确认范围文件的 `path` / `sha256`；`buildFingerprint.files` 和 `applicationFingerprint.files` 非空，每项包含文件路径和 SHA-256。实际执行的所有实现 JAR 必须被 build 指纹覆盖。设备基线可用 `devices[].matrixInfoSha256` 约束矩阵中 `info` 对象的规范 JSON 哈希；说明性环境信息可放在 `environmentFingerprint`。
+`purpose=formal` 还要求：`confirmation.status=confirmed`，提供已确认范围文件的 `path` / `sha256`；`buildFingerprint.files` 和 `applicationFingerprint.files` 非空，每项包含文件路径和 SHA-256。矩阵的实现指纹必须完整包含 `maestro-cli`、`maestro-client`、`maestro-orchestra`、`maestro-orchestra-models` 四个 JAR 角色，各出现一次，并逐项匹配冻结的 build 文件名和 SHA-256。支持无版本名（如 `maestro-client.jar`）和数字开头的版本名（如 `maestro-cli-2.12.0.jar`）；缺角色、重复角色或同名冻结文件不唯一都会拒绝。旧矩阵若漏记角色，不能用于正式统计，不补写旧报告。设备基线可用 `devices[].matrixInfoSha256` 约束矩阵中 `info` 对象的规范 JSON 哈希；说明性环境信息可放在 `environmentFingerprint`。
 
 正式计划的轮数、阈值、应用版本、准备步骤和场景范围由使用者确定，工具没有内置“正式通过”的默认数值。冻结后更换脚本、实现、应用文件或参数，应另建计划。
 

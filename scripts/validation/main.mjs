@@ -57,8 +57,20 @@ function matrixIdentity(matrix, unit, profile, batch, plan) {
   if (patch) requireValue(matrix.build?.patchSha256 === patch.sha256, 'Matrix patch differs from the frozen implementation.');
   const jars = matrix.build?.implementationJars;
   requireValue(Array.isArray(jars), 'Matrix implementation fingerprint is missing.');
-  if (plan.purpose === 'formal') requireValue(jars.length > 0 && jars.every(jar => plan.buildFiles.some(file =>
-    path.basename(file.path) === jar.file && file.sha256 === jar.sha256)), 'Formal build fingerprint does not cover every executed implementation JAR.');
+  if (plan.purpose === 'formal') {
+    const requiredRoles = ['maestro-cli', 'maestro-client', 'maestro-orchestra', 'maestro-orchestra-models'];
+    const observedRoles = new Set();
+    for (const jar of jars) {
+      const match = typeof jar?.file === 'string' && /^(maestro-orchestra-models|maestro-orchestra|maestro-client|maestro-cli)(?:-[0-9][A-Za-z0-9.+_-]*)?\.jar$/.exec(jar.file);
+      requireValue(match && digestPattern.test(jar.sha256), 'Formal implementation fingerprint contains an unsupported JAR name or hash.');
+      requireValue(!observedRoles.has(match[1]), 'Formal implementation fingerprint repeats a JAR role: ' + match[1]);
+      observedRoles.add(match[1]);
+      const frozen = plan.buildFiles.filter(file => path.basename(file.path) === jar.file);
+      requireValue(frozen.length === 1 && frozen[0].sha256 === jar.sha256,
+        'Formal build fingerprint does not uniquely cover the executed implementation JAR: ' + jar.file);
+    }
+    requireValue(requiredRoles.every(role => observedRoles.has(role)), 'Formal implementation fingerprint must include CLI, client, orchestra, and orchestra-models JARs.');
+  }
   const device = plan.devices.find(value => value.deviceId === batch.deviceId);
   if (device.matrixInfoSha256) requireValue(digestPattern.test(device.matrixInfoSha256) &&
     device.matrixInfoSha256 === (awaitHashObject(matrix.devices[0].info)), 'Observed device baseline differs.');

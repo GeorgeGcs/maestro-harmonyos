@@ -121,7 +121,9 @@ try {
                 matrixExitCode = [int]$matrixCode; recoveryRoot = $trustedRecoveryRoot }
             $batchState.wrapperExitCode = [int]$matrixCode
             $batchState.agentRoot = $result.agentRoot
-            $batchState.execution = if ($result.status -eq 'completed') { if ($matrixCode -eq 0) { 'passed' } else { 'failed' } } else { 'unknown' }
+            $batchState.execution = if ($result.status -eq 'completed' -and $result.releaseConfirmed -eq $true -and $result.stopDevice -eq $false) {
+                if ($matrixCode -eq 0) { 'passed' } else { 'failed' }
+            } else { 'unknown' }
             $batchState.state = if ($result.releaseConfirmed) { 'released' } else { 'needs_inspection' }
             $batchState.resolution = $result.release
             $batchState.error = $result.error

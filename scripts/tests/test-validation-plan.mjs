@@ -40,6 +40,80 @@ async function review(context, intervention = 'none') {
   return { finished, reviewed: await reviewPlan({ summaryPath: context.summaryPath, reviewPath: file }) };
 }
 
+const implementationRoles = ['maestro-cli', 'maestro-client', 'maestro-orchestra', 'maestro-orchestra-models'];
+async function formalFixture(t, versioned = false) {
+  return setup(t, { repeat: 1 }, async (plan, root) => {
+    plan.purpose = 'formal';
+    const confirmationPath = path.join(root, 'confirmed-scope.txt'), applicationPath = path.join(root, 'fixture.hap');
+    await fs.writeFile(confirmationPath, 'Synthetic scope confirmation for host tests only.');
+    await fs.writeFile(applicationPath, 'Synthetic application fingerprint; never installed.');
+    plan.confirmation = { status: 'confirmed', path: confirmationPath, sha256: await hashFile(confirmationPath) };
+    plan.applicationFingerprint.files = [{ path: applicationPath, sha256: await hashFile(applicationPath) }];
+    for (const role of implementationRoles) {
+      const file = path.join(root, role + (versioned || role === 'maestro-cli' ? '-2.12.0' : '') + '.jar');
+      await fs.writeFile(file, 'Synthetic implementation fingerprint: ' + role);
+      plan.buildFingerprint.files.push({ path: file, sha256: await hashFile(file) });
+    }
+  });
+}
+
+async function executeFormal(context, edit = jars => jars) {
+  return execute(context, [], 0, async generated => {
+    const jars = context.plan.buildFiles.map(file => ({ file: path.basename(file.path), sha256: file.sha256 }));
+    generated.matrix.build.implementationJars = edit(jars);
+    await json(path.join(generated.matrixRoot, 'matrix.json'), generated.matrix);
+  });
+}
+
+test('formal fingerprints accept all four runtime roles with actual mixed names and versioned names', async t => {
+  for (const versioned of [false, true]) await t.test(versioned ? 'all versioned' : 'CLI versioned, other runtime JARs unversioned', async t => {
+    const context = await formalFixture(t, versioned), result = await executeFormal(context);
+    assert.equal(result.imported.status, 'completed', result.imported.error);
+    assert.equal(result.imported.releaseConfirmed, true);
+    assert.equal(result.state.slots[0].status, 'passed');
+    assert.equal((await review(context)).reviewed.qualified, true);
+  });
+});
+
+test('formal fingerprints reject each missing implementation role', async t => {
+  for (const role of implementationRoles) await t.test(role, async t => {
+    const context = await formalFixture(t), file = context.plan.buildFiles[implementationRoles.indexOf(role)];
+    const result = await executeFormal(context, jars => jars.filter(jar => jar.file !== path.basename(file.path)));
+    assert.equal(result.imported.status, 'unknown');
+    assert.match(result.imported.error, /must include CLI, client, orchestra, and orchestra-models/);
+    assert.equal(result.imported.releaseConfirmed, false); assert.equal(result.imported.stopDevice, true);
+    assert.equal(result.state.slots[0].finalPass, false);
+  });
+});
+
+test('formal fingerprints reject mismatched hashes for every implementation role', async t => {
+  for (const [index, role] of implementationRoles.entries()) await t.test(role, async t => {
+    const context = await formalFixture(t), result = await executeFormal(context, jars => {
+      jars[index].sha256 = hash(Buffer.from('Different runtime bytes: ' + role)); return jars;
+    });
+    assert.equal(result.imported.status, 'unknown');
+    assert.match(result.imported.error, /does not uniquely cover/);
+    assert.equal(result.imported.releaseConfirmed, false); assert.equal(result.state.slots[0].finalPass, false);
+  });
+});
+
+test('formal fingerprints reject duplicate roles even with different runtime filenames', async t => {
+  const context = await formalFixture(t), result = await executeFormal(context, jars => [
+    ...jars, { file: 'maestro-client-2.12.0.jar', sha256: jars[1].sha256 },
+  ]);
+  assert.equal(result.imported.status, 'unknown'); assert.match(result.imported.error, /repeats a JAR role: maestro-client/);
+  assert.equal(result.imported.releaseConfirmed, false);
+});
+
+test('formal fingerprints reject a CLI-only report and changed frozen runtime bytes', async t => {
+  const context = await formalFixture(t), result = await executeFormal(context, jars => jars.slice(0, 1));
+  assert.equal(result.imported.status, 'unknown'); assert.match(result.imported.error, /must include CLI, client, orchestra, and orchestra-models/);
+  const changed = await formalFixture(t);
+  await fs.appendFile(changed.plan.buildFiles[1].path, 'changed after freeze');
+  await assert.rejects(executeFormal(changed), /Frozen implementation, application or confirmation changed/);
+  assert.equal((await readJson(changed.summaryPath)).value.batches[0].status, 'pending');
+});
+
 test('freezes every denominator slot before dispatch and uses exact decimal ceilings', async t => {
   const context = await setup(t, { repeat: 3, units: 2 });
   const state = (await readJson(context.summaryPath)).value;

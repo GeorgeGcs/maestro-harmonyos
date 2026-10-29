@@ -280,7 +280,7 @@ try {
     if (-not $DeviceIds.Count) { throw 'Specify at least one device.' }
     $runner = Join-Path $projectRoot 'scripts/run-harmonyos.ps1'
     if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw 'run-harmonyos.ps1 is missing.' }
-    $hdc = if ($env:MAESTRO_HARMONYOS_HDC) { $env:MAESTRO_HARMONYOS_HDC } else { (Get-Command hdc -CommandType Application -ErrorAction Stop).Source }
+    $hdc = if ($env:MAESTRO_HARMONYOS_HDC) { $env:MAESTRO_HARMONYOS_HDC } else { (Get-Command hdc -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
     if (-not (Test-Path -LiteralPath $hdc -PathType Leaf) -or [IO.Path]::GetExtension($hdc) -ine '.exe') { throw 'HDC must point to a native .exe file.' }
     $artifactsRoot = if ($Artifacts) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Artifacts) } else { Join-Path $projectRoot 'artifacts/device-matrix' }
     $matrixDirectory = Join-Path $artifactsRoot ('matrix-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
@@ -292,13 +292,13 @@ try {
     $upstreamCommit = if (Test-Path -LiteralPath $upstreamFile) { (Get-Content -LiteralPath $upstreamFile -Raw -Encoding UTF8 | ConvertFrom-Json).commit } else { $null }
     $patchFile = Join-Path $projectRoot 'patches/maestro/0001-harmonyos-host.patch'
     $patchHash = if (Test-Path -LiteralPath $patchFile) { (Get-FileHash -LiteralPath $patchFile -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
-    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    $git = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     $commit = if ($git) { Invoke-MatrixNative $git.Source @('-C', $projectRoot, 'rev-parse', 'HEAD') } else { $null }
     $dirty = if ($git) { Invoke-MatrixNative $git.Source @('-C', $projectRoot, 'status', '--porcelain') } else { $null }
-    $java = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin/java.exe' } else { (Get-Command java -CommandType Application -ErrorAction SilentlyContinue).Source }
+    $java = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin/java.exe' } else { (Get-Command java -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
     $javaVersion = if ($java) { Invoke-MatrixNative $java @('-version') } else { $null }
     $cliLibraries = Join-Path $projectRoot '.upstream/maestro/maestro-cli/build/install/maestro/lib'
-    $implementationJars = @(Get-ChildItem -LiteralPath $cliLibraries -Filter '*.jar' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^maestro-(?:cli|client|orchestra(?:-models)?)-.*\.jar$' } | Sort-Object Name | ForEach-Object { [ordered]@{ file = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+    $implementationJars = @(Get-ChildItem -LiteralPath $cliLibraries -Filter '*.jar' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^maestro-(?:cli|client|orchestra(?:-models)?)(?:-[0-9][A-Za-z0-9._+-]*)?\.jar$' } | Sort-Object Name | ForEach-Object { [ordered]@{ file = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
     $report = [ordered]@{
         schemaVersion = 1; status = 'running'; startedAt = Get-MatrixTimestamp; finishedAt = $null; error = $null
         host = [ordered]@{ os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString(); javaVersion = $javaVersion; hdcVersion = (Invoke-MatrixNative $hdc @('-v')) }

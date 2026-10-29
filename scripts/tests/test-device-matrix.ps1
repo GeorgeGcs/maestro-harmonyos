@@ -18,7 +18,7 @@ function Write-TestFile { param([string]$Path, [string]$Text) [IO.File]::WriteAl
 
 function Invoke-Fixture {
     param([string]$Scenario, [string[]]$Targets = @('fixture-a', 'fixture-b'), [int]$Rounds = 1, [hashtable]$Extra = @{})
-    Write-TestFile $stateFile (@{ scenario = $Scenario; discoveries = 0; calls = @() } | ConvertTo-Json -Depth 8)
+    Write-TestFile $stateFile (@{ scenario = $Scenario; discoveries = 0; calls = @(); nativeCalls = @() } | ConvertTo-Json -Depth 8)
     $env:MATRIX_FIXTURE_STATE = $stateFile
     $arguments = @{
         FlowPath = $flowFile; BundleId = 'org.example.matrix'; AbilityName = 'EntryAbility'; Module = 'entry'
@@ -52,18 +52,33 @@ try {
     $inputText = $unicodeText + ' O''Reilly "quoted" C:\path with spaces\'
     Write-TestFile $flowFile "appId: org.example.matrix`n---`n- launchApp`n"
     Write-TestFile (Join-Path $fixture 'fakehdc.exe') 'Not executed; native commands are mocked by the fixture config.'
-    Write-TestFile (Join-Path $libraryDirectory 'maestro-cli-fixture.jar') 'Build identity fixture.'
-    Write-TestFile (Join-Path $libraryDirectory 'maestro-client-fixture.jar') 'Driver identity fixture.'
-    Write-TestFile (Join-Path $libraryDirectory 'maestro-orchestra-fixture.jar') 'Execution identity fixture.'
-    Write-TestFile (Join-Path $libraryDirectory 'maestro-orchestra-models-fixture.jar') 'Execution model identity fixture.'
+    $shippedJars = @('maestro-cli-2.12.0.jar', 'maestro-client.jar', 'maestro-orchestra.jar', 'maestro-orchestra-models.jar')
+    foreach ($name in $shippedJars) { Write-TestFile (Join-Path $libraryDirectory $name) ('Implementation fixture: ' + $name) }
     Write-TestFile (Join-Path $libraryDirectory 'third-party-fixture.jar') 'Not part of implementation identity.'
+    Write-TestFile (Join-Path $libraryDirectory 'maestro-orchestra-tools.jar') 'Not one of the four implementation roles.'
+    foreach ($tool in @('git', 'java', 'hdc')) {
+        foreach ($order in @('first', 'second')) { Write-TestFile (Join-Path $fixture ($order + '-' + $tool + '.exe')) 'Not executed; native commands are mocked.' }
+    }
     Write-TestFile (Join-Path $fixture 'upstream.lock.json') '{"commit":"1111111111111111111111111111111111111111"}'
     $configuration = @'
 $env:MAESTRO_HARMONYOS_HDC = Join-Path $PSScriptRoot 'fakehdc.exe'
 $env:MATRIX_CONFIG_MARKER = 'loaded'
+if ((Get-Content -LiteralPath $env:MATRIX_FIXTURE_STATE -Raw -Encoding UTF8 | ConvertFrom-Json).scenario -eq 'multiple-commands') {
+    Remove-Item Env:MAESTRO_HARMONYOS_HDC, Env:JAVA_HOME -ErrorAction SilentlyContinue
+    function Get-Command {
+        [CmdletBinding()]
+        param([string]$Name, [string]$CommandType)
+        if ($Name -notin @('git', 'java', 'hdc') -or $CommandType -ne 'Application') { throw 'Unexpected command discovery.' }
+        foreach ($order in @('first', 'second')) { [pscustomobject]@{ Source = (Join-Path $PSScriptRoot ($order + '-' + $Name + '.exe')) } }
+    }
+}
 function Invoke-MatrixNative {
     param([string]$Executable, [string[]]$Arguments)
     $state = Get-Content -LiteralPath $env:MATRIX_FIXTURE_STATE -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($state.scenario -eq 'multiple-commands') {
+        $state.nativeCalls = @($state.nativeCalls) + @([ordered]@{ executable = $Executable; arguments = $Arguments })
+        [IO.File]::WriteAllText($env:MATRIX_FIXTURE_STATE, ($state | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+    }
     $result = [pscustomobject]@{ ExitCode = 0; Stdout = ''; Stderr = ''; Error = $null }
     if ($Arguments[0] -eq 'list') {
         $state.discoveries++
@@ -145,9 +160,32 @@ exit $exitCode
     Assert-Test ((Get-Content -LiteralPath (Join-Path $result.Directory 'matrix.json') -Raw -Encoding UTF8) -notmatch [regex]::Escape($inputText)) 'The report copied environment parameter values.'
     Assert-Test ($result.Report.input.files[0].sha256 -eq (Get-FileHash -LiteralPath $flowFile -Algorithm SHA256).Hash.ToLowerInvariant()) 'Flow identity is missing.'
     Assert-Test ($result.Report.build.implementationJars.Count -eq 4) 'Built CLI, driver or execution identity is missing.'
+    Assert-Test ((@($result.Report.build.implementationJars.file | Sort-Object) -join ',') -ceq (@($shippedJars | Sort-Object) -join ',')) 'The real distribution JAR names were not fingerprinted.'
+    foreach ($jar in $result.Report.build.implementationJars) {
+        Assert-Test ($jar.sha256 -ceq (Get-FileHash -LiteralPath (Join-Path $libraryDirectory $jar.file) -Algorithm SHA256).Hash.ToLowerInvariant()) 'An implementation JAR fingerprint differs from its bytes.'
+    }
     Assert-Test (@($result.Report.build.implementationJars | Where-Object { $_.file -like 'third-party*' }).Count -eq 0) 'Third-party files were unnecessarily included in implementation identity.'
     Assert-Test (Test-Path -LiteralPath (Join-Path $result.Directory 'matrix.md')) 'The Markdown summary is missing.'
     Assert-Test (@(Get-ChildItem -LiteralPath $result.Directory -File -Filter '*.tmp').Count -eq 0) 'A completed report retained temporary output.'
+    $passed++
+
+    $result = Invoke-Fixture 'multiple-commands' -Targets @('fixture-a')
+    Assert-Test ($result.ExitCode -eq 0) ('Multiple command results prevented execution: ' + ($result.Output -join ' '))
+    foreach ($call in $result.State.nativeCalls) {
+        $tool = if ($call.arguments[0] -eq '-C') { 'git' } elseif ($call.arguments[0] -eq '-version') { 'java' } else { 'hdc' }
+        Assert-Test ($call.executable -ceq (Join-Path $fixture ('first-' + $tool + '.exe'))) ('Command discovery did not select the first ' + $tool + ' executable.')
+    }
+    Assert-Test ($result.Report.build.projectCommit.Stdout -ceq '2222222222222222222222222222222222222222' -and
+        $result.Report.build.workingTree.ExitCode -eq 0 -and $result.Report.host.javaVersion.Stderr -ceq 'java version fixture' -and
+        $result.Report.host.hdcVersion.Stdout -ceq 'HDC fixture version') 'Host and build probes did not use the resolved commands.'
+    $passed++
+
+    $allJarNames = @('maestro-cli.jar', 'maestro-cli-2.12.0.jar', 'maestro-client.jar', 'maestro-client-2.12.0.jar',
+        'maestro-orchestra.jar', 'maestro-orchestra-2.12.0.jar', 'maestro-orchestra-models.jar', 'maestro-orchestra-models-2.12.0.jar')
+    foreach ($name in $allJarNames) { Write-TestFile (Join-Path $libraryDirectory $name) ('Implementation fixture: ' + $name) }
+    $result = Invoke-Fixture 'pass' -Targets @('fixture-a')
+    Assert-Test ($result.ExitCode -eq 0 -and $result.Report.build.implementationJars.Count -eq 8 -and
+        (@($result.Report.build.implementationJars.file | Sort-Object) -join ',') -ceq (@($allJarNames | Sort-Object) -join ',')) 'Versioned or unversioned core JAR identities were omitted.'
     $passed++
 
     $result = Invoke-Fixture 'failure' -Rounds 2
