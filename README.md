@@ -1,38 +1,41 @@
 # Maestro HarmonyOS
 
-为 Maestro 增加 HarmonyOS 原生 UI 自动化测试能力，参与「课题 11：YAML 声明式 UI 测试框架 Maestro 支持鸿蒙」。
+**用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接鸿蒙设备，自动启动应用、查找控件、点击、输入、滑动、检查结果，并保存截图和运行报告。
 
-**当前进度：M3 部分完成。** 标准 YAML 已在一台真机上通过启动、定位、中文输入、滑动后重新定位、断言和截图，单设备批量执行 2/2 通过。
+例如，应用修改了一个输入页面，可以把“打开页面 → 找到输入框 → 输入中文 → 检查文字 → 保存截图”写成一个 Flow，之后重复执行，检查改动有没有影响原有行为。VSCode 插件可以通过截图和控件树辅助生成这些步骤。
 
-VSCode 操作录制辅助已提供 0.1.0 VSIX。在 VSCode 1.140 和现有 ALN-AL80 / API 26 真机上，8 步录制、YAML 保存和一键 CLI 回放通过。逐台设备验证工具也已在该设备执行 1/1 通过；第二台设备和正式 20 轮尚未验证。
+这套工具运行在开发或测试电脑上，面向鸿蒙应用开发者和测试人员。测试应用需提前安装；使用本工具不需要在应用中加入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，参与「课题 11：YAML 声明式 UI 测试框架 Maestro 支持鸿蒙」，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
 
-实验性的 Huawei 系统录屏后端默认关闭。正常流程已实测，失败流程也能自动停止、导出视频；短视频出现过尾部解码错误，原样复跑通过，偶发原因尚未查明。
+## 项目包含什么
 
-## 目标
+| 部分 | 用途 |
+| --- | --- |
+| Maestro 鸿蒙适配与 CLI | 复用 Maestro 的 YAML 解析、Flow 编排和报告，通过 `HarmonyOSDriver → HDC / UITest` 操作设备 |
+| VSCode 操作录制插件 | 显示设备截图和控件树，选择控件并执行动作，生成 YAML，保存并回放 |
+| 运行与逐台验证脚本 | 运行单个 Flow 或流程目录，按指定设备和轮次顺序执行，保存各轮结果与环境信息 |
 
-复用 Maestro 的标准 YAML、Flow、参数、条件分支和执行结果，为鸿蒙设备新增驱动与 CLI 接入。通过 HDC/UITest 获取 ArkUI 布局树并执行操作，补齐等待、重试、视频录屏、批量执行和 VSCode 操作录制辅助。
+适合把重复的界面检查写成可执行流程，也适合给应用版本回归保留结果和失败材料。现有测试集中在原生控件可被 UITest 读取的页面；自绘界面、缺少可识别节点的控件及其他系统版本，需要另行验证。
 
-本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
+VSCode 的“操作录制”记录通过插件发出的动作，不监听手机上的手工触摸。“视频录屏”是另一个可选功能，当前默认关闭并标为实验性能力。
 
-## 开发资料
+## 从哪里开始
 
-- [课题开发技术方案](docs/technical-plan.md)：实现办法、主要风险和测试安排。
-- [开发里程碑计划](docs/milestones.md)：10 月 28 日至 12 月 23 日的阶段任务、交付物和完成标准。
-- [验收清单与证据要求](docs/acceptance.md)
-- [开发环境与上游接入](docs/setup.md)
-- [主机端测试与设备查询](host-tests/README.md)
-- [VSCode 录制插件](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md)
-- [逐台设备验证](docs/device-matrix.md)
-- [仓库发布与活动启动事项](docs/publishing.md)
-- [2026-10-28 启动记录](docs/progress/2026-10-28.md)
-- [2026-10-29 插件与逐台验证](docs/progress/2026-10-29.md)
-- [第三方依赖及 AI 辅助开发记录](THIRD_PARTY.md)
+| 你要做什么 | 阅读入口 |
+| --- | --- |
+| 第一次安装、运行自己的应用测试 | [使用指南](docs/user-guide.md)：环境、源码构建、第一条流程、插件、报告与排错 |
+| 了解实现、接手开发或扩展命令 | [开发设计文档](docs/development-design.md)：模块职责、执行过程、数据转换、会话与错误处理 |
+| 查看工具参数、环境配置和录屏限制 | [环境与运行参考](docs/setup.md) |
+| 使用或开发 VSCode 插件 | [插件说明](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md) |
+| 按多台设备或多轮执行同一流程 | [逐台验证说明](docs/device-matrix.md) |
+| 为项目贡献代码 | [贡献说明](CONTRIBUTING.md)、[主机测试说明](host-tests/README.md) |
+
+当前使用方式是从源码构建包含适配补丁的 CLI，再按需打包安装 VSIX。普通 Maestro 安装包不能替代本项目构建出的鸿蒙版本；VSIX 本身也不包含 Java、HDC 或 CLI。
 
 ## 目录
 
 ```text
-docs/                   技术方案、里程碑、验收与进展
-scripts/                环境检查、固定版本上游获取
+docs/                   用户指南、开发设计、方案、验收与进展
+scripts/                源码准备、补丁、测试、运行及逐台验证
 patches/maestro/         驱动、CLI 和测试补丁
 host-tests/              不依赖设备的编译和测试入口
 packages/vscode/        VSCode 操作录制扩展、测试和打包入口
@@ -41,33 +44,42 @@ upstream.lock.json      上游来源与固定提交
 .upstream/maestro/      本地上游工作副本（不提交）
 ```
 
-本仓采用固定上游与补丁的方式维护适配代码，复用上游的 YAML 解析、Orchestra 执行和报告机制。鸿蒙驱动通过 HDC 调用设备上的 UITest，不需要另写一套 Flow 语法。
+本仓用固定上游加补丁的方式交付 Kotlin 实现；VSCode 扩展和辅助脚本直接保存在本仓。修改 `.upstream/maestro` 后必须更新补丁，其他贡献者才能获得同一实现。对应源码位置和更新方法见[开发设计](docs/development-design.md)及[补丁说明](patches/maestro/README.md)。
 
-## 开始开发
+## 一个使用例子
 
-在 PowerShell 中执行：
+仓库中的 [input-smoke.yaml](examples/flows/input-smoke.yaml) 执行：启动应用 → 检查标题 → 按提示找到输入框 → 输入文字 → 检查输入内容 → 返回 → 再检查标题 → 截图。
+
+按[使用指南](docs/user-guide.md)完成首次构建后，在仓库根目录运行：
 
 ```powershell
-if (Test-Path ./config.local.ps1) { . ./config.local.ps1 }
-./scripts/check-environment.ps1
-# 首次获取源码；已有适配改动时不要重复运行
-./scripts/prepare-upstream.ps1
-./scripts/test-host.ps1
+./scripts/run-harmonyos.ps1 `
+  -FlowPath ./examples/flows/input-smoke.yaml `
+  -BundleId org.example.demo -AbilityName EntryAbility -Module entry `
+  -Env @{ START_TEXT = '输入演示'; INPUT_HINT = '请输入姓名'; INPUT_TEXT = '熊猫测试' }
 ```
 
-测试入口会检查并应用补丁，首次运行需要下载 Gradle 和依赖。默认测试不操作手机；完整驱动、YAML 集成和 CLI 会话的测试命令见[主机测试说明](host-tests/README.md)。
+包名、Ability、模块名、页面文字和输入提示都要替换为自己的应用信息。运行前解锁手机并准备一个空输入框；此示例假定返回后仍能看到 `START_TEXT`。运行脚本会建立独立产物目录，保留实际 CLI 退出码，不自动安装应用、清除应用数据或修改权限。
 
-构建 CLI 后，可用 [run-harmonyos.ps1](scripts/run-harmonyos.ps1) 运行单个 YAML 或流程目录。脚本加载本地配置，为每次运行创建产物目录，并保留 CLI 退出码；PowerShell 7 和 Windows PowerShell 5.1 的中文、引号参数回归已通过。参数和编码限制见[环境与使用说明](docs/setup.md)。
+定位失败、流程修改和报告查看方法见[使用指南](docs/user-guide.md)。其他示例包括 [scroll-input.yaml](examples/flows/scroll-input.yaml)（滑动后重新定位输入框）、[smoke.yaml](examples/flows/smoke.yaml)（按 ID 点击）及 [recording-smoke.yaml](examples/flows/recording-smoke.yaml)（实验性视频录屏）。
 
-安装录制插件后，可在 VSCode 查看截图和控件树，点选控件、执行动作、保存标准 YAML，再交由 CLI 回放。第一版只记录插件发出的操作，不监听手机上的手动触摸。截图按操作刷新；旋转或尺寸改变后需要重新连接。安装、配置和使用步骤见[插件说明](packages/vscode/README.md)。
+## 当前可用程度
 
-示例包括 [input-smoke.yaml](examples/flows/input-smoke.yaml)（输入与截图）、[scroll-input.yaml](examples/flows/scroll-input.yaml)（滑动后重新定位输入框）、[recording-smoke.yaml](examples/flows/recording-smoke.yaml)（视频录屏）和 [smoke.yaml](examples/flows/smoke.yaml)（按控件 ID 点击）。需按测试应用提供包名、启动 Ability 和页面文字。
+截至 2026-10-29，项目处于 **M3 部分完成**，已有以下验证记录：
 
-视频录屏需要显式设置 `MAESTRO_HARMONYOS_RECORDING=huawei-system`。该后端依赖 Huawei 系统录屏服务和 `mediatool`，不是通用 OpenHarmony 接口；测试期间需独占系统录屏，不要手工切换。默认最长 3 分钟、导出上限 512 MiB，详细限制见[录屏说明](docs/setup.md#视频录屏)，正常与失败视频的实测结果见[验收记录](docs/acceptance.md)。
+- 一台 ALN-AL80 / API 26 真机通过标准 YAML 的启动、文字定位、中文输入、断言、返回、滑动后重新定位和截图；单设备批量执行 2/2 通过。
+- VSCode 插件 0.1.0 在 VSCode 1.140 上完成真实面板的 8 步录制、YAML 保存和一键 CLI 回放；逐台验证脚本在同一设备执行 1/1 通过。
+- 可选 Huawei 系统录屏已验证正常流程和失败收尾；短视频曾出现尾部解码错误，原因尚未查明，仍默认关闭。
 
-每个 CLI 会话操作一台本机 HDC 设备，可批量运行 Flow；[矩阵脚本](docs/device-matrix.md)按指定设备列表逐台调用并汇总结果。HAP 安装、权限修改、清除应用数据、Studio/MCP 和多设备分片尚未支持。已通过的流程使用本地演示应用，不代替活动约定的官方示例、20 轮统计或跨设备兼容验证。
+以上使用本地演示应用。第二台真机、其他系统版本、约定官方示例和正式 20 轮稳定性测试尚未完成。详细证据及首次失败记录见 [10-28 进展](docs/progress/2026-10-28.md)、[10-29 进展](docs/progress/2026-10-29.md)；功能范围见[环境参考](docs/setup.md#已实现与限制)。
+
+目前没有 HAP 安装、权限修改、清除应用数据、Studio/MCP、多设备分片和云端运行支持。每个 CLI 会话只操作一台本机 HDC 设备，逐台验证脚本依次建立这些会话。
 
 ## 活动交付
+
+- [课题开发技术方案](docs/technical-plan.md)：目标、实施办法、风险和验证安排。
+- [开发里程碑](docs/milestones.md)、[验收清单](docs/acceptance.md)、[活动启动事项](docs/publishing.md)。
+- [第三方依赖及 AI 辅助记录](THIRD_PARTY.md)。
 
 计划交付日期：**2026-12-23（北京时间）**。报名资格、确认时间及验收场景范围以活动组确认为准。项目进度至少每 7 个自然日记录一次。
 

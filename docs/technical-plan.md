@@ -2,6 +2,8 @@
 
 更新日期：2026-10-29
 
+本文记录课题目标、实施办法和风险。当前代码的详细结构、时序与扩展方法见[开发设计](development-design.md)；安装运行见[使用指南](user-guide.md)。
+
 项目仓库：[HarmonyPandaWorkshop/maestro-harmonyos](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos)
 
 已接入 HarmonyOSDriver、平台枚举和 CLI 会话，完成 Windows 打包。标准 YAML 已在一台真机上通过启动、文字定位、中文输入、断言、返回、滑动后定位和截图；单设备批量执行 2/2 通过。PowerShell 运行脚本的中文、引号参数回归已通过。

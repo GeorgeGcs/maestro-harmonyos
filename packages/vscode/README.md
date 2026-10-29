@@ -2,6 +2,8 @@
 
 在 VSCode 中查看鸿蒙手机截图和控件树，选择控件、执行操作，生成标准 Maestro YAML，再保存和回放。
 
+首次准备完整工具链请按仓库 `docs/user-guide.md` 操作；维护扩展或桥接接口前可阅读 `docs/development-design.md`。
+
 当前记录通过插件发出的操作，不监听手机上的手动触摸，也不启动系统视频录屏。操作仍由已有 HarmonyOSDriver 和 Maestro 执行；本地桥接协议见仓库 `docs/recorder-protocol.md`。
 
 ## 安装与配置
@@ -47,7 +49,7 @@
 
 ## 开发与验证
 
-开发使用 Node.js 22 或以上版本。本次在 Node.js 24 和 VSCode 1.140 的 Windows 环境验证。
+扩展开发使用 Node.js 22 或以上版本；同时构建 Maestro CLI 时使用 Node.js 22.12 或以上，以满足其前端资源依赖。本次在 Node.js 24 和 VSCode 1.140 的 Windows 环境验证。
 
 ```powershell
 npm ci --ignore-scripts

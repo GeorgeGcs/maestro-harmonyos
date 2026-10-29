@@ -1,6 +1,6 @@
 # 贡献说明
 
-先阅读 [技术方案](docs/technical-plan.md) 和 [验收清单](docs/acceptance.md)。
+先按[使用指南](docs/user-guide.md)了解运行方式，再阅读[开发设计](docs/development-design.md)中的模块职责、执行过程和扩展步骤。课题范围及待完成事项见[技术方案](docs/technical-plan.md)和[验收清单](docs/acceptance.md)。
 
 ## 开发与验证
 

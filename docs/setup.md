@@ -1,10 +1,13 @@
 # 开发环境与使用
 
+第一次使用先看[使用指南](user-guide.md)。本文保留环境、命令参数和功能限制的参考信息；内部实现见[开发设计](development-design.md)。
+
 已接入 `HarmonyOSDriver` 和 CLI 会话，使用上游的标准 YAML 解析与执行流程。一台 API 26 真机已通过中文输入、截图、VSCode 录制回放及逐台验证脚本，结果见[最新进展](progress/2026-10-29.md)。其他设备和系统版本仍需验证。
 
 ## 环境与源码
 
-- Git、PowerShell 和完整 JDK 17（包含 `java`、`javac`）。
+- Git、PowerShell 和完整 JDK 17（包含 `java`、`javac`）；本仓运行脚本面向 Windows。
+- Node.js 和 npm 用于完整 CLI 的前端资源构建。准备整套工具链时使用 Node.js 22.12 或以上，并确保 `node`、`npm` 在 PATH；单独构建扩展的最低要求为 Node.js 22。
 - 与目标设备匹配的 DevEco SDK / HDC，可通过 PATH 或 `MAESTRO_HARMONYOS_HDC` 指定。
 - 已授权 USB 调试的鸿蒙设备，目标应用已安装，页面可用于测试。
 - 构建完整 CLI 时还会下载上游依赖、构建 MCP viewer 并处理模拟器资源，首次构建需要联网。
@@ -13,7 +16,13 @@
 
 ```powershell
 if (Test-Path -LiteralPath ./config.local.ps1) { . ./config.local.ps1 }
-./scripts/check-environment.ps1
+# 此检查脚本只从 PATH 或 -HdcPath 查找 HDC。
+if ($env:MAESTRO_HARMONYOS_HDC -and (Test-Path -LiteralPath $env:MAESTRO_HARMONYOS_HDC -PathType Leaf)) {
+  ./scripts/check-environment.ps1 -HdcPath $env:MAESTRO_HARMONYOS_HDC
+} else {
+  ./scripts/check-environment.ps1
+}
+if ($LASTEXITCODE -ne 0) { throw '请先补齐环境。' }
 # 首次获取源码；已有适配改动时不要重复运行。
 ./scripts/prepare-upstream.ps1
 ./scripts/apply-upstream-patches.ps1
