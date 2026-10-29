@@ -1,0 +1,1415 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:agent:1",
+  "title": "Maestro HarmonyOS Agent Protocol v1 payload",
+  "$comment": "Planned protocol contract. This schema does not assert that the current runtime implements the agent.* methods. It validates result payloads, not the legacy JSONL id/method/params envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "schemaVersion",
+    "kind",
+    "revision",
+    "observedAt",
+    "data"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "maestro.harmonyos.agent"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "kind": {
+      "enum": [
+        "capabilities",
+        "preflight",
+        "session",
+        "snapshot",
+        "cancelAck",
+        "runResult",
+        "evidenceIndex"
+      ]
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "observedAt": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "capabilities"
+        },
+        "data": {
+          "$ref": "#/$defs/capabilities"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "preflight"
+        },
+        "data": {
+          "$ref": "#/$defs/preflight"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "session"
+        },
+        "data": {
+          "$ref": "#/$defs/session"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "snapshot"
+        },
+        "data": {
+          "$ref": "#/$defs/snapshot"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "cancelAck"
+        },
+        "data": {
+          "$ref": "#/$defs/cancelAck"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "runResult"
+        },
+        "data": {
+          "$ref": "#/$defs/runResult"
+        }
+      }
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "evidenceIndex"
+        },
+        "data": {
+          "$ref": "#/$defs/evidenceIndex"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?Z$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$",
+      "description": "A forward-slash path relative to the attempt artifact base directory. Absolute paths, drive prefixes, backslashes, empty components and dot components are rejected."
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "assertion",
+            "environment",
+            "unsupported",
+            "timeout",
+            "cancelled",
+            "invalid_input",
+            "transport",
+            "internal"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "errors"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_started",
+            "in_progress",
+            "complete",
+            "failed",
+            "unknown"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "complete"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "errors": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "errors": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "scope",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "verified",
+            "unverified"
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "verified"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "scope": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidenceRefs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "commandCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "implementation",
+        "interfaces",
+        "requirements",
+        "verification"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "implementation": {
+          "enum": [
+            "supported",
+            "unsupported",
+            "experimental"
+          ]
+        },
+        "interfaces": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "cli",
+              "recorder"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "verification": {
+          "$ref": "#/$defs/verification"
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "methods",
+        "commands"
+      ],
+      "properties": {
+        "methods": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "agent.describe",
+              "agent.preflight",
+              "agent.connect",
+              "agent.session",
+              "agent.snapshot",
+              "agent.action",
+              "agent.cancel",
+              "agent.release",
+              "agent.result",
+              "agent.evidence"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/commandCapability"
+          }
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "required",
+        "status",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deviceId",
+        "readiness",
+        "checks"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "readiness": {
+          "enum": [
+            "ready",
+            "blocked",
+            "unknown"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/check"
+          },
+          "minItems": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "readiness": {
+                "const": "ready"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "required": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "required"
+                  ]
+                },
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "const": true
+                      },
+                      "status": {
+                        "not": {
+                          "const": "passed"
+                        }
+                      }
+                    },
+                    "required": [
+                      "required",
+                      "status"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "readiness": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "required": {
+                      "const": true
+                    },
+                    "status": {
+                      "const": "failed"
+                    }
+                  },
+                  "required": [
+                    "required",
+                    "status"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "readiness": {
+                "const": "unknown"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "required": {
+                      "const": true
+                    },
+                    "status": {
+                      "const": "unknown"
+                    }
+                  },
+                  "required": [
+                    "required",
+                    "status"
+                  ]
+                },
+                "not": {
+                  "contains": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "const": true
+                      },
+                      "status": {
+                        "const": "failed"
+                      }
+                    },
+                    "required": [
+                      "required",
+                      "status"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "owner",
+        "state",
+        "activeAttemptId",
+        "lockState",
+        "cleanup",
+        "handoffReady"
+      ],
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "owner": {
+          "enum": [
+            "bridge",
+            "cli"
+          ]
+        },
+        "state": {
+          "enum": [
+            "idle",
+            "inspecting",
+            "busy",
+            "cancelling",
+            "releasing",
+            "closed",
+            "unknown"
+          ]
+        },
+        "activeAttemptId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lockState": {
+          "enum": [
+            "held",
+            "released",
+            "unknown"
+          ]
+        },
+        "cleanup": {
+          "$ref": "#/$defs/cleanup"
+        },
+        "handoffReady": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "closed"
+              },
+              "activeAttemptId": {
+                "type": "null"
+              },
+              "lockState": {
+                "const": "released"
+              },
+              "cleanup": {
+                "properties": {
+                  "state": {
+                    "const": "complete"
+                  }
+                }
+              }
+            },
+            "required": [
+              "state",
+              "activeAttemptId",
+              "lockState",
+              "cleanup"
+            ]
+          },
+          "then": {
+            "properties": {
+              "handoffReady": {
+                "const": true
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "handoffReady": {
+                "const": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "idle",
+                  "inspecting"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "activeAttemptId": {
+                "type": "null"
+              },
+              "lockState": {
+                "const": "held"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": [
+                  "busy",
+                  "cancelling"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "activeAttemptId": {
+                "$ref": "#/$defs/uuid"
+              },
+              "lockState": {
+                "const": "held"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "closed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "activeAttemptId": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cancelAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "attemptId",
+        "acceptance"
+      ],
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "acceptance": {
+          "enum": [
+            "accepted",
+            "already_requested",
+            "already_finished"
+          ]
+        }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseDir",
+        "manifestPaths",
+        "junitPath",
+        "evidenceIndexPath"
+      ],
+      "properties": {
+        "baseDir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifestPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relativePath"
+          },
+          "uniqueItems": true
+        },
+        "junitPath": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceIndexPath": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "runResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "attemptId",
+        "attemptNo",
+        "sessionId",
+        "deviceId",
+        "input",
+        "flow",
+        "status",
+        "startedAt",
+        "endedAt",
+        "effects",
+        "error",
+        "cleanup",
+        "failedStepId",
+        "artifacts"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attemptNo": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sessionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "flow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/flow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input": {
+          "$ref": "#/$defs/input"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "cancelling",
+            "passed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/utcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/utcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effects": {
+          "enum": [
+            "none",
+            "possible",
+            "observed"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cleanup": {
+          "$ref": "#/$defs/cleanup"
+        },
+        "failedStepId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "artifacts": {
+          "$ref": "#/$defs/artifacts"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "pending",
+                  "running",
+                  "cancelling"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "endedAt": {
+                "type": "null"
+              },
+              "error": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "endedAt": {
+                "$ref": "#/$defs/utcTimestamp"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "passed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "null"
+              },
+              "failedStepId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "blocked"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "effects": {
+                "const": "none"
+              },
+              "error": {
+                "$ref": "#/$defs/error"
+              },
+              "startedAt": {
+                "type": "null"
+              },
+              "failedStepId": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "failed",
+                  "blocked",
+                  "cancelled",
+                  "unknown"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/error"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "flow",
+        "commandIndex",
+        "commandName"
+      ],
+      "properties": {
+        "flow": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commandIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commandName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "state",
+        "path",
+        "sha256",
+        "capturedAt",
+        "phase",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "screenshot",
+            "hierarchy",
+            "log",
+            "commands",
+            "video"
+          ]
+        },
+        "state": {
+          "enum": [
+            "available",
+            "missing",
+            "capture_failed"
+          ]
+        },
+        "path": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capturedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/utcTimestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "enum": [
+            "before",
+            "after",
+            "failure"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/relativePath"
+              },
+              "error": {
+                "type": "null"
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "capturedAt": {
+                "$ref": "#/$defs/utcTimestamp"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "capture_failed"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "$ref": "#/$defs/error"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidenceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "source",
+        "status",
+        "error",
+        "evidence"
+      ],
+      "properties": {
+        "stepId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/source"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "unknown",
+            "skipped"
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        }
+      }
+    },
+    "evidenceIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runId",
+        "attemptId",
+        "entries"
+      ],
+      "properties": {
+        "runId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidenceEntry"
+          }
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "snapshotId",
+        "width",
+        "height",
+        "screenshot",
+        "nodes"
+      ],
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/uuid"
+        },
+        "snapshotId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "screenshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mimeType",
+            "base64"
+          ],
+          "properties": {
+            "mimeType": {
+              "const": "image/png"
+            },
+            "base64": {
+              "type": "string",
+              "minLength": 1,
+              "contentEncoding": "base64",
+              "contentMediaType": "image/png"
+            }
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "nodeId",
+              "parentId",
+              "text",
+              "hintText",
+              "resourceId",
+              "className",
+              "bounds",
+              "enabled",
+              "clickable"
+            ],
+            "properties": {
+              "nodeId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "parentId": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "text": {
+                "type": "string"
+              },
+              "hintText": {
+                "type": "string"
+              },
+              "resourceId": {
+                "type": "string"
+              },
+              "className": {
+                "type": "string"
+              },
+              "bounds": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "left",
+                  "top",
+                  "right",
+                  "bottom"
+                ],
+                "properties": {
+                  "left": {
+                    "type": "integer"
+                  },
+                  "top": {
+                    "type": "integer"
+                  },
+                  "right": {
+                    "type": "integer"
+                  },
+                  "bottom": {
+                    "type": "integer"
+                  }
+                }
+              },
+              "enabled": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "clickable": {
+                "anyOf": [
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "action",
+            "flow"
+          ]
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

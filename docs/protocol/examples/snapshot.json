@@ -1,0 +1,18 @@
+{
+  "protocol": "maestro.harmonyos.agent",
+  "schemaVersion": 1,
+  "kind": "snapshot",
+  "revision": 1,
+  "observedAt": "2026-10-29T00:00:01Z",
+  "data": {
+    "sessionId": "33333333-3333-4333-8333-333333333333",
+    "snapshotId": "fixture-snapshot-1",
+    "width": 1,
+    "height": 1,
+    "screenshot": {
+      "mimeType": "image/png",
+      "base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg=="
+    },
+    "nodes": []
+  }
+}

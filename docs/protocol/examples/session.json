@@ -1,0 +1,19 @@
+{
+  "protocol": "maestro.harmonyos.agent",
+  "schemaVersion": 1,
+  "kind": "session",
+  "revision": 3,
+  "observedAt": "2026-10-29T00:00:03Z",
+  "data": {
+    "sessionId": "33333333-3333-4333-8333-333333333333",
+    "owner": "bridge",
+    "state": "closed",
+    "activeAttemptId": null,
+    "lockState": "released",
+    "cleanup": {
+      "state": "complete",
+      "errors": []
+    },
+    "handoffReady": true
+  }
+}

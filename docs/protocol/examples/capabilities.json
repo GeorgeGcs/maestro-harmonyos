@@ -1,0 +1,71 @@
+{
+  "protocol": "maestro.harmonyos.agent",
+  "schemaVersion": 1,
+  "kind": "capabilities",
+  "revision": 0,
+  "observedAt": "2026-10-29T00:00:03Z",
+  "data": {
+    "methods": [
+      "agent.describe",
+      "agent.preflight",
+      "agent.connect",
+      "agent.session",
+      "agent.snapshot",
+      "agent.action",
+      "agent.cancel",
+      "agent.release",
+      "agent.result"
+    ],
+    "commands": [
+      {
+        "name": "launchApp",
+        "implementation": "supported",
+        "interfaces": [
+          "cli",
+          "recorder"
+        ],
+        "requirements": [
+          "device_connected",
+          "session_owned",
+          "app_installed",
+          "ability_configured"
+        ],
+        "verification": {
+          "state": "unverified",
+          "scope": null,
+          "evidenceRefs": []
+        }
+      },
+      {
+        "name": "startRecording",
+        "implementation": "experimental",
+        "interfaces": [
+          "cli"
+        ],
+        "requirements": [
+          "recording_enabled",
+          "recording_service_available",
+          "recording_exclusive"
+        ],
+        "verification": {
+          "state": "unverified",
+          "scope": null,
+          "evidenceRefs": []
+        }
+      },
+      {
+        "name": "clearState",
+        "implementation": "unsupported",
+        "interfaces": [
+          "cli"
+        ],
+        "requirements": [],
+        "verification": {
+          "state": "unverified",
+          "scope": null,
+          "evidenceRefs": []
+        }
+      }
+    ]
+  }
+}

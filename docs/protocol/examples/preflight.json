@@ -1,0 +1,34 @@
+{
+  "protocol": "maestro.harmonyos.agent",
+  "schemaVersion": 1,
+  "kind": "preflight",
+  "revision": 0,
+  "observedAt": "2026-10-29T00:00:03Z",
+  "data": {
+    "deviceId": "fake-device",
+    "readiness": "unknown",
+    "checks": [
+      {
+        "name": "device_connected",
+        "required": true,
+        "status": "passed",
+        "code": "DEVICE_CONNECTED",
+        "message": "The selected target was listed by HDC."
+      },
+      {
+        "name": "app_installed",
+        "required": true,
+        "status": "passed",
+        "code": "APP_INSTALLED",
+        "message": "The package org.example.demo was found."
+      },
+      {
+        "name": "screen_unlocked",
+        "required": true,
+        "status": "unknown",
+        "code": "SCREEN_STATE_UNKNOWN",
+        "message": "This probe could not confirm that the screen is unlocked."
+      }
+    ]
+  }
+}
