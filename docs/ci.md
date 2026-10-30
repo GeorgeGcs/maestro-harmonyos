@@ -181,7 +181,33 @@ JUnit 检查按源文件路径和名称核对每个顶层场景，拒绝空报�
 - `agentRoot/runs/<runId>/<attemptId>/`：本次原生 JUnit、执行结果、manifest 和证据；
 - `resolution.reportPath`：核对过的内层清理或恢复凭据。
 
-不要仅打包外层产物目录，也不要扫描“最新目录”猜运行。平台接入时归档以上本次引用的文件，保留访问控制；不要把整个持久设备目录中的其他运行一起公开。上传失败应作为独立作业失败处理。
+不要仅打包外层产物目录，也不要扫描“最新目录”猜运行。用独立收集入口传入本次 CI 入口输出的 `ci-<launchId>` 目录，输出目录必须不存在：
+
+```powershell
+node scripts/ci/collect-artifacts.mjs `
+  --ci-directory D:\ci\outputs\ci-<launchId> `
+  --output-directory D:\ci\archives\<unique-name>
+```
+
+平台应在独立的 always-run 步骤调用它，再上传生成的目录；不依赖执行步骤的 `finally`。原执行退出码、收集退出码和上传结果分别保存，任何一步失败都不能被后一步的 0 覆盖。
+
+若执行进程被强制结束，尚无 `ci-result.json`，需额外明确指定持久状态文件和预期 launch ID：
+
+```powershell
+node scripts/ci/collect-artifacts.mjs `
+  --ci-directory D:\ci\outputs\ci-<launchId> `
+  --state-record D:\ci\device-state\<device-hash>.json `
+  --expected-launch-id <launchId> `
+  --output-directory D:\ci\archives\<unique-name>
+```
+
+状态必须仍属于该次 launch，且目录、runId、attemptId、设备和控制记录相符；不能拿下一次运行的状态替代。已有 `ci-result.json` 时不接受另一份状态记录覆盖它。只有 `ci-preflight.json` 的预检阻塞也可按第一条命令收集，不会因此登记设备运行。
+
+收集范围是选定 CI 目录、精确的 `agentRoot/runs/<runId>/<attemptId>/` 子树（含源码快照和未封存的 partial 文件）、对应控制记录，以及 `resolution` 明确绑定的回执、录屏快照和已登记原件。索引、manifest、源码内容地址和回执引用的哈希另行核对。不会扫描其他 attempt、按当前 gate 猜 owner，或复制整个会话目录。若原生错误指出 `DEVICE_RECOVERY_REQUIRED` 的 owner，却没有绑定回执，报告会列出未收集的恢复材料并返回非零；这不表示该 owner 没有保留原件。
+
+`archive-manifest.json` 记录每个源路径、包内路径、复制前后源哈希、目标哈希，以及原执行、cleanup、quality 数据。`status=complete` 只表示本次声明范围已收齐，可与测试 failed 或 cleanup unknown 同时出现，不是清理或移交证明。缺文件、引用冲突、文件变化、输出未收完、超出限制或读写失败时尽量保留已得材料，标记 incomplete 并返回非零；不改原状态、gate 或结果。原生 JUnit 原样复制。工具、classpath、HAP 只保留已有指纹记录，不复制其字节；此目录是执行证据包，不是构建重放包。
+
+默认最多 4096 个文件、4096 个目录，单文件 1 GiB、合计 4 GiB。收集预算为 120 秒，在阶段和读写块之间检查，不能打断操作系统中阻塞的文件调用。平台仍需为独立收集步骤设置外层超时，并另留上传时间；强杀或磁盘不可写可能只留下部分文件而没有最终清单。链接、路径穿越、跨 attempt 引用、输出与输入嵌套及覆盖旧输出均拒绝。原始日志、截图、视频和本地路径需保留访问控制，上传失败应作为独立作业失败处理。
 
 派发前检查失败时，本次目录中的 `ci-preflight.json` 记录 `blocked`、`dispatched=false` 和原因；不会创建本次设备测试的占用记录。静态解析日志也保存在本次目录中，可用于定位错误路径或名称。
 
@@ -193,6 +219,7 @@ JUnit 检查按源文件路径和名称核对每个顶层场景，拒绝空报�
 pwsh -NoProfile -File scripts/tests/test-run-harmonyos.ps1
 pwsh -NoProfile -File scripts/tests/test-ci-device-suite.ps1
 node --test scripts/tests/test-ci-suite.mjs
+node --test scripts/tests/test-ci-collect-artifacts.mjs
 pwsh -NoProfile -File scripts/tests/test-ci-junit.ps1
 ```
 
