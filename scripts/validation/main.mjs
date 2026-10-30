@@ -7,11 +7,12 @@ import { artifact, canonical, digestPattern, hashFile, inside, key, noLinks, rea
 import { checkFrozen, freezePlan, saveSummary } from './plan.mjs';
 import { inspectAttempt, verifyAttemptInput } from './retry-evidence.mjs';
 import { verifyControlRuntime } from './runtime.mjs';
+import { hasRuntimeContract } from './static-plan.mjs';
 import { reviewPreparation, unknownPreparationReview } from './preparation.mjs';
 
 async function load(summaryPath) {
   const state = (await readJson(summaryPath)).value, frozen = await readJson(state.planPath), plan = frozen.value;
-  requireValue(state.protocol === 'maestro.harmonyos.validation-summary' && [1, 2].includes(state.schemaVersion) &&
+  requireValue(state.protocol === 'maestro.harmonyos.validation-summary' && [1, 2, 3].includes(state.schemaVersion) &&
     plan.protocol === 'maestro.harmonyos.validation-plan' && plan.schemaVersion === state.schemaVersion &&
     frozen.sha256 === state.planSha256 && plan.planId === state.planId, 'Frozen plan and summary do not match.');
   requireValue(state.batches.length === plan.batches.length && state.slots.length === plan.batches.length * plan.repeat,
@@ -30,9 +31,9 @@ async function load(summaryPath) {
   return { state, plan };
 }
 
-export async function startBatch(input) {
+export async function startBatch(input, { beforeSummarySave } = {}) {
   const { state, plan } = await load(input.summaryPath);
-  requireValue(plan.schemaVersion === 2, 'Legacy frozen v1 plans can be rechecked but cannot dispatch new executions. Create a new v2 snapshot.');
+  requireValue(plan.schemaVersion === 3, 'Legacy frozen v1/v2 plans can be rechecked but cannot dispatch new executions. Create a new v3 snapshot.');
   await checkFrozen(plan);
   const batch = state.batches.find(value => value.batchId === input.batchId);
   requireValue(state.status === 'running' && batch?.status === 'pending', 'A batch cannot be restarted.');
@@ -40,7 +41,22 @@ export async function startBatch(input) {
   requireValue(path.isAbsolute(input.outputDirectory) && path.isAbsolute(input.pointerPath) && path.isAbsolute(input.controlIndexPath), 'Batch output references must be absolute.');
   Object.assign(batch, { status: 'running', startedAt: new Date().toISOString(), outputDirectory: input.outputDirectory,
     pointerPath: input.pointerPath, controlIndexPath: input.controlIndexPath });
+  // Internal interleaving hook for host tests; dispatch never obtains it from request data or environment.
+  if (beforeSummarySave !== undefined) {
+    requireValue(typeof beforeSummarySave === 'function', 'beforeSummarySave must be a function.');
+    await beforeSummarySave();
+  }
   await saveSummary(input.summaryPath, state, plan);
+  if (state.staticInspectionComplete !== true) {
+    const reason = 'Static inspection failed before dispatch: ' + (state.staticInspectionError ?? 'Incomplete retained evidence.');
+    Object.assign(batch, { status: 'not-run', stopDevice: true, reason, endedAt: new Date().toISOString() });
+    delete batch.startedAt;
+    for (const slot of state.slots.filter(slot => slot.batchId === batch.batchId)) {
+      Object.assign(slot, { status: 'not-run', firstPassStatus: 'not_run', reason });
+    }
+    await saveSummary(input.summaryPath, state, plan);
+    throw new Error(reason);
+  }
   return { batch, unit: plan.units.find(unit => unit.unitId === batch.unitId),
     profile: plan.profiles[plan.units.find(unit => unit.unitId === batch.unitId).profile], repeat: plan.repeat, runTimeoutSeconds: plan.runTimeoutSeconds };
 }
@@ -72,7 +88,7 @@ function matrixIdentity(matrix, unit, profile, batch, plan) {
       const frozen = plan.buildFiles.filter(file => path.basename(file.path) === jar.file);
       requireValue(frozen.length === 1 && frozen[0].sha256 === jar.sha256,
         'Formal build fingerprint does not uniquely cover the executed implementation JAR: ' + jar.file);
-      if (plan.schemaVersion === 2) requireValue(plan.runtime.classpath.filter(file => path.basename(file.path) === jar.file &&
+      if (hasRuntimeContract(plan)) requireValue(plan.runtime.classpath.filter(file => path.basename(file.path) === jar.file &&
         file.sha256 === jar.sha256).length === 1, 'Matrix implementation JAR is absent from the frozen runtime classpath: ' + jar.file);
     }
     requireValue(requiredRoles.every(role => observedRoles.has(role)), 'Formal implementation fingerprint must include CLI, client, orchestra, and orchestra-models JARs.');
@@ -117,7 +133,7 @@ export async function importBatch(input, recheck = null) {
   const originalBatch = { ...batch };
   for (const slot of selected) Object.assign(slot, { status: 'pending', firstPassStatus: 'not_run', finalPass: false,
     cleanup: null, evidenceComplete: false, coverageComplete: false, retryComplete: false,
-    ...(plan.schemaVersion === 2 ? { runtimeVerification: { state: 'unknown', reason: 'No executed runtime record.' } } : {}),
+    ...(hasRuntimeContract(plan) ? { runtimeVerification: { state: 'unknown', reason: 'No executed runtime record.' } } : {}),
     videoComplete: !plan.evidencePolicy.requireVideo, reason: null, flows: [], videos: [] });
   batch.releaseConfirmed = false;
   batch.matrixExitCode = input.matrixExitCode;
@@ -156,7 +172,7 @@ export async function importBatch(input, recheck = null) {
         if (!control) { slot.status = 'not-run'; slot.firstPassStatus = 'not_run'; slot.reason = run.reason; batch.stopDevice = true; continue; }
         attempted++;
         slot.controlPath = control.path; slot.controlSha256 = control.sha256;
-        if (plan.schemaVersion === 2) {
+        if (hasRuntimeContract(plan)) {
           try {
             const checked = await verifyControlRuntime(plan.runtime, control.value);
             slot.runtimeVerification = { state: checked.verified ? 'verified' : 'unknown', reason: checked.reason ?? null };
@@ -220,7 +236,7 @@ async function recheckResults(state, plan) {
   } else for (const slot of state.slots.filter(slot => slot.batchId === batch.batchId)) {
     Object.assign(slot, { firstPassStatus: slot.status === 'not-run' ? 'not_run' : 'unknown', finalPass: false,
       evidenceComplete: false, coverageComplete: false, retryComplete: false, videoComplete: false,
-      ...(plan.schemaVersion === 2 ? { runtimeVerification: { state: 'unknown', reason: 'No retained matrix invocation.' } } : {}) });
+      ...(hasRuntimeContract(plan) ? { runtimeVerification: { state: 'unknown', reason: 'No retained matrix invocation.' } } : {}) });
   }
 }
 
@@ -246,11 +262,11 @@ export async function finishPlan(input) {
   // Completion never constitutes a human review, including when invoked again later.
   for (const slot of state.slots) {
     slot.manualIntervention = 'unknown'; slot.reviewNotes = null;
-    if (plan.schemaVersion === 2) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
+    if (hasRuntimeContract(plan)) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
   }
   state.status = input.interrupted ? 'interrupted' : 'completed'; state.endedAt = new Date().toISOString();
   await saveSummary(input.summaryPath, state, plan);
-  return { qualified: state.qualified, formalQualified: state.schemaVersion === 2 && state.formalQualified === true,
+  return { qualified: state.qualified, formalQualified: hasRuntimeContract(plan) && state.formalQualified === true,
     originalExecutionSucceeded: state.batches.every(batch => batch.matrixExitCode === 0), summaryPath: input.summaryPath };
 }
 
@@ -273,7 +289,7 @@ export async function reviewPlan(input) {
     const slot = state.slots.find(value => value.slotId === item.slotId);
     requireValue(slot && !reviewed.has(item.slotId) && ['none', 'present'].includes(item.manualIntervention), 'Invalid or repeated reviewed slot.');
     reviewed.add(item.slotId); slot.manualIntervention = item.manualIntervention; slot.reviewNotes = item.notes ?? null;
-    if (plan.schemaVersion === 2) slot.preparationVerification = review.schemaVersion === 2 && item.preparation ?
+    if (hasRuntimeContract(plan)) slot.preparationVerification = review.schemaVersion === 2 && item.preparation ?
       await reviewPreparation({ entry: preparationFor(plan, slot), review: item.preparation, observedAt: review.observedAt }) :
       unknownPreparationReview(preparationFor(plan, slot));
     const reports = [];
@@ -297,13 +313,13 @@ export async function reviewPlan(input) {
   (state.reviews ??= []).push({ path: audit.path, sha256: audit.sha256, observedAt: review.observedAt });
   state.reviewError = null;
   await saveSummary(input.summaryPath, state, plan); return { qualified: state.qualified,
-    formalQualified: state.schemaVersion === 2 && state.formalQualified === true, groups: state.groups };
+    formalQualified: hasRuntimeContract(plan) && state.formalQualified === true, groups: state.groups };
   } catch (error) {
     // Keep the fresh evidence check visible even when a later review attachment fails.
     state.reviewError = error.message;
     for (const slot of state.slots) {
       slot.manualIntervention = 'unknown'; slot.videoComplete = !plan.evidencePolicy.requireVideo;
-      if (plan.schemaVersion === 2) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
+      if (hasRuntimeContract(plan)) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
     }
     await saveSummary(input.summaryPath, state, plan);
     throw error;

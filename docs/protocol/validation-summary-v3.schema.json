@@ -1,0 +1,1349 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:validation-summary:3",
+  "title": "Validation summary v3",
+  "$comment": "Structure only. staticInspectionComplete and qualification flags must be recomputed after retained static evidence and original execution records are verified. A declared true value is not proof. See retry-and-validation.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "schemaVersion",
+    "planId",
+    "planPath",
+    "planSha256",
+    "status",
+    "createdAt",
+    "updatedAt",
+    "batches",
+    "slots",
+    "groups",
+    "qualified",
+    "formalEligible",
+    "formalQualified",
+    "staticInspectionComplete",
+    "staticInspectionError"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "maestro.harmonyos.validation-summary"
+    },
+    "schemaVersion": {
+      "const": 3
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "planPath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "planSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "interrupted"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "endedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "batches": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/batch"
+      }
+    },
+    "slots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/slot"
+      }
+    },
+    "groups": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/group"
+      }
+    },
+    "qualified": {
+      "type": "boolean"
+    },
+    "reviews": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "observedAt"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+            "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "reviewError": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "formalEligible": {
+      "type": "boolean"
+    },
+    "formalQualified": {
+      "type": "boolean"
+    },
+    "staticInspectionComplete": {
+      "type": "boolean",
+      "description": "Derived from successful verification of retained static parser evidence, never trusted from request or summary declarations."
+    },
+    "staticInspectionError": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Failure reason from re-verifying retained static inspection evidence, or null when no failure is recorded."
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "absoluteFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "thresholdPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "minimumRate"
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "firstPass",
+            "finalPass"
+          ]
+        },
+        "minimumRate": {
+          "type": "string",
+          "pattern": "^(?:0(?:\\.\\d{1,6})?|1(?:\\.0{1,6})?)$"
+        }
+      }
+    },
+    "evidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requireVideo"
+      ],
+      "properties": {
+        "requireVideo": {
+          "type": "boolean"
+        },
+        "decoderSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "deviceId"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+        },
+        "matrixInfoSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "batchIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchId",
+        "unitId",
+        "deviceId"
+      ],
+      "properties": {
+        "batchId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"
+    },
+    "hashReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "agentError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "assertion",
+            "environment",
+            "unsupported",
+            "timeout",
+            "cancelled",
+            "invalid_input",
+            "transport",
+            "internal"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "errors"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "not_started",
+            "in_progress",
+            "complete",
+            "failed",
+            "unknown"
+          ]
+        },
+        "errors": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/agentError"
+          }
+        }
+      }
+    },
+    "release": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason"
+          ],
+          "properties": {
+            "reason": {
+              "const": "all controls remained planned"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sessionId",
+            "reportPath",
+            "reportSha256",
+            "observedAt",
+            "recordingResources",
+            "recordingCheckedFiles"
+          ],
+          "properties": {
+            "sessionId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "reportPath": {
+              "type": "string",
+              "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+              "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+            },
+            "reportSha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "observedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "recordingResources": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/absoluteFingerprint"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "recordingCheckedFiles": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        }
+      ]
+    },
+    "batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchId",
+        "unitId",
+        "deviceId",
+        "status",
+        "matrixExitCode",
+        "stopDevice",
+        "releaseConfirmed"
+      ],
+      "properties": {
+        "batchId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "not-run",
+            "unknown"
+          ]
+        },
+        "matrixExitCode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stopDevice": {
+          "type": "boolean"
+        },
+        "releaseConfirmed": {
+          "type": "boolean"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "endedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "outputDirectory": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "pointerPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "controlIndexPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "matrixPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "matrixSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "pointerSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "controlIndexSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "agentRoot": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "observedHost": {
+          "type": "object",
+          "description": "Unmodified matrix v1 host metadata."
+        },
+        "observedDevice": {
+          "type": "object",
+          "description": "Unmodified matrix v1 device info."
+        },
+        "observedBuild": {
+          "type": "object",
+          "description": "Unmodified matrix v1 build metadata."
+        },
+        "release": {
+          "$ref": "#/$defs/release"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchId",
+        "unitId",
+        "deviceId",
+        "slotId",
+        "round",
+        "status",
+        "firstPassStatus",
+        "finalPass",
+        "manualIntervention",
+        "cleanup",
+        "evidenceComplete",
+        "coverageComplete",
+        "retryComplete",
+        "videoComplete",
+        "runId",
+        "attemptId",
+        "reason",
+        "runtimeVerification",
+        "preparationVerification"
+      ],
+      "properties": {
+        "batchId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "slotId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$"
+        },
+        "round": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "not-run",
+            "passed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "firstPassStatus": {
+          "enum": [
+            "passed",
+            "not_passed",
+            "unknown",
+            "not_run"
+          ]
+        },
+        "finalPass": {
+          "type": "boolean"
+        },
+        "manualIntervention": {
+          "enum": [
+            "unknown",
+            "none",
+            "present"
+          ]
+        },
+        "cleanup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cleanup"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "evidenceComplete": {
+          "type": "boolean"
+        },
+        "coverageComplete": {
+          "type": "boolean"
+        },
+        "retryComplete": {
+          "type": "boolean"
+        },
+        "videoComplete": {
+          "type": "boolean"
+        },
+        "runId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attemptNo": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cliExitCode": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "startedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rawStatus": {
+          "enum": [
+            "not-run",
+            "passed",
+            "failed",
+            "blocked",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "controlPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "controlSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "resultPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "resultSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidenceIndexPath": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "evidenceIndexSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "checkedFiles",
+            "unavailable",
+            "steps",
+            "hashes"
+          ],
+          "properties": {
+            "checkedFiles": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unavailable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "steps": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "hashes": {
+              "type": "array",
+              "minItems": 0,
+              "items": {
+                "$ref": "#/$defs/hashReference"
+              }
+            }
+          }
+        },
+        "retryUsed": {
+          "type": "boolean"
+        },
+        "flows": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/flow"
+          }
+        },
+        "videos": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/hashReference"
+          }
+        },
+        "reviewNotes": {
+          "description": "Copied human notes, or null after finish."
+        },
+        "videoReports": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256",
+              "videoSha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+                "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "videoSha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "runtimeVerification": {
+          "$ref": "#/$defs/runtimeVerification"
+        },
+        "preparationVerification": {
+          "$ref": "#/$defs/preparationVerification"
+        }
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "flowExecutionId",
+        "success",
+        "covered",
+        "retryUsed",
+        "summaryPath",
+        "summarySha256",
+        "tracePath",
+        "traceSha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "flowExecutionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "success": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "covered": {
+          "type": "boolean"
+        },
+        "retryUsed": {
+          "type": "boolean"
+        },
+        "summaryPath": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"
+        },
+        "summarySha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "tracePath": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\:\\u0000-\\u001f\\u007f])[^/]+(?:/[^/]+)*$"
+        },
+        "traceSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unitId",
+        "deviceId",
+        "planned",
+        "firstPassCount",
+        "finalPassCount",
+        "firstPassRate",
+        "finalPassRate",
+        "minimumPassCount",
+        "thresholdMet",
+        "unattendedPassCount",
+        "complete",
+        "qualified",
+        "failed",
+        "cancelled",
+        "blocked",
+        "unknown",
+        "notRun",
+        "runtimeComplete",
+        "preparationComplete",
+        "formalEligible",
+        "formalQualified",
+        "staticInspectionComplete"
+      ],
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "planned": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "firstPassCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "finalPassCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "firstPassRate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "finalPassRate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimumPassCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "thresholdMet": {
+          "type": "boolean"
+        },
+        "unattendedPassCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cancelled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "blocked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unknown": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notRun": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runtimeComplete": {
+          "type": "boolean"
+        },
+        "preparationComplete": {
+          "type": "boolean"
+        },
+        "formalEligible": {
+          "type": "boolean"
+        },
+        "formalQualified": {
+          "type": "boolean"
+        },
+        "staticInspectionComplete": {
+          "type": "boolean",
+          "description": "Derived from successful verification of retained static parser evidence, never trusted from request or summary declarations."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "formalEligible": {
+                "const": true
+              }
+            },
+            "required": [
+              "formalEligible"
+            ]
+          },
+          "then": {
+            "properties": {
+              "runtimeComplete": {
+                "const": true
+              },
+              "preparationComplete": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "formalQualified": {
+                "const": true
+              }
+            },
+            "required": [
+              "formalQualified"
+            ]
+          },
+          "then": {
+            "properties": {
+              "qualified": {
+                "const": true
+              },
+              "formalEligible": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "formalEligible": {
+                "const": true
+              }
+            },
+            "required": [
+              "formalEligible"
+            ]
+          },
+          "then": {
+            "properties": {
+              "staticInspectionComplete": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "properties": {
+              "staticInspectionComplete": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "qualified": {
+                "const": true
+              }
+            },
+            "required": [
+              "qualified"
+            ]
+          },
+          "then": {
+            "properties": {
+              "staticInspectionComplete": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "runtimeVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unknown",
+            "verified",
+            "mismatch"
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "preparationVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "preparationId",
+        "preparationSha256",
+        "reviewedAt",
+        "basis",
+        "installationUnchanged",
+        "preparationUnchanged",
+        "reason"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "unknown",
+            "confirmed",
+            "changed"
+          ]
+        },
+        "preparationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preparationSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reviewedAt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "basis": {
+          "anyOf": [
+            {
+              "const": "operator_attested"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installationUnchanged": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preparationUnchanged": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "confirmed"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preparationId": {
+                "$ref": "#/$defs/uuid"
+              },
+              "preparationSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "reviewedAt": {
+                "$ref": "#/$defs/timestamp"
+              },
+              "basis": {
+                "const": "operator_attested"
+              },
+              "installationUnchanged": {
+                "const": true
+              },
+              "preparationUnchanged": {
+                "const": true
+              },
+              "reason": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "formalQualified": {
+            "const": true
+          }
+        },
+        "required": [
+          "formalQualified"
+        ]
+      },
+      "then": {
+        "properties": {
+          "qualified": {
+            "const": true
+          },
+          "formalEligible": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "formalEligible": {
+            "const": true
+          }
+        },
+        "required": [
+          "formalEligible"
+        ]
+      },
+      "then": {
+        "properties": {
+          "staticInspectionComplete": {
+            "const": true
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "qualified": {
+            "const": true
+          }
+        },
+        "required": [
+          "qualified"
+        ]
+      },
+      "then": {
+        "properties": {
+          "staticInspectionComplete": {
+            "const": true
+          }
+        }
+      }
+    }
+  ]
+}

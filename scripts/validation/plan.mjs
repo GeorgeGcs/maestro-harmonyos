@@ -3,6 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, canonical, digestPattern, hash, hashFile, inside, key, noLinks, readJson, requireValue, samePath, sourceFiles } from './io.mjs';
 import { freezeRuntime, checkRuntime } from './runtime.mjs';
+import { inspectFlows } from './static-flows.mjs';
+import { hasRuntimeContract, hasStaticContract, checkStaticInspection, staticInspectionComplete } from './static-plan.mjs';
 import { freezePreparations, checkPreparations, unknownPreparationReview } from './preparation.mjs';
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -115,16 +117,22 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
   const toolFiles = [];
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/test-device-matrix.ps1', 'scripts/test-validation-plan.ps1',
     'scripts/validation/main.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/io.mjs', 'scripts/validation/retry-evidence.mjs',
-    'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
+    'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs', 'scripts/validation/static-flows.mjs',
+    'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
     'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
     'config.local.ps1', 'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch']) {
     const file = path.resolve(projectRoot, name);
-    try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (error.code !== 'ENOENT' || ['scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java'].includes(name)) throw error; }
   }
   const runtime = await freezeRuntime(projectRoot, options, environment);
+  for (const unit of units) {
+    const inspectionDirectory = path.join(outputDirectory, 'static', unit.unitId);
+    await fs.mkdir(inspectionDirectory, { recursive: true });
+    unit.staticInspection = await inspectFlows(path.resolve(projectRoot), unit.sourceRoot, unit.requiredTopLevelFlows, unit.sources, inspectionDirectory, environment);
+  }
   const preparations = await freezePreparations({ references: plan.preparations ?? [], base, planId: plan.planId,
     profiles, devices, units, applicationFiles, preparationProcedure: plan.preparationProcedure, purpose: plan.purpose });
-  const frozen = { protocol: 'maestro.harmonyos.validation-plan', schemaVersion: 2, planId: plan.planId, purpose: plan.purpose,
+  const frozen = { protocol: 'maestro.harmonyos.validation-plan', schemaVersion: 3, planId: plan.planId, purpose: plan.purpose,
     status: 'frozen', frozenAt: new Date().toISOString(), sourcePlan: { path: input.path, sha256: input.sha256 },
     projectRoot: path.resolve(projectRoot), measurementMode: plan.measurementMode, repeat: plan.repeat, runTimeoutSeconds: plan.runTimeoutSeconds,
     thresholdPolicy: plan.thresholdPolicy, profiles, devices, units, confirmation, buildFiles, applicationFiles, toolFiles, runtime, preparations,
@@ -140,9 +148,10 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
       entry.profileId === units.find(unit => unit.unitId === batch.unitId).profile)),
     runId: null, attemptId: null, reason: null })));
   await fs.mkdir(outputDirectory, { recursive: true });
+  await checkFrozen(frozen, environment);
   const snapshotPath = path.join(outputDirectory, 'plan.json');
   await atomicJson(snapshotPath, frozen, true);
-  const state = { protocol: 'maestro.harmonyos.validation-summary', schemaVersion: 2, planId: plan.planId,
+  const state = { protocol: 'maestro.harmonyos.validation-summary', schemaVersion: 3, planId: plan.planId,
     planPath: path.resolve(snapshotPath), planSha256: await hashFile(snapshotPath), status: 'running', createdAt: frozen.frozenAt,
     batches: batches.map(batch => ({ ...batch, status: 'pending', matrixExitCode: null, stopDevice: false, releaseConfirmed: false })), slots };
   await saveSummary(path.join(outputDirectory, 'validation-summary.json'), state, frozen);
@@ -150,13 +159,14 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
 }
 
 export async function checkFrozen(plan, environment = process.env, { executionPreparation = true } = {}) {
-  // CI also reuses these source checks with its own inputs v1; validation v2 alone owns these additions.
-  if (executionPreparation && plan.protocol === 'maestro.harmonyos.validation-plan' && plan.schemaVersion === 2) {
+  // CI reuses source checks with its own inputs v1. Validation v2/v3 retain the runtime contract.
+  if (executionPreparation && plan.protocol === 'maestro.harmonyos.validation-plan' && hasRuntimeContract(plan)) {
     await checkRuntime(plan.runtime, environment);
     await checkPreparations(plan.preparations);
   }
+  if (executionPreparation && plan.protocol === 'maestro.harmonyos.validation-plan') await checkStaticInspection(plan);
   for (const unit of plan.units) requireValue(canonical(await sourceFiles(unit.sourceRoot)) === canonical(unit.sources), 'Frozen Flow sources changed; create a new plan.');
-  const executionFiles = executionPreparation || plan.schemaVersion !== 2 ? [...plan.buildFiles, ...plan.applicationFiles] : [];
+  const executionFiles = executionPreparation || !hasRuntimeContract(plan) ? [...plan.buildFiles, ...plan.applicationFiles] : [];
   for (const file of [...executionFiles, ...plan.toolFiles, ...(plan.confirmation ? [plan.confirmation] : [])]) {
     requireValue(await hashFile(file.path) === file.sha256, 'Frozen implementation, application or confirmation changed.');
   }
@@ -177,26 +187,33 @@ export function aggregate(state, plan) {
       (plan.thresholdPolicy.metric === 'firstPass' ? slot.firstPassStatus === 'passed' : slot.finalPass)).length;
     const handoffComplete = state.batches.filter(batch => batch.unitId === unit.unitId && batch.deviceId === device.deviceId)
       .every(batch => batch.releaseConfirmed === true);
-    const complete = handoffComplete && slots.length > 0 && slots.some(slot => slot.coverageComplete) && slots.every(slot => ['passed', 'failed'].includes(slot.status) &&
+    const staticComplete = staticInspectionComplete(plan, unit);
+    const complete = (!hasStaticContract(plan) || staticComplete) && handoffComplete && slots.length > 0 && slots.some(slot => slot.coverageComplete) && slots.every(slot => ['passed', 'failed'].includes(slot.status) &&
       slot.cleanup?.state === 'complete' && slot.evidenceComplete && slot.retryComplete && slot.videoComplete && slot.manualIntervention !== 'unknown');
     const qualified = complete && unattended >= minimum;
     const runtimeComplete = slots.length > 0 && slots.every(slot => slot.runtimeVerification?.state === 'verified');
     const preparationComplete = slots.length > 0 && slots.every(slot => slot.preparationVerification?.state === 'confirmed');
-    const formalEligible = plan.schemaVersion === 2 && plan.purpose === 'formal' && Boolean(plan.confirmation) && runtimeComplete && preparationComplete;
+    const formalEligible = hasRuntimeContract(plan) && (!hasStaticContract(plan) || staticComplete) && plan.purpose === 'formal' && Boolean(plan.confirmation) && runtimeComplete && preparationComplete;
     return { unitId: unit.unitId, deviceId: device.deviceId, planned: slots.length, firstPassCount: first, finalPassCount: final,
       firstPassRate: first / slots.length, finalPassRate: final / slots.length, minimumPassCount: minimum,
       thresholdMet: (plan.thresholdPolicy.metric === 'firstPass' ? first : final) >= minimum,
       unattendedPassCount: unattended, complete, qualified,
-      ...(plan.schemaVersion === 2 ? { runtimeComplete, preparationComplete, formalEligible, formalQualified: formalEligible && qualified } : {}),
+      ...(hasRuntimeContract(plan) ? { runtimeComplete, preparationComplete, formalEligible, formalQualified: formalEligible && qualified } : {}),
+      ...(hasStaticContract(plan) ? { staticInspectionComplete: staticComplete } : {}),
       failed: count('failed'), cancelled: count('cancelled'), blocked: count('blocked'), unknown: count('unknown'), notRun: count('not-run') + count('pending') };
   }));
 }
 
 export async function saveSummary(file, state, plan) {
+  if (hasStaticContract(plan)) {
+    try { await checkStaticInspection(plan); state.staticInspectionError = null; }
+    catch (error) { state.staticInspectionError = error.message; }
+  }
   state.groups = aggregate(state, plan);
+  if (hasStaticContract(plan)) state.staticInspectionComplete = state.groups.every(group => group.staticInspectionComplete);
   state.updatedAt = new Date().toISOString();
   state.qualified = state.groups.every(group => group.qualified);
-  if (plan.schemaVersion === 2) {
+  if (hasRuntimeContract(plan)) {
     state.formalEligible = state.groups.every(group => group.formalEligible);
     state.formalQualified = state.groups.every(group => group.formalQualified);
   }
@@ -204,7 +221,7 @@ export async function saveSummary(file, state, plan) {
   const escape = value => String(value).replace(/[|\r\n]/g, ' ');
   const rows = state.groups.map(group => `| ${escape(group.unitId)} | ${escape(group.deviceId)} | ${group.planned} | ${group.firstPassCount}/${group.planned} | ${group.finalPassCount}/${group.planned} | ${group.unknown} | ${group.notRun} | ${group.qualified} |`);
   const text = ['# Validation plan results', '', `Plan: ${escape(state.planId)}. State: ${state.status}.`, '',
-    `Formal qualification: ${state.schemaVersion === 2 && state.formalQualified === true}. Legacy v1 and development plans cannot qualify for formal acceptance.`, '',
+    `Formal qualification: ${hasRuntimeContract(plan) && state.formalQualified === true}. Legacy v1 and development plans cannot qualify for formal acceptance.`, '',
     'First pass means no actual extra retry. Planned slots remain in the denominator. Execution, evidence, cleanup and manual review are separate.', '',
     '| Unit | Device | Planned | First pass | Final pass | Unknown | Not run | Qualified |', '| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |', ...rows, '',
     'A matrix exit code is preserved even when a numerical threshold is met. See validation-summary.json for every slot and original evidence references.', ''].join('\n');

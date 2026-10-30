@@ -8,7 +8,10 @@ $script:checks = 0
 $script:realDocuments = 0
 function Copy-Value($Value) { return $Value | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable }
 function Assert-Schema($Name, $Value, [bool]$Expected, $Label, [int]$Version = 1) {
-    if ($Name -in @('retry-summary', 'validation-plan-input', 'validation-plan', 'validation-summary', 'validation-review') -and $Value.schemaVersion -eq 2) { $Version = 2 }
+    if (-not $PSBoundParameters.ContainsKey('Version')) {
+        if ($Name -in @('retry-summary', 'validation-plan-input', 'validation-plan', 'validation-summary', 'validation-review') -and $Value.schemaVersion -eq 2) { $Version = 2 }
+        elseif ($Name -in @('validation-plan', 'validation-summary') -and $Value.schemaVersion -eq 3) { $Version = 3 }
+    }
     $actual = Test-Json -Json ($Value | ConvertTo-Json -Depth 100 -Compress) -SchemaFile (Join-Path $schemas ($Name + '-v' + $Version + '.schema.json')) -ErrorAction SilentlyContinue
     if ($actual -ne $Expected) { throw ('Schema expectation failed: ' + $Label) }
     $script:checks++
@@ -231,6 +234,83 @@ $bad=Copy-Value $confirmed2; $bad.slots[0].preparationVerification.installationU
 Assert-Schema 'validation-summary' $bad $false 'changed installation cannot remain confirmed'
 $bad=Copy-Value $summary; $bad.formalQualified=$false
 Assert-Schema 'validation-summary' $bad $false 'legacy summary format is not silently extended'
+
+# Version 3 adds retained static inspection to each frozen unit; input and review remain v2.
+$staticInspection=@{javaPath='C:\fixture\bin\java.exe';libraryDirectory='C:\fixture\cli\lib';
+    classpath=@('C:\fixture\cli\lib\maestro-cli.jar');
+    implementationFiles=@(@{path='C:\fixture\bin\java.exe';sha256=$sha},
+        @{path='C:\fixture\scripts\ci\InspectFlows.java';sha256=$sha},
+        @{path='C:\fixture\cli\lib\maestro-cli.jar';sha256=$sha});
+    evidenceFiles=@(@{path='C:\fixture\static\login\static-request.json';sha256=$sha},
+        @{path='C:\fixture\static\login\static-flows.json';sha256=$sha},
+        @{path='C:\fixture\static\login\static-parser.stdout.log';sha256=$sha},
+        @{path='C:\fixture\static\login\static-parser.stderr.log';sha256=$sha});
+    dependencies=@(@{path='C:\fixture\flows\login.yaml';sha256=$sha;kind='yaml'});scriptsExecuted=$false}
+$frozen3=Copy-Value $frozen2; $frozen3.schemaVersion=3; $frozen3.units[0].staticInspection=Copy-Value $staticInspection
+Assert-Schema 'validation-plan' $frozen3 $true 'v3 development freeze requires retained static inspection'
+$formalFrozen3=Copy-Value $formalFrozen2; $formalFrozen3.schemaVersion=3; $formalFrozen3.units[0].staticInspection=Copy-Value $staticInspection
+Assert-Schema 'validation-plan' $formalFrozen3 $true 'v3 formal freeze retains runtime and preparation requirements'
+$scriptFrozen3=Copy-Value $frozen3
+$scriptFrozen3.units[0].sources+=@{path='C:\fixture\flows\helper.js';sha256=$sha}
+$scriptFrozen3.units[0].staticInspection.dependencies+=@{path='C:\fixture\flows\helper.js';sha256=$sha;kind='script'}
+Assert-Schema 'validation-plan' $scriptFrozen3 $true 'static script dependencies are explicit without claiming execution'
+$bad=Copy-Value $frozen3; $null=$bad.units[0].Remove('staticInspection')
+Assert-Schema 'validation-plan' $bad $false 'v3 cannot omit unit static inspection'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.scriptsExecuted=$true
+Assert-Schema 'validation-plan' $bad $false 'static inspection cannot claim script execution'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.dependencies[0].kind='asset'
+Assert-Schema 'validation-plan' $bad $false 'unknown static dependency kind is rejected'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.dependencies[0].sha256='invalid'
+Assert-Schema 'validation-plan' $bad $false 'static dependency hash is required'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.dependencies[0].path='outside.js'
+Assert-Schema 'validation-plan' $bad $false 'frozen dependency identity must be absolute'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.dependencies=@()
+Assert-Schema 'validation-plan' $bad $false 'static dependency list cannot be empty'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.classpath=@()
+Assert-Schema 'validation-plan' $bad $false 'static parser classpath cannot be empty'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.evidenceFiles=@($staticInspection.evidenceFiles[0])
+Assert-Schema 'validation-plan' $bad $false 'static request response and both logs must be retained'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.implementationFiles=@($staticInspection.implementationFiles[0])
+Assert-Schema 'validation-plan' $bad $false 'static parser implementation retains Java helper and classpath'
+$bad=Copy-Value $frozen3; $bad.units[0].staticInspection.runtimeSandbox=$true
+Assert-Schema 'validation-plan' $bad $false 'static inspection rejects an undeclared runtime sandbox claim'
+Assert-Schema 'validation-plan' $frozen3 $false 'v3 is not accepted by the original v2 schema' 2
+$bad=Copy-Value $frozen2; $bad.units[0].staticInspection=Copy-Value $staticInspection
+Assert-Schema 'validation-plan' $bad $false 'legacy v2 does not acquire v3 inspection fields'
+$bad=Copy-Value $plan2; $bad.schemaVersion=3
+Assert-Schema 'validation-plan-input' $bad $false 'v3 output does not introduce a v3 input protocol' 2
+
+$summary3=Copy-Value $summary2; $summary3.schemaVersion=3; $summary3.staticInspectionComplete=$false; $summary3.staticInspectionError=$null
+$summary3.groups[0].staticInspectionComplete=$false
+Assert-Schema 'validation-summary' $summary3 $true 'v3 summary records unverified static inspection explicitly'
+$bad=Copy-Value $summary3; $null=$bad.Remove('staticInspectionComplete')
+Assert-Schema 'validation-summary' $bad $false 'v3 summary requires the overall static result'
+$bad=Copy-Value $summary3; $null=$bad.Remove('staticInspectionError')
+Assert-Schema 'validation-summary' $bad $false 'v3 summary retains an explicit nullable static failure reason'
+$bad=Copy-Value $summary3; $bad.staticInspectionError=$false
+Assert-Schema 'validation-summary' $bad $false 'static failure reason must be text or null'
+$failedStatic3=Copy-Value $summary3; $failedStatic3.staticInspectionError='Retained static parser evidence changed.'
+Assert-Schema 'validation-summary' $failedStatic3 $true 'static verification failure retains its reason without qualification'
+$bad=Copy-Value $summary3; $null=$bad.groups[0].Remove('staticInspectionComplete')
+Assert-Schema 'validation-summary' $bad $false 'v3 summary requires each group static result'
+$bad=Copy-Value $summary3; $bad.staticInspectionComplete='true'
+Assert-Schema 'validation-summary' $bad $false 'static inspection completion must be a boolean'
+$bad=Copy-Value $summary3; $bad.formalEligible=$true
+Assert-Schema 'validation-summary' $bad $false 'formal eligibility requires verified static inspection'
+$bad=Copy-Value $summary3; $bad.qualified=$true
+Assert-Schema 'validation-summary' $bad $false 'v3 qualification requires verified static inspection'
+$bad=Copy-Value $summary3; $bad.groups[0].complete=$true
+Assert-Schema 'validation-summary' $bad $false 'v3 group completeness requires verified static inspection'
+$bad=Copy-Value $summary3; $bad.groups[0].qualified=$true
+Assert-Schema 'validation-summary' $bad $false 'v3 group qualification requires verified static inspection'
+$bad=Copy-Value $summary3; $bad.groups[0].formalEligible=$true
+$bad.groups[0].runtimeComplete=$true; $bad.groups[0].preparationComplete=$true
+Assert-Schema 'validation-summary' $bad $false 'group formal eligibility also requires static inspection'
+$staticSummary3=Copy-Value $summary3; $staticSummary3.staticInspectionComplete=$true; $staticSummary3.groups[0].staticInspectionComplete=$true
+Assert-Schema 'validation-summary' $staticSummary3 $true 'static inspection alone does not assert execution or qualification'
+Assert-Schema 'validation-summary' $summary3 $false 'v3 summary is not accepted by the original v2 schema' 2
+$bad=Copy-Value $summary2; $bad.staticInspectionComplete=$true
+Assert-Schema 'validation-summary' $bad $false 'legacy v2 summary is not silently upgraded'
 
 $review2=Copy-Value $review; $review2.schemaVersion=2
 Assert-Schema 'validation-review' $review2 $true 'v2 review can leave preparation unknown'

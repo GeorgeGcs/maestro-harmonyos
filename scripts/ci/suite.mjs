@@ -6,8 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { artifact, atomicJson, canonical, hash, hashFile, inside, key, noLinks, requireValue, samePath, sourceFiles } from '../validation/io.mjs';
 import { checkFrozen } from '../validation/plan.mjs';
 import { verifyAttemptInput } from '../validation/retry-evidence.mjs';
+import { inspectFlows, javaExecutable } from '../validation/static-flows.mjs';
 import { readMetadata as readJson, verifyBuildReference } from './snapshot-build.mjs';
 import { verifyVideos } from './verify-videos.mjs';
+
+export { inspectFlows } from '../validation/static-flows.mjs';
 
 const execute = promisify(execFile);
 const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -32,43 +35,6 @@ export async function freezeVideoPolicy(value, base, expectedFlows) {
   const ffmpeg = { path: path.resolve(base, value.ffmpeg.path), sha256: value.ffmpeg.sha256 };
   requireValue(await hashFile(ffmpeg.path) === ffmpeg.sha256, 'Declared FFmpeg fingerprint differs.');
   return { requiredFlows, ffmpeg, timeoutSeconds: value.timeoutSeconds, maxVideos: value.maxVideos, budgetSeconds: value.budgetSeconds };
-}
-
-async function javaExecutable(environment) {
-  if (environment.JAVA_HOME) return path.resolve(environment.JAVA_HOME, 'bin/java.exe');
-  const { stdout } = await execute('where.exe', ['java.exe'], { windowsHide: true, timeout: 10000, maxBuffer: 65536 });
-  const file = stdout.trim().split(/\r?\n/)[0];
-  requireValue(file && path.isAbsolute(file), 'A direct JDK 17+ Java executable is required; configure JAVA_HOME.');
-  return file;
-}
-
-export async function inspectFlows(projectRoot, sourceRoot, flows, sources, outputDirectory, environment = process.env) {
-  const java = await javaExecutable(environment), library = path.join(projectRoot, '.upstream/maestro/maestro-cli/build/install/maestro/lib');
-  const helper = path.join(projectRoot, 'scripts/ci/InspectFlows.java');
-  const classpath = (await fs.readdir(library)).filter(name => /\.jar$/i.test(name)).sort().map(name => path.join(library, name));
-  const files = [];
-  for (const file of [java, helper, ...classpath]) files.push({ path: file, sha256: await hashFile(file) });
-  const requestPath = path.join(outputDirectory, 'static-request.json'), responsePath = path.join(outputDirectory, 'static-flows.json');
-  await atomicJson(requestPath, { schemaVersion: 1, sourceRoot, flows: flows.map(({ path, name }) => ({ path, name })), sources }, true);
-  let stdout = '', stderr = '', failure = null;
-  try {
-    ({ stdout, stderr } = await execute(java, ['-Dfile.encoding=UTF-8', '--class-path', path.join(library, '*'), helper, requestPath, responsePath],
-      { cwd: projectRoot, windowsHide: true, timeout: 20000, maxBuffer: 2 * 1024 * 1024 }));
-  } catch (error) { stdout = error.stdout ?? ''; stderr = error.stderr ?? ''; failure = error; }
-  const stdoutPath = path.join(outputDirectory, 'static-parser.stdout.log'), stderrPath = path.join(outputDirectory, 'static-parser.stderr.log');
-  await fs.writeFile(stdoutPath, stdout, { flag: 'wx' }); await fs.writeFile(stderrPath, stderr, { flag: 'wx' });
-  requireValue(!failure, 'Static Maestro parsing failed before dispatch; see static-parser.stderr.log. ' + (failure?.message ?? ''));
-  const parsed = await readJson(responsePath), value = parsed.value, sourceMap = new Map(sources.map(file => [key(file.path), file.sha256]));
-  requireValue(value.protocol === 'maestro.harmonyos.ci-static-flows' && value.schemaVersion === 1 &&
-    canonical(value.flows?.map(flow => ({ path: key(flow.path), name: flow.name }))) === canonical(flows.map(flow => ({ path: key(flow.path), name: flow.name }))) &&
-    Array.isArray(value.dependencies), 'Static parser returned another Flow set.');
-  for (const dependency of value.dependencies) requireValue(typeof dependency.path === 'string' &&
-    sourceMap.get(key(dependency.path)) === dependency.sha256 && ['yaml', 'script'].includes(dependency.kind), 'A parsed dependency is outside the frozen YAML/JS source set.');
-  for (const flow of flows) requireValue(value.dependencies.some(dependency => samePath(dependency.path, flow.path)), 'Static parser omitted a top-level source.');
-  for (const file of files) requireValue(await hashFile(file.path) === file.sha256, 'Static parser implementation changed while reading inputs.');
-  return { javaPath: java, libraryDirectory: library, classpath, implementationFiles: files,
-    evidenceFiles: await Promise.all([requestPath, responsePath, stdoutPath, stderrPath].map(async file => ({ path: file, sha256: await hashFile(file) }))),
-    dependencies: value.dependencies, scriptsExecuted: false };
 }
 
 export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputDirectory, powershellPath }, environment = process.env) {
@@ -122,6 +88,7 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
     'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
     'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
     'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
+    'scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs',
     'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
     'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch', 'config.local.ps1']) {
     const file = path.join(projectRoot, name);

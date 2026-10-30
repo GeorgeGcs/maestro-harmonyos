@@ -42,19 +42,23 @@ function Invoke-Case {
 try {
     $localConfig = Join-Path $projectRoot 'config.local.ps1'
     if (Test-Path -LiteralPath $localConfig -PathType Leaf) { . $localConfig }
+    if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin/java.exe') -PathType Leaf)) {
+        throw 'The host fixture requires JAVA_HOME to identify a direct JDK 17+ installation.'
+    }
     foreach ($directory in @('scripts/validation', 'scripts/ci', 'scripts/tests', 'examples/agent-client')) {
         $null = [IO.Directory]::CreateDirectory((Join-Path $fixture $directory))
     }
     foreach ($relative in @('scripts/test-validation-plan.ps1', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-state.mjs',
+        'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
         'scripts/tests/validation-fixture.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination (Join-Path $fixture $relative)
     }
+    # Includes the shared static-flows.mjs and static-plan.mjs modules.
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'scripts/validation') -Filter '*.mjs' | Copy-Item -Destination (Join-Path $fixture 'scripts/validation')
-    $fakeDistribution = Join-Path $fixture '.upstream/maestro/maestro-cli/build/install/maestro'
-    $null = [IO.Directory]::CreateDirectory((Join-Path $fakeDistribution 'lib'))
-    $null = [IO.Directory]::CreateDirectory((Join-Path $fakeDistribution 'bin'))
-    [IO.File]::WriteAllText((Join-Path $fakeDistribution 'lib/fixture.jar'), 'Synthetic dependency; never executed.', $utf8)
-    [IO.File]::WriteAllText((Join-Path $fakeDistribution 'bin/maestro.bat'), 'Synthetic launcher placeholder.', $utf8)
+    $runtimeRequest = Join-Path $testRoot 'runtime-setup.json'
+    Write-Json $runtimeRequest @{ operation = 'runtime'; projectRoot = $fixture }
+    $null = & node (Join-Path $fixture 'scripts/tests/validation-fixture.mjs') $runtimeRequest
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the synthetic runtime and static parser.' }
     $matrix = @'
 param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts, $Repeat, $ReportPointerPath, $ControlRecordDirectory, $MatrixInvocationId, $RunTimeoutSeconds)
 $ErrorActionPreference = 'Stop'

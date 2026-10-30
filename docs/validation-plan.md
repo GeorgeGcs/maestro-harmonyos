@@ -1,6 +1,6 @@
 # 重复验证计划
 
-`scripts/test-validation-plan.ps1` 按事先确定的设备、Flow 和轮次运行验证，分别统计首次成功与重试后的最终成功。它复用 `test-device-matrix.ps1`；YAML 仍由 Maestro 执行，工具本身不解释 YAML，也不会失败补跑。
+`scripts/test-validation-plan.ps1` 按事先确定的设备、Flow 和轮次运行验证，分别统计首次成功与重试后的最终成功。它复用 `test-device-matrix.ps1`；冻结时使用安装的 Maestro YAML reader 做静态检查，运行时仍由 Maestro 执行，也不会失败补跑。
 
 输入、冻结计划、汇总和人工审核的字段及 Schema 见[协议说明](protocol/retry-and-validation.md)。结构检查之后，工具仍会核对原文件哈希、实际步骤和设备交接状态。
 
@@ -76,6 +76,10 @@ appId: ${APP_ID}
 
 相对文件路径以源计划所在目录为基准。`sourceRoot` 必须覆盖入口及其 YAML/JS 依赖；工具冻结目录内所有 `.yaml`、`.yml`、`.js` 的字节哈希。输出目录必须放在 `sourceRoot` 外。
 
+新冻结的 `plan.json` 和 `validation-summary.json` 使用 v3，输入格式仍为 development v1/v2、formal v2。冻结时，真实 Maestro YAML reader 使用 `FileAccessScope.under(sourceRoot)` 解析每个 unit，核对静态依赖、Flow 名称和原生顶层 Flow 集合，并保存解析器及结果指纹。入口、子 Flow、hooks 或 `runScript` 静态引用越界、缺失、包含 `${...}` 动态路径或未命中冻结哈希时，都会在设备派发前失败。把依赖移入 `sourceRoot` 或明确扩大该目录后，重新冻结计划。
+
+静态检查不执行 JavaScript，记录为 `scriptsExecuted=false`；它不限制脚本内部的动态文件访问或网络请求，不是 JavaScript 运行时沙箱。也不能用它替代 Flow 的实际执行、必测步骤覆盖或设备证据核验。
+
 `requiredSteps` 标明本场景必须真正执行的动作和断言，每个顶层 Flow 至少包含一项 `assertion`。`commandIndex` 取 Maestro 的源码映射，简单 Flow 从零开始；嵌套命令、hooks 和子 Flow 应先用一次开发运行的 `retry-trace.jsonl` / `evidence-index.json` 核对索引。不要用执行顺序号代替源码索引。同一源码步骤重复执行会有不同的 `stepId` 和 `executionSequence`。
 
 必测步骤只有原始 outcome 为 `Completed`，且自身、选择器及祖先流程均非 optional 时，才算覆盖。`Skipped` 和 `Warned` 不算覆盖；不能靠条件分支跳过必测断言来得到有效成功。
@@ -124,10 +128,12 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 | `finalPassCount` | 可信原始终态为 passed，包括 retry 后成功 |
 | `thresholdMet` | 选定原始通过率是否达到计划阈值 |
 | `unattendedPassCount` | 达到所选成功口径，并完成必测覆盖、证据、清理、视频检查，且人工复核确认无干预 |
-| `qualified` | 全部槽位均有确定执行结果及所需证据，且有效无人干预成功数达到阈值 |
+| `qualified` | 全部槽位均有确定执行结果及所需证据，且有效无人干预成功数达到阈值；v3 还要求静态检查完整 |
 | `runtimeComplete` | 每轮控制记录的 Java、完整 JAR 集合、PowerShell 和本地配置均匹配冻结值 |
 | `preparationComplete` | 每轮人工复核均绑定冻结的安装准备记录，并确认安装和准备状态未变 |
-| `formalEligible` | v2 正式计划具备范围确认，且运行环境与准备证据完整 |
+| `staticInspectionComplete` | v3 每组及汇总中的静态解析证据已实际复核，不能靠填写 true 取得 |
+| `staticInspectionError` | v3 汇总中的静态证据复核失败原因；无失败记录时为 null |
+| `formalEligible` | 正式计划具备范围确认，运行环境与准备证据完整；v3 还要求静态检查完整 |
 | `formalQualified` | 在 `formalEligible` 的基础上，`qualified` 也成立 |
 
 分母始终是计划槽位数。`minimumRate` 使用十进制字符串，最小成功次数按向上取整计算。缺 trace、trace 截断、身份或哈希不匹配时，首次成功记 `unknown`，不从最终 passed 推断首次成功。optional retry 只要实际进入第二次，也不算首次成功；可选步骤只出现 Warned 不会单独推翻原始最终结果，但不能充当必测覆盖。
@@ -138,7 +144,7 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 
 数字阈值达到不改写原退出码。当前执行入口要求人工复核；刚跑完时 `manualIntervention=unknown`、`qualified=false`，所以返回 1。复核可以更新资格结论，但不会把之前失败的矩阵或入口退出码改成成功。自动化系统应分别展示原执行退出码和最终审核结论。
 
-`qualified` 保留原来的统计含义。开发计划即使 `qualified=true`，也始终 `formalQualified=false`；准备证据缺失或实际运行环境不匹配，同样不能形成正式合格。原始首次/最终通过数和设备释放结论分别保留。
+v3 的每组 `complete/qualified` 和顶层 `qualified` 均要求 `staticInspectionComplete=true`；静态证据缺失或被改动时，即使原始通过率达标，也不能认定验证完整或合格。旧 v1/v2 历史复核仍使用原统计规则。开发计划即使 `qualified=true`，也始终 `formalQualified=false`；准备证据缺失或实际运行环境不匹配，同样不能形成正式合格。原始首次/最终通过数和设备释放结论分别保留。
 
 冻结时自动记录实际 Node、PowerShell、Java 可执行文件的路径与 SHA-256、`config.local.ps1` 的存在性和字节，以及安装目录 `lib` 中全部 JAR 的成员列表与哈希。CLI 使用仓库内 `.upstream/maestro/maestro-cli/build/install/maestro`，与现有运行器一致。Java 先采用绝对路径 `JAVA_HOME`，否则由同一 PowerShell 的 `Get-Command java` 选择；相对路径配置需先改为绝对路径。
 
@@ -247,7 +253,7 @@ node .\scripts\validation\main.mjs D:\maestro-plans\review-request.json
 
 两个布尔值须按本轮实际情况填写，不能由 `manualIntervention=none` 推导。缺少记录、哈希不符、引用被删改或任何一项为 false，均不能正式合格。运行后更换或删除本地 HAP 不会抹去已核验的原执行通过数，但旧准备证据不能再用于正式审核。
 
-输入 v1 的开发计划仍可冻结为新的 v2 产物；新正式执行必须使用 v2。旧冻结 v1 可以复核原始记录，但不允许派发新执行，也不会升级为正式合格。review v1 可用于人工干预和视频复核，不能补齐 v2 的准备证据。旧原件及 v1 Schema 保留。
+开发输入 v1/v2 均冻结为新的 v3 产物；新正式执行的输入仍必须使用 v2。旧冻结 v1/v2 可以按原格式复核原始记录，但不允许派发新执行，也不会补写 v3 静态检查或取得该版本的依赖保证。旧 v1 不会升级为正式合格；旧 v2 仍按原有正式资格算法复核。review v1 可用于人工干预和视频复核，不能补齐准备证据；正式审核仍使用 review v2。旧原件及 v1/v2 Schema 保留。
 
 进程被强制终止时，设备预约会留在 `running` 或 `needs_inspection`。新任务拒绝覆盖它。按 [CI 文档](ci.md) 完成原会话恢复与 `-ReconcileOnly` 核销；验证工具不自动恢复、不删除门禁、不重放未知动作。恢复结果不会把旧计划的未知或未执行槽位改为成功。
 

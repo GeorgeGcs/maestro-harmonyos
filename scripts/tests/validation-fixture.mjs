@@ -1,19 +1,59 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { hash, hashFile } from '../validation/io.mjs';
 
 export async function json(file, value) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(value, null, 2)); }
 const document = (kind, data) => ({ protocol: 'maestro.harmonyos.agent', schemaVersion: 1, kind, revision: 1, observedAt: new Date().toISOString(), data });
 
-// Metadata-only fixtures. These JAR/HAP bytes are never dispatched to a device.
+// Synthetic runtime fixtures. Java source-launch runs only this fixture parser, never device commands.
 export async function fixtureRuntime(project) {
+  const fixtureRepository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+  for (const relative of ['scripts/validation/io.mjs', 'scripts/validation/static-flows.mjs',
+    'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs']) {
+    const source = path.join(fixtureRepository, relative), destination = path.join(project, relative);
+    if (path.resolve(source) === path.resolve(destination)) continue;
+    await fs.mkdir(path.dirname(destination), { recursive: true }); await fs.copyFile(source, destination);
+  }
   const home = path.join(project, '.upstream/maestro/maestro-cli/build/install/maestro');
   await fs.mkdir(path.join(home, 'lib'), { recursive: true });
   await fs.mkdir(path.join(home, 'bin'), { recursive: true });
   await fs.writeFile(path.join(home, 'bin/maestro.bat'), 'synthetic launcher placeholder');
-  await fs.writeFile(path.join(home, 'lib/dependency.jar'), 'synthetic dependency');
+  await fs.writeFile(path.join(home, 'lib/dependency.jar'), Buffer.from('504b0506000000000000000000000000000000000000', 'hex'));
+  const helperDirectory = path.join(project, 'scripts/ci'); await fs.mkdir(helperDirectory, { recursive: true });
+  const parser = path.join(helperDirectory, 'inspect-flows-fixture.mjs');
+  await fs.writeFile(parser, `import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+const request = JSON.parse(await fs.readFile(process.argv[2], 'utf8'));
+if (request.schemaVersion !== 1 || !Array.isArray(request.flows) || !Array.isArray(request.sources)) throw new Error('Invalid fixture parser request.');
+const root = path.resolve(request.sourceRoot), dependencies = [], contents = new Map();
+for (const source of request.sources) {
+  const file = path.resolve(source.path), relative = path.relative(root, file);
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) throw new Error('Fixture source escapes its root.');
+  const bytes = await fs.readFile(file), sha256 = createHash('sha256').update(bytes).digest('hex');
+  if (sha256 !== source.sha256) throw new Error('Fixture source changed.');
+  contents.set(file, bytes.toString('utf8'));
+  dependencies.push({ path: file, sha256, kind: /\\.js$/i.test(file) ? 'script' : 'yaml' });
+}
+for (const flow of request.flows) {
+  const file = path.resolve(flow.path), content = contents.get(file);
+  if (content === undefined) throw new Error('Fixture Flow is not frozen.');
+  const configured = /^name:\\s*([^\\r\\n]+)$/m.exec(content);
+  const name = configured ? configured[1].trim() : path.basename(file, path.extname(file));
+  if (flow.name !== name) throw new Error('Fixture Flow name differs from its declaration.');
+}
+await fs.writeFile(process.argv[3], JSON.stringify({ protocol: 'maestro.harmonyos.ci-static-flows', schemaVersion: 1,
+  flows: request.flows, dependencies }), { flag: 'wx' });
+`);
+  await fs.writeFile(path.join(helperDirectory, 'InspectFlows.java'), `class InspectFlows {
+  public static void main(String[] args) throws Exception {
+    if (args.length != 2) throw new IllegalArgumentException("Expected request and response paths.");
+    System.exit(new ProcessBuilder(${JSON.stringify(process.execPath)}, ${JSON.stringify(parser)}, args[0], args[1]).inheritIO().start().waitFor());
+  }
+}
+`);
   return home;
 }
 
@@ -45,7 +85,7 @@ export async function fixturePlan(root, { repeat = 2, mode = 'per-flow', units =
   const definitions = [];
   for (let index = 0; index < units; index++) {
     const directory = path.join(flows, String(index)); await fs.mkdir(directory);
-    const source = path.join(directory, 'flow.yaml'); await fs.writeFile(source, 'appId: org.example.fixture\n---\n- assertTrue: true\n');
+    const source = path.join(directory, 'flow.yaml'); await fs.writeFile(source, 'appId: org.example.fixture\nname: fixture-' + index + '\n---\n- assertTrue: true\n');
     definitions.push({ unitId: 'unit-' + index, profile: 'fixture', entry: mode === 'suite' ? directory : source, sourceRoot: directory,
       requiredTopLevelFlows: [{ path: source, name: 'fixture-' + index, requiredSteps: [{ path: source, commandIndex: 0, role: 'assertion' }] }] });
   }
@@ -192,6 +232,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const input = JSON.parse(await fs.readFile(process.argv[2], 'utf8'));
   if (input.operation === 'source-plan') {
     process.stdout.write(JSON.stringify(await fixturePlan(input.root, input.options)));
+  } else if (input.operation === 'runtime') {
+    process.stdout.write(JSON.stringify({ home: await fixtureRuntime(input.projectRoot) }));
   } else {
     const plan = JSON.parse(await fs.readFile(path.join(path.dirname(input.artifacts), 'plan.json'), 'utf8'));
     const batch = plan.batches.find(batch => batch.batchId === input.invocationId), unit = plan.units.find(unit => unit.unitId === batch.unitId);

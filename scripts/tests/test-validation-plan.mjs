@@ -109,7 +109,7 @@ async function formalFixture(t, versioned = false) {
     await fixturePreparation(root, plan, plan.applicationFingerprint.files[0]);
     for (const role of implementationRoles) {
       const file = path.join(project, '.upstream/maestro/maestro-cli/build/install/maestro/lib', role + (versioned || role === 'maestro-cli' ? '-2.12.0' : '') + '.jar');
-      await fs.writeFile(file, 'Synthetic implementation fingerprint: ' + role);
+      await fs.writeFile(file, Buffer.from('504b0506000000000000000000000000000000000000', 'hex'));
       plan.buildFingerprint.files.push({ path: file, sha256: await hashFile(file) });
     }
   });
@@ -192,7 +192,7 @@ test('all-pass import keeps manual review separate and then qualifies', async t 
   const outcome = await review(context);
   assert.equal(outcome.finished.originalExecutionSucceeded, true);
   assert.equal(outcome.reviewed.qualified, true);
-  assert.equal(context.plan.schemaVersion, 2);
+  assert.equal(context.plan.schemaVersion, 3);
   assert.equal(outcome.reviewed.formalQualified, false);
 });
 
@@ -294,12 +294,14 @@ test('historical review checks retained launch identity without rereading replac
 test('legacy plans retain statistics but cannot dispatch new work or gain formal qualification', async t => {
   const context = await formalFixture(t); await executeFormal(context); await review(context);
   const legacy = structuredClone(context.plan); legacy.schemaVersion = 1; delete legacy.runtime; delete legacy.preparations;
+  for (const unit of legacy.units) delete unit.staticInspection;
   for (const profile of Object.values(legacy.profiles)) delete profile.applicationVersion;
   await json(context.snapshotPath, legacy);
   const state = (await readJson(context.summaryPath)).value;
   state.schemaVersion = 1; state.planSha256 = await hashFile(context.snapshotPath);
   delete state.formalEligible; delete state.formalQualified;
-  for (const group of state.groups) for (const name of ['runtimeComplete', 'preparationComplete', 'formalEligible', 'formalQualified']) delete group[name];
+  delete state.staticInspectionComplete; delete state.staticInspectionError;
+  for (const group of state.groups) for (const name of ['runtimeComplete', 'preparationComplete', 'formalEligible', 'formalQualified', 'staticInspectionComplete']) delete group[name];
   for (const slot of state.slots) { delete slot.runtimeVerification; delete slot.preparationVerification; }
   await json(context.summaryPath, state);
   await assert.rejects(startBatch({ summaryPath: context.summaryPath }), /Legacy frozen v1/);
@@ -308,6 +310,92 @@ test('legacy plans retain statistics but cannot dispatch new work or gain formal
   assert.equal(Object.hasOwn((await readJson(context.summaryPath)).value, 'formalQualified'), false);
   context.source.plan.schemaVersion = 1; await json(context.source.file, context.source.plan);
   await assert.rejects(freezePlan(context.source.file, path.join(context.root, 'new'), context.project, process.env, context.runtimeOptions), /New formal execution requires a v2/);
+});
+
+test('historical v2 retains its qualification rules but cannot dispatch or acquire a static guarantee', async t => {
+  const context = await formalFixture(t); await executeFormal(context); await review(context);
+  const legacy = structuredClone(context.plan); legacy.schemaVersion = 2;
+  for (const unit of legacy.units) delete unit.staticInspection;
+  await json(context.snapshotPath, legacy);
+  const state = (await readJson(context.summaryPath)).value;
+  state.schemaVersion = 2; state.planSha256 = await hashFile(context.snapshotPath);
+  delete state.staticInspectionComplete; delete state.staticInspectionError;
+  for (const group of state.groups) delete group.staticInspectionComplete;
+  await json(context.summaryPath, state);
+  const before = await hashFile(context.snapshotPath);
+  await assert.rejects(startBatch({ summaryPath: context.summaryPath }), /Legacy frozen v1\/v2/);
+  assert.equal((await formalReview(context)).formalQualified, true);
+  const checked = (await readJson(context.summaryPath)).value;
+  assert.equal(checked.schemaVersion, 2); assert.equal(checked.qualified, true);
+  assert.equal(Object.hasOwn(checked, 'staticInspectionComplete'), false);
+  assert.equal(Object.hasOwn(checked.groups[0], 'staticInspectionComplete'), false);
+  assert.equal(await hashFile(context.snapshotPath), before);
+});
+
+test('v3 missing static evidence blocks qualification while preserving native pass and release', async t => {
+  for (const when of ['before-import', 'before-review']) await t.test(when, async t => {
+    const context = await formalFixture(t);
+    const evidence = context.plan.units[0].staticInspection.evidenceFiles.find(file => file.path.endsWith('static-flows.json'));
+    const remove = () => fs.unlink(evidence.path);
+    await execute(context, [], 0, async generated => {
+      generated.matrix.build.implementationJars = context.plan.buildFiles.map(file => ({ file: path.basename(file.path), sha256: file.sha256 }));
+      await json(path.join(generated.matrixRoot, 'matrix.json'), generated.matrix);
+      if (when === 'before-import') await remove();
+    });
+    if (when === 'before-review') await remove();
+    await review(context); const checked = await formalReview(context);
+    assert.equal(checked.qualified, false); assert.equal(checked.formalQualified, false);
+    const state = (await readJson(context.summaryPath)).value;
+    assert.equal(state.staticInspectionComplete, false); assert.ok(state.staticInspectionError);
+    assert.equal(state.slots[0].status, 'passed'); assert.equal(state.slots[0].finalPass, true);
+    assert.equal(state.slots[0].firstPassStatus, 'passed'); assert.equal(state.slots[0].cleanup.state, 'complete');
+    assert.equal(state.batches[0].releaseConfirmed, true); assert.equal(state.batches[0].matrixExitCode, 0);
+    assert.equal(state.groups[0].complete, false);
+  });
+});
+
+test('a v3 label and claimed passed flag cannot substitute for retained static evidence', async t => {
+  const context = await setup(t, { repeat: 1 });
+  const plan = structuredClone(context.plan);
+  plan.units[0].staticInspection = { status: 'passed', scriptsExecuted: false };
+  await json(context.snapshotPath, plan);
+  const state = (await readJson(context.summaryPath)).value; state.planSha256 = await hashFile(context.snapshotPath);
+  await json(context.summaryPath, state);
+  await assert.rejects(startBatch({ summaryPath: context.summaryPath }), /Static inspection/);
+  assert.equal((await readJson(context.summaryPath)).value.batches[0].status, 'pending');
+});
+
+test('a last static check failure stops dispatch after the first check succeeded', async t => {
+  for (const change of ['remove', 'modify']) await t.test(change, async t => {
+    const context = await setup(t, { repeat: 1 });
+    const evidence = context.plan.units[0].staticInspection.evidenceFiles.find(file => file.path.endsWith('static-flows.json'));
+    const bytes = await fs.readFile(evidence.path);
+    const input = { summaryPath: context.summaryPath, batchId: context.batches[0].batchId,
+      outputDirectory: path.join(context.output, 'batch'), pointerPath: path.join(context.output, 'pointer.json'),
+      controlIndexPath: path.join(context.output, 'control-index.json') };
+    let firstCheckReached = 0, matrixCalls = 0;
+    await assert.rejects(async () => {
+      await startBatch(input, { beforeSummarySave: async () => {
+        firstCheckReached++;
+        assert.equal((await readJson(context.summaryPath)).value.batches[0].status, 'pending');
+        if (change === 'remove') await fs.unlink(evidence.path);
+        else await fs.appendFile(evidence.path, '\nchanged after the first check\n');
+      } });
+      matrixCalls++; // The wrapper invokes its matrix only after startBatch returns prepared metadata.
+    }, /Static inspection failed before dispatch/);
+    assert.equal(firstCheckReached, 1); assert.equal(matrixCalls, 0);
+    const state = (await readJson(context.summaryPath)).value;
+    assert.equal(state.staticInspectionComplete, false); assert.ok(state.staticInspectionError);
+    assert.equal(state.batches[0].status, 'not-run'); assert.equal(state.batches[0].stopDevice, true);
+    assert.equal(state.batches[0].releaseConfirmed, false); assert.equal(state.batches[0].matrixExitCode, null);
+    assert.equal(Object.hasOwn(state.batches[0], 'startedAt'), false);
+    assert.equal(Object.hasOwn(state.batches[0], 'release'), false);
+    assert.equal(state.slots[0].status, 'not-run'); assert.equal(state.slots[0].firstPassStatus, 'not_run');
+    assert.equal(state.slots[0].runId, null); assert.equal(state.slots[0].cleanup, null);
+    await assert.rejects(fs.stat(input.controlIndexPath), { code: 'ENOENT' });
+    await fs.writeFile(evidence.path, bytes);
+    await assert.rejects(startBatch(input), /A batch cannot be restarted/);
+  });
 });
 
 test('recovered retry and original failure produce 18/20 first, 19/20 final without erasing exit failure', async t => {

@@ -18,6 +18,7 @@ const toolNames = ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1
   'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
   'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
   'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
+  'scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs',
   'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs'];
 
 async function setup(t) {
@@ -66,7 +67,7 @@ test('fixed CI inputs retain exact four roles, optional HAP boundary and unchang
 });
 
 test('frozen sources, implementation, metadata and environment changes are rejected before dispatch', async t => {
-  for (const target of ['flow', 'dependency', 'new-source', 'jar', 'extra-uppercase-jar', 'patch', 'upstream', 'new-config', 'environment', 'runtime-module', 'preparation-module']) await t.test(target, async t => {
+  for (const target of ['flow', 'dependency', 'new-source', 'jar', 'extra-uppercase-jar', 'patch', 'upstream', 'new-config', 'environment', 'runtime-module', 'preparation-module', 'static-flows-module']) await t.test(target, async t => {
     const context = await setup(t), frozen = await context.freeze();
     if (target === 'flow' || target === 'dependency' || target === 'patch') await fs.appendFile(context[target], '\nchanged');
     else if (target === 'jar') await fs.appendFile(context.outputFiles[0].path, 'changed');
@@ -74,7 +75,7 @@ test('frozen sources, implementation, metadata and environment changes are rejec
     else if (target === 'upstream') await json(path.join(context.project, 'upstream.lock.json'), { commit: 'c'.repeat(40) });
     else if (target === 'new-source') await fs.writeFile(path.join(path.dirname(context.flow), 'new.js'), 'changed');
     else if (target === 'new-config') await fs.writeFile(path.join(context.project, 'config.local.ps1'), '# added');
-    else if (target === 'runtime-module' || target === 'preparation-module') await fs.appendFile(path.join(context.project, 'scripts/validation', target.replace('-module', '.mjs')), '\n// changed after freeze');
+    else if (target === 'runtime-module' || target === 'preparation-module' || target === 'static-flows-module') await fs.appendFile(path.join(context.project, 'scripts/validation', target.replace('-module', '.mjs')), '\n// changed after freeze');
     await assert.rejects(loadSuite(frozen.snapshotPath, frozen.snapshotSha256, target === 'environment' ? { ...environment, TEST_VALUE: 'changed' } : environment));
   });
 });

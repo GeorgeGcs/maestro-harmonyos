@@ -36,11 +36,13 @@ class InspectFlows {
             String childFile = actual instanceof RunFlowCommand flow ? flow.getSourceDescription()
                 : actual instanceof RetryCommand retry ? retry.getSourceDescription() : null;
             if (childFile != null) {
+                if (childFile.contains("${")) throw new IllegalArgumentException("Dynamic Flow file paths are not frozen");
                 if (info == null || info.getPath() == null) throw new IllegalArgumentException("Referenced Flow has no source anchor");
                 // Empty child Flows have no SourceInfo-bearing child commands.
                 source(scope.resolve(Path.of(info.getPath()).toAbsolutePath().getParent(), childFile), null, "yaml");
             }
             if (actual instanceof RunScriptCommand script) {
+                if (script.getSourceDescription().contains("${")) throw new IllegalArgumentException("Dynamic script file paths are not frozen");
                 if (script.getScriptDir() == null) throw new IllegalArgumentException("Script file identity is unavailable");
                 source(Path.of(script.getScriptDir()).resolve(Path.of(script.getSourceDescription()).getFileName()), script.getScript(), "script");
             }
