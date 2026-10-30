@@ -1127,10 +1127,10 @@ index 0000000..1ed614a
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt
 new file mode 100644
-index 0000000..1180d4a
+index 0000000..c20b964
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentController.kt
-@@ -0,0 +1,601 @@
+@@ -0,0 +1,615 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.core.type.TypeReference
@@ -1160,6 +1160,7 @@ index 0000000..1180d4a
 +    private var versionFixed = false
 +    private var recovering = false
 +    private var recoveryRevision = 0L
++    @Volatile private var abandonedQueries = false
 +    private val queries = Executors.newSingleThreadExecutor { task ->
 +        Thread(task, "maestro-agent-readonly").apply { isDaemon = true }
 +    }
@@ -1676,30 +1677,43 @@ index 0000000..1180d4a
 +    }
 +
 +    fun requestShutdown() {
++        beginShutdown(drainQueries = false)
++    }
++
++    private fun beginShutdown(drainQueries: Boolean) {
 +        synchronized(guard) {
 +            stopping = true
 +            sessions.values.forEach(::requestRelease)
 +        }
-+        queries.shutdownNow()
++        // EOF closes the request stream, but the client may still be reading responses.
++        // Transport failures and cancellation must still be able to interrupt a drain.
++        if (drainQueries) queries.shutdown()
++        else if (queries.shutdownNow().isNotEmpty()) abandonedQueries = true
 +    }
 +
-+    fun close(): Boolean {
-+        requestShutdown()
-+        val workers = synchronized(guard) { sessions.values.flatMap { listOf(it.worker, it.completion) } }
++    fun close(drainQueries: Boolean = false): Boolean {
 +        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(shutdownWaitMs)
++        beginShutdown(drainQueries)
++        val workers = synchronized(guard) { sessions.values.flatMap { listOf(it.worker, it.completion) } }
++        var waitCompleted = true
 +        for (worker in workers) {
 +            if (worker === Thread.currentThread()) continue
 +            val remaining = deadline - System.nanoTime()
-+            if (remaining <= 0) break
++            if (remaining <= 0) { if (worker.isAlive) waitCompleted = false; break }
 +            try { worker.join(TimeUnit.NANOSECONDS.toMillis(remaining).coerceAtLeast(1)) }
-+            catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
++            catch (_: InterruptedException) { Thread.currentThread().interrupt(); waitCompleted = false; break }
++            if (worker.isAlive) { waitCompleted = false; break }
 +        }
 +        val remaining = deadline - System.nanoTime()
-+        if (remaining > 0) {
-+            try { queries.awaitTermination(remaining, TimeUnit.NANOSECONDS) }
-+            catch (_: InterruptedException) { Thread.currentThread().interrupt() }
++        if (remaining > 0 && !queries.isTerminated) {
++            try { if (!queries.awaitTermination(remaining, TimeUnit.NANOSECONDS)) waitCompleted = false }
++            catch (_: InterruptedException) { Thread.currentThread().interrupt(); waitCompleted = false }
 +        }
-+        val complete = synchronized(guard) { sessions.values.all(::handoffReady) } && queries.isTerminated
++        if (!queries.isTerminated) waitCompleted = false
++        // Do not grant another timeout, or report success if cancellation finishes just after it.
++        if (!waitCompleted) requestShutdown()
++        val complete = waitCompleted && !abandonedQueries &&
++            synchronized(guard) { !recovering && sessions.values.all(::handoffReady) }
 +        if (!complete) diagnostics.println("Agent shutdown did not confirm execution and resource cleanup; device handoff is not ready.")
 +        return complete
 +    }
@@ -1827,7 +1841,7 @@ index 0000000..5eb9492
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
 new file mode 100644
-index 0000000..f892702
+index 0000000..3ec5fe1
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsBridgeServer.kt
 @@ -0,0 +1,276 @@
@@ -1930,7 +1944,7 @@ index 0000000..f892702
 +            diagnostics.println(error.stackTraceToString())
 +            exitCode = 1
 +        } finally {
-+            if (!agent.close()) exitCode = 1
++            if (!agent.close(drainQueries = eof && !outputFailed && exitCode == 0)) exitCode = 1
 +        }
 +        return if (outputFailed) 1 else exitCode
 +    }
@@ -5479,6 +5493,176 @@ index 0000000..ee5dd2f
 +        error("Session did not reach $expected")
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentShutdownTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentShutdownTest.kt
+new file mode 100644
+index 0000000..87ecc05
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentShutdownTest.kt
+@@ -0,0 +1,164 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HdcException
++import org.junit.jupiter.api.Test
++import java.io.ByteArrayOutputStream
++import java.io.IOException
++import java.io.PrintStream
++import java.util.UUID
++import java.util.concurrent.CompletableFuture
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicInteger
++
++class HarmonyOsAgentShutdownTest {
++    private val mapper = jacksonObjectMapper()
++    private val params = mapper.readTree("""{"deviceId":"fixture-target","commands":["launchApp"]}""")
++    private val diagnostics = PrintStream(ByteArrayOutputStream())
++
++    @Test
++    fun `EOF drains every accepted query`() = assertDrained(newline = true)
++
++    @Test
++    fun `EOF drains a final line without newline`() = assertDrained(newline = false)
++
++    private fun assertDrained(newline: Boolean) {
++        val calls = AtomicInteger()
++        val capabilities = capabilities { calls.incrementAndGet(); throw HdcException("fixture discovery failure") }
++        val source = (1..3).joinToString("\n") { id ->
++            mapper.writeValueAsString(mapOf("id" to id, "method" to "agent.preflight", "params" to params))
++        } + if (newline) "\n" else ""
++        val output = ByteArrayOutputStream()
++        assertThat(HarmonyOsBridgeServer(source.byteInputStream(), output, diagnostics, Backend(), capabilities).run()).isEqualTo(0)
++        val responses = output.toString(Charsets.UTF_8).lineSequence().filter(String::isNotBlank).map(mapper::readTree).toList()
++        assertThat(responses.map { it["id"].asInt() }).containsExactly(1, 2, 3).inOrder()
++        assertThat(calls.get()).isEqualTo(3)
++        responses.forEach { response ->
++            assertThat(response.has("error")).isFalse()
++            val data = response["result"]["data"]
++            assertThat(data["readiness"].asText()).isEqualTo("blocked")
++            val device = data["checks"].single { it["name"].asText() == "device" }
++            assertThat(device["status"].asText()).isEqualTo("unknown")
++            assertThat(device["code"].asText()).isEqualTo("HDC_DISCOVERY_FAILED")
++        }
++    }
++
++    @Test
++    fun `forced shutdown retains cancellation of a running environment query`() {
++        val entered = CountDownLatch(1)
++        val controller = controller { entered.countDown(); CountDownLatch(1).await(); emptyList() }
++        try {
++            val error = preflightError(controller)
++            await(entered)
++            controller.requestShutdown()
++            assertCancelled(error)
++            assertThat(controller.close()).isTrue()
++        } finally { controller.close() }
++    }
++
++    @Test
++    fun `drain deadline returns incomplete even when interruption promptly stops the query`() {
++        val entered = CountDownLatch(1)
++        val controller = controller(25) { entered.countDown(); CountDownLatch(1).await(); emptyList() }
++        try {
++            val error = preflightError(controller)
++            await(entered)
++            val started = System.nanoTime()
++            assertThat(controller.close(drainQueries = true)).isFalse()
++            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).isLessThan(2_000L)
++            assertCancelled(error)
++        } finally { controller.close() }
++    }
++
++    @Test
++    fun `output failure still aborts a graceful drain and cannot hide a discarded query`() {
++        val entered = CountDownLatch(1)
++        val release = CountDownLatch(1)
++        val calls = AtomicInteger()
++        val controller = controller {
++            calls.incrementAndGet(); entered.countDown(); await(release); emptyList()
++        }
++        val closeResult = CompletableFuture<Boolean>()
++        val closer = Thread({ closeResult.complete(controller.close(drainQueries = true)) }, "agent-drain-test")
++        try {
++            controller.dispatch("agent.preflight", params, { throw IOException("fixture output failure") }, { })
++            await(entered)
++            val queued = CompletableFuture<Any>()
++            controller.dispatch("agent.preflight", params, { queued.complete(it) }, { queued.completeExceptionally(it) })
++            closer.start()
++            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
++            while (true) {
++                var stopped = false
++                controller.dispatch("agent.describe", mapper.createObjectNode(), { },
++                    { stopped = HarmonyOsAgentProtocol.error(it).code == "DEVICE_BUSY" })
++                if (stopped) break
++                check(System.nanoTime() < deadline) { "Drain did not stop accepting requests" }
++                Thread.sleep(1)
++            }
++            release.countDown()
++            assertThat(closeResult.get(5, TimeUnit.SECONDS)).isFalse()
++            assertThat(calls.get()).isEqualTo(1)
++            assertThat(queued.isDone).isFalse()
++        } finally { release.countDown(); controller.close(); closer.join(5_000) }
++    }
++
++    @Test
++    fun `forced shutdown cannot report success after discarding an accepted recovery`() {
++        val entered = CountDownLatch(1)
++        val backend = Backend()
++        val controller = HarmonyOsAgentController(backend, diagnostics,
++            capabilities { entered.countDown(); CountDownLatch(1).await(); emptyList() })
++        try {
++            controller.dispatch("agent.describe", mapper.readTree("""{"schemaVersion":2}"""), { }, { throw it })
++            val error = preflightError(controller)
++            await(entered)
++            val recovery = CompletableFuture<Any>()
++            val request = mapper.valueToTree<JsonNode>(mapOf("deviceId" to "fixture-target", "sessionId" to UUID.randomUUID().toString()))
++            controller.dispatch("agent.recover", request, { recovery.complete(it) }, { recovery.completeExceptionally(it) })
++            assertThat(recovery.isDone).isFalse()
++            controller.requestShutdown()
++            assertCancelled(error)
++            assertThat(controller.close()).isFalse()
++            assertThat(backend.recoveries.get()).isEqualTo(0)
++            assertThat(recovery.isDone).isFalse()
++        } finally { controller.close() }
++    }
++
++    private fun controller(waitMs: Long = 5_000, discover: () -> List<String>) =
++        HarmonyOsAgentController(Backend(), diagnostics, capabilities(discover), waitMs)
++
++    private fun capabilities(discover: () -> List<String>) = HarmonyOsAgentCapabilities(object : AgentEnvironmentProbe {
++        override fun devices() = discover()
++        override fun lockStatus(deviceId: String): HarmonyOsSessionSupport.DeviceLockStatus = error("No target was found")
++        override fun execute(deviceId: String, arguments: List<String>): String = error("No device command is permitted")
++    })
++
++    private fun preflightError(controller: HarmonyOsAgentController): CompletableFuture<Exception> {
++        val result = CompletableFuture<Exception>()
++        controller.dispatch("agent.preflight", params,
++            { result.completeExceptionally(AssertionError("Expected interruption, got $it")) }, { result.complete(it) })
++        return result
++    }
++
++    private fun assertCancelled(result: CompletableFuture<Exception>) {
++        val error = HarmonyOsAgentProtocol.error(result.get(5, TimeUnit.SECONDS))
++        assertThat(error.kind).isEqualTo("cancelled")
++        assertThat(error.code).isEqualTo("CANCELLED")
++    }
++
++    private fun await(latch: CountDownLatch) { check(latch.await(5, TimeUnit.SECONDS)) { "Fixture phase was not reached" } }
++
++    private class Backend : RecorderBackend {
++        val recoveries = AtomicInteger()
++        override fun devices(): List<String> = error("Legacy discovery is not permitted")
++        override fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit) = error("No device session is permitted")
++        override fun recover(deviceId: String, sessionId: String): Map<String, Any?> {
++            recoveries.incrementAndGet()
++            error("Queued recovery must not start after forced shutdown")
++        }
++    }
++}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsBridgeServerTest.kt
 new file mode 100644
 index 0000000..8a71768
@@ -6307,6 +6491,245 @@ index 0000000..3cc31f8
 +        assertThat(mapper.readTree(bundle.resolve("retry-summary.json").toFile())["state"].asText()).isEqualTo("incomplete")
 +        assertThat(mapper.readTree(report.directory.resolve("result.json").toFile())["data"]["status"].asText()).isEqualTo("passed")
 +    }
++}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsPreflightProcessTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsPreflightProcessTest.kt
+new file mode 100644
+index 0000000..a26b8eb
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsPreflightProcessTest.kt
+@@ -0,0 +1,233 @@
++package maestro.cli.harmonyos
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import com.google.common.truth.Truth.assertWithMessage
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.ProcessHdcCommandRunner
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.Timeout
++import java.io.File
++import java.net.URLClassLoader
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardOpenOption
++import java.time.Duration
++import java.time.Instant
++import java.util.concurrent.TimeUnit
++import kotlin.system.exitProcess
++
++@Timeout(60)
++class HarmonyOsPreflightProcessTest {
++    @Test fun `missing executable still returns discovery unknown after describe and EOF`() {
++        scenario(HarmonyOsPreflightProcessFixture.Mode.MISSING)
++    }
++
++    @Test fun `native nonzero discovery still returns preflight after immediate EOF`() {
++        scenario(HarmonyOsPreflightProcessFixture.Mode.NONZERO)
++    }
++
++    @Test fun `native malformed target output remains discovery unknown after EOF`() {
++        scenario(HarmonyOsPreflightProcessFixture.Mode.MALFORMED)
++    }
++
++    @Test fun `native empty target output confirms absence rather than discovery failure`() {
++        scenario(HarmonyOsPreflightProcessFixture.Mode.EMPTY)
++    }
++
++    private fun scenario(mode: HarmonyOsPreflightProcessFixture.Mode) {
++        TempFileHandler().use { temporary ->
++            val root = temporary.createTempDirectory("harmonyos-preflight-process-").toPath().toAbsolutePath().normalize()
++            val child = start(root, mode)
++            val owned = linkedMapOf(child.identity.pid to child.identity)
++            var exited = false
++            try {
++                // The reported two requests use the default v1 describe params, then immediate EOF.
++                child.process.outputStream.bufferedWriter(Charsets.UTF_8).use { input ->
++                    input.write("""{"id":1,"method":"agent.describe","params":{}}""")
++                    input.newLine()
++                    input.write("""{"id":2,"method":"agent.preflight","params":{"deviceId":"b1-no-such-device","commands":["launchApp"]}}""")
++                    input.newLine()
++                }
++                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
++                while (System.nanoTime() < deadline) {
++                    child.process.descendants().use { descendants ->
++                        descendants.forEach { handle ->
++                            handle.info().startInstant().orElse(null)?.let { owned[handle.pid()] = Identity(handle.pid(), it) }
++                        }
++                    }
++                    if (child.process.waitFor(25, TimeUnit.MILLISECONDS)) { exited = true; break }
++                }
++            } finally {
++                // The native fixture also records its exact identity, including when its parent exits first.
++                val nativeIdentity = root.resolve("native-identity.json")
++                if (Files.exists(nativeIdentity)) {
++                    val value = json(nativeIdentity)
++                    check(value["parentPid"].longValue() == child.identity.pid)
++                    val identity = Identity(value["pid"].longValue(), Instant.parse(value["startedAt"].asText()))
++                    owned[identity.pid] = identity
++                }
++                owned.values.toList().asReversed().forEach(::terminateOwned)
++            }
++
++            val diagnostic = Files.readString(child.stderr)
++            assertWithMessage(diagnostic).that(exited).isTrue()
++            assertWithMessage(diagnostic).that(child.process.exitValue()).isEqualTo(0)
++            val responses = Files.readAllLines(child.stdout).filter(String::isNotBlank).map(mapper::readTree)
++            assertWithMessage(diagnostic).that(responses).hasSize(2)
++            assertThat(responses.map { it["id"].asInt() }).containsExactly(1, 2).inOrder()
++            assertThat(responses.all { it.has("result") && !it.has("error") }).isTrue()
++            assertThat(responses[0]["result"]["kind"].asText()).isEqualTo("capabilities")
++            assertThat(responses[0]["result"]["schemaVersion"].asInt()).isEqualTo(1)
++            val document = responses[1]["result"]
++            assertThat(document["protocol"].asText()).isEqualTo("maestro.harmonyos.agent")
++            assertThat(document["schemaVersion"].asInt()).isEqualTo(1)
++            assertThat(document["kind"].asText()).isEqualTo("preflight")
++            val preflight = document["data"]
++            assertThat(preflight["readiness"].asText()).isEqualTo("blocked")
++            val checks = preflight["checks"].toList()
++            assertThat(checks.map { it["code"].asText() }).containsAtLeast("APP_ID_REQUIRED", "ABILITY_REQUIRED")
++            val device = checks.single { it["name"].asText() == "device" }
++            if (mode == HarmonyOsPreflightProcessFixture.Mode.EMPTY) {
++                assertThat(device["status"].asText()).isEqualTo("failed")
++                assertThat(device["code"].asText()).isEqualTo("DEVICE_NOT_FOUND")
++                assertThat(checks.map { it["code"].asText() }).doesNotContain("HDC_DISCOVERY_FAILED")
++            } else {
++                assertThat(device["status"].asText()).isEqualTo("unknown")
++                assertThat(device["code"].asText()).isEqualTo("HDC_DISCOVERY_FAILED")
++                assertThat(checks.map { it["code"].asText() }).doesNotContain("DEVICE_NOT_FOUND")
++            }
++            assertThat(Files.exists(root.resolve("unexpected-backend-call"))).isFalse()
++            if (mode == HarmonyOsPreflightProcessFixture.Mode.MISSING) {
++                assertThat(Files.exists(root.resolve("missing-hdc-executable"))).isFalse()
++                assertThat(Files.exists(root.resolve("native-identity.json"))).isFalse()
++            } else {
++                val calls = Files.readAllLines(root.resolve("transport-calls.jsonl")).map(mapper::readTree)
++                assertThat(calls).hasSize(1)
++                assertThat(calls.single().map(JsonNode::asText)).containsExactly("fixture-hdc", "list", "targets").inOrder()
++                val native = json(root.resolve("native-identity.json"))
++                assertThat(native["parentPid"].longValue()).isEqualTo(child.identity.pid)
++                assertThat(native["pid"].longValue()).isNotEqualTo(child.identity.pid)
++                val result = json(root.resolve("transport-result.json"))
++                assertThat(result["exitCode"].asInt()).isEqualTo(if (mode == HarmonyOsPreflightProcessFixture.Mode.NONZERO) 7 else 0)
++                when (mode) {
++                    HarmonyOsPreflightProcessFixture.Mode.NONZERO -> assertThat(result["stderr"].asText()).contains("fixture discovery failure")
++                    HarmonyOsPreflightProcessFixture.Mode.MALFORMED -> assertThat(result["stdout"].asText().trim()).isEqualTo("not a valid target")
++                    HarmonyOsPreflightProcessFixture.Mode.EMPTY -> assertThat(result["stdout"].asText().trim()).isEqualTo("[Empty]")
++                    else -> error("Unexpected mode")
++                }
++            }
++        }
++    }
++
++    private data class Identity(val pid: Long, val startedAt: Instant)
++    private data class Child(val process: Process, val identity: Identity, val stdout: Path, val stderr: Path)
++
++    private fun start(root: Path, mode: HarmonyOsPreflightProcessFixture.Mode): Child {
++        val paths = linkedSetOf<String>()
++        var loader: ClassLoader? = HarmonyOsPreflightProcessFixture::class.java.classLoader
++        while (loader != null) {
++            (loader as? URLClassLoader)?.urLs?.filter { it.protocol == "file" }?.forEach { paths += Path.of(it.toURI()).toString() }
++            loader = loader.parent
++        }
++        paths += System.getProperty("java.class.path").split(File.pathSeparator).filter(String::isNotBlank)
++        paths += Path.of(HarmonyOsPreflightProcessFixture::class.java.protectionDomain.codeSource.location.toURI()).toString()
++        val home = Files.createDirectories(root.resolve("home"))
++        val scratch = Files.createDirectories(root.resolve("scratch"))
++        fun argument(value: String) = "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++        for (action in listOf("bridge", "native")) {
++            Files.writeString(root.resolve("$action-java.args"), listOf("-Dfile.encoding=UTF-8", "-Duser.home=$home",
++                "-Djava.io.tmpdir=$scratch", "-cp", paths.joinToString(File.pathSeparator),
++                HarmonyOsPreflightProcessFixture::class.java.name, action, root.toString(), mode.name)
++                .joinToString("\n", transform = ::argument))
++        }
++        val stdout = root.resolve("bridge.stdout.jsonl")
++        val stderr = root.resolve("bridge.stderr.log")
++        val process = ProcessBuilder(HarmonyOsPreflightProcessFixture.javaExecutable(), "@${root.resolve("bridge-java.args")}")
++            .redirectOutput(stdout.toFile()).redirectError(stderr.toFile()).start()
++        val started = process.info().startInstant()
++        if (started.isEmpty) {
++            process.destroyForcibly()
++            check(process.waitFor(5, TimeUnit.SECONDS)) { "Own bridge child could not be stopped" }
++            error("Own bridge child did not expose a start time")
++        }
++        return Child(process, Identity(process.pid(), started.get()), stdout, stderr)
++    }
++
++    private fun terminateOwned(identity: Identity) {
++        val process = ProcessHandle.of(identity.pid).orElse(null) ?: return
++        if (!process.isAlive || process.info().startInstant().orElse(null) != identity.startedAt) return
++        process.destroyForcibly()
++        process.onExit().get(5, TimeUnit.SECONDS)
++    }
++
++    private fun json(path: Path): JsonNode = mapper.readTree(path.toFile())
++    private val mapper = jacksonObjectMapper()
++}
++
++/** Test-only entry point: production bridge and native runner, with no real HDC executable. */
++object HarmonyOsPreflightProcessFixture {
++    enum class Mode { MISSING, NONZERO, MALFORMED, EMPTY }
++    private val mapper = jacksonObjectMapper()
++
++    @JvmStatic fun main(arguments: Array<String>) {
++        require(arguments.size == 3)
++        val root = Path.of(arguments[1]).toAbsolutePath().normalize()
++        val mode = Mode.valueOf(arguments[2])
++        when (arguments[0]) {
++            "bridge" -> bridge(root, mode)
++            "native" -> native(root, mode)
++            else -> error("Unknown preflight fixture action")
++        }
++    }
++
++    private fun bridge(root: Path, mode: Mode) {
++        HarmonyOsBridgeStdout.claim()
++        val nativeRunner = ProcessHdcCommandRunner()
++        val hdc = if (mode == Mode.MISSING) {
++            HdcClient(root.resolve("missing-hdc-executable").toString(), nativeRunner, Duration.ofSeconds(5))
++        } else {
++            HdcClient("fixture-hdc", HdcCommandRunner { command, timeout ->
++                check(command == listOf("fixture-hdc", "list", "targets")) { "Only device discovery is allowed in this fixture" }
++                Files.writeString(root.resolve("transport-calls.jsonl"), mapper.writeValueAsString(command) + "\n",
++                    StandardOpenOption.CREATE, StandardOpenOption.APPEND)
++                nativeRunner.run(listOf(javaExecutable(), "@${root.resolve("native-java.args")}"), timeout).also { result ->
++                    Files.writeString(root.resolve("transport-result.json"), mapper.writeValueAsString(result))
++                }
++            }, Duration.ofSeconds(5))
++        }
++        val backend = object : RecorderBackend {
++            override fun devices(): List<String> = unexpected()
++            override fun withSession(config: RecorderConfig, block: (RecorderConnection) -> Unit): Unit = unexpected()
++            private fun unexpected(): Nothing {
++                Files.writeString(root.resolve("unexpected-backend-call"), "No session or legacy discovery is allowed")
++                error("Preflight must not open a session or issue an action")
++            }
++        }
++        val capabilities = HarmonyOsAgentCapabilities(HdcAgentEnvironmentProbe(hdc), recordingEnabled = false)
++        exitProcess(HarmonyOsBridgeServer(System.`in`, HarmonyOsBridgeStdout.output, System.err, backend, capabilities).run())
++    }
++
++    private fun native(root: Path, mode: Mode) {
++        check(mode != Mode.MISSING)
++        val process = ProcessHandle.current()
++        Files.writeString(root.resolve("native-identity.json"), mapper.writeValueAsString(mapOf(
++            "pid" to process.pid(), "parentPid" to process.parent().orElseThrow().pid(),
++            "startedAt" to process.info().startInstant().orElseThrow().toString(),
++        )))
++        // EOF arrives while a real discovery subprocess is outstanding, not after a mocked result.
++        Thread.sleep(300)
++        when (mode) {
++            Mode.NONZERO -> { System.err.println("fixture discovery failure"); exitProcess(7) }
++            Mode.MALFORMED -> println("not a valid target")
++            Mode.EMPTY -> println("[Empty]")
++            else -> error("Unexpected native fixture mode")
++        }
++    }
++
++    fun javaExecutable(): String = Path.of(System.getProperty("java.home"), "bin",
++        if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java").toString()
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecorderTest.kt
 new file mode 100644

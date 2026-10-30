@@ -1,6 +1,6 @@
 # 智能体调用协议
 
-更新日期：2026-10-29。本文确定能力查询、运行结果、失败证据和取消交接的共同约定，供执行端与调用方实现。
+更新日期：2026-10-30。本文确定能力查询、运行结果、失败证据和取消交接的共同约定，供执行端与调用方实现。
 
 **当前状态：v1 的十个接口和 v2 的受控恢复已接入源码。** 重新构建本仓库的 CLI 后，`harmonyos-bridge` 默认提供 v1；显式协商 v2 才增加 `agent.recover`。CLI Flow 和设备矩阵继续输出 v1 运行结果与证据索引。现有 VSCode 继续使用[原录制协议](recorder-protocol.md)。格式定义见 [v1 Schema](protocol/agent-v1.schema.json)、[v2 Schema](protocol/agent-v2.schema.json)和[协议示例](protocol/examples)，实际验证范围见[进展记录](progress/2026-10-29.md)。完整调用方实现见 [Node 客户端示例](../examples/agent-client/README.md)。
 
@@ -23,6 +23,8 @@
 协商成功后，该连接所有 `agent.*` 成功响应文档均为 v2；`methods` 增加 `agent.recover`。第一条已受理的能力查询或其他 `agent.*` 请求固定版本，之后不能切换；切换请求返回 `PROTOCOL_VERSION_FIXED`。协商后再次查询 `agent.describe {}` 保持当前版本。使用不支持的版本返回 `UNSUPPORTED_PROTOCOL_VERSION`；旧分发包也可能返回 `INVALID_PARAMS` 或 `UNKNOWN_METHOD`，需要恢复能力的调用方应停止并更新分发包，不能默默降版后继续。
 
 `id` 仍为 1～9007199254740991 的整数，同一连接中不得复用。响应仍为 `{id,result}` 或 `{id,error}`。不向旧请求的顶层或旧 `connect/action` 参数中添加新字段；它们有严格白名单。
+
+正常 stdin EOF 后，bridge 停止接收请求，并在现有 5 秒关闭预算内等待已接收的查询返回。预算与设备会话收尾共用；已有设备动作仍立即请求取消、释放。输入或输出故障继续中断执行；等待超时或有查询被丢弃时，进程以非零状态退出。调用方仍应核对每个请求的响应，不能只凭进程退出码判断业务成功。`agent.recover` 也共用查询队列，调用它时应保持 stdin 打开直到收到报告，避免 EOF 的关闭预算提前中断恢复。
 
 成功响应的 `result`，以及持久化的结果和证据文件，使用以下文档封包。线上版本按连接协商；磁盘 `result.json` 和 `evidence-index.json` 继续使用 v1，不因连接协商而改写。
 
@@ -84,6 +86,8 @@ v1 的字段、枚举和语义保持固定。新增字段或枚举时更新 Sche
 | `unknown` | 未检测、无法可靠读取或响应不足以判断 |
 
 预检 `readiness` 的计算规则固定：存在必需检查失败则为 `blocked`；否则存在必需检查未知则为 `unknown`；所有必需检查通过才为 `ready`。非必需检查的失败或未知仍保留，不改变这个汇总规则。查询必须列出实际检查范围，不能用空清单返回就绪。
+
+HDC 启动、枚举或设备列表解析失败时，`device` 检查返回 `unknown / HDC_DISCOVERY_FAILED`；成功枚举且指定设备不在列表中（包括空列表）时返回 `failed / DEVICE_NOT_FOUND`。例如请求 `launchApp` 却未提供 `appId/abilityName`，即使设备发现为未知，整体仍因缺少必需参数而是 `blocked`。真实中断仍返回 `cancelled / CANCELLED`。
 
 检查清单至少包含一个必需检查。`verification.scope` 是验证记录的范围说明，不能代替当前设备的预检结果；填写 `verified` 时必须有非空范围和证据引用。
 
