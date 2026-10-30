@@ -227,6 +227,68 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
     }
     requireValue(data.failedStepId === null || steps.has(data.failedStepId), 'Failed step is absent from the index.');
   }
+  async function videoEvidence(quality, record, attempt, inputs) {
+    const declaredVideo = quality.video;
+    if (!declaredVideo?.path) {
+      requireValue(declaredVideo?.status !== 'passed', 'Passed video quality has no retained report.');
+      return;
+    }
+    async function ciReference(item) {
+      requireValue(typeof item?.path === 'string' && path.isAbsolute(item.path) && inside(source, item.path) && digest(item.sha256),
+        'Video metadata reference escapes this CI invocation or lacks a hash.');
+      return metadata(item.path, item.sha256);
+    }
+    const videos = await ciReference(declaredVideo);
+    requireValue(videos.protocol === 'maestro.harmonyos.ci-videos' && videos.schemaVersion === 1 &&
+      videos.runId === record.runId && videos.attemptId === record.attemptId && videos.status === declaredVideo.status &&
+      Array.isArray(videos.videos) && videos.videos.length <= budget.files && Array.isArray(videos.originalFiles) &&
+      videos.originalFiles.length <= budget.files, 'Video report belongs to another attempt or is malformed.');
+    for (const observed of videos.originalFiles) {
+      try {
+        requireValue(typeof observed.path === 'string' && path.isAbsolute(observed.path) && digest(observed.sha256), 'Invalid video observation reference.');
+        if (inside(source, observed.path) || inside(attempt, observed.path)) {
+          const root = inside(source, observed.path) ? source : attempt;
+          reference(root, { path: path.relative(root, observed.path).split(path.sep).join('/'), sha256: observed.sha256 });
+        } else {
+          requireValue(inputs?.toolFiles?.some(tool => samePath(tool.path, observed.path) && tool.sha256 === observed.sha256),
+            'External video observation is not a frozen tool fingerprint.');
+        }
+      } catch (error) { issue('video_observation_not_collected', error.message, observed?.path ?? null); }
+    }
+    for (const video of videos.videos) {
+      try {
+        const original = reference(attempt, { path: video.path, sha256: video.sha256 });
+        requireValue(samePath(original, video.sourcePath), 'Video input belongs to another attempt.');
+        if (video.process) {
+          for (const name of ['stdout', 'stderr']) {
+            const log = video.process[name];
+            requireValue(typeof log?.path === 'string' && path.isAbsolute(log.path) && inside(source, log.path) && digest(log.sha256),
+              'Video verifier process log has no exact CI reference.');
+            reference(source, { path: path.relative(source, log.path).split(path.sep).join('/'), sha256: log.sha256 });
+          }
+        }
+        if (!video.pointer && !video.verification) {
+          requireValue(video.status !== 'passed', 'Passed video has no pointer or verification report.');
+          continue;
+        }
+        const pointer = await ciReference(video.pointer);
+        requireValue(pointer.protocol === 'maestro.harmonyos.recording-report-pointer' && pointer.schemaVersion === 1 &&
+          typeof pointer.reportPath === 'string' && digest(pointer.reportSha256) &&
+          samePath(pointer.reportPath, video.verification?.path) && pointer.reportSha256 === video.verification?.sha256,
+          'Video pointer and verification reference differ.');
+        const decoded = await ciReference(video.verification);
+        requireValue(decoded.protocol === 'maestro.harmonyos.recording-verification' && decoded.schemaVersion === 1 &&
+          samePath(decoded.inputPath, original) && decoded.inputSha256 === video.sha256,
+          'Decoded input differs from the collected original.');
+        for (const name of ['stdout', 'stderr']) {
+          const log = relativeFile(path.dirname(pointer.reportPath), decoded[name]);
+          const observation = videos.originalFiles.find(item => samePath(item.path, log));
+          requireValue(observation && digest(observation.sha256), 'Decode log lacks a retained hash observation.');
+          reference(source, { path: path.relative(source, log).split(path.sep).join('/'), sha256: observation.sha256 });
+        }
+      } catch (error) { issue('video_evidence_not_collected', error.message, video?.path ?? null); }
+    }
+  }
   async function recovery(record) {
     const resolved = record.resolution;
     const result = report.originals.result;
@@ -334,9 +396,15 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
         const result = await metadata(path.join(attempt, 'result.json'), record.resolution?.resultSha256 ?? null);
         await evidence(record, attempt, result);
       } catch (error) { issue('evidence_verification_failed', error.message, attempt); }
+      let inputs = null;
       for (const [name, item] of [['inputs', record.inputs], ['quality', record.quality]]) {
         if (item?.path) {
-          try { requireValue(inside(source, item.path) && digest(item.sha256), 'CI metadata reference escapes this invocation or lacks a hash.'); await metadata(item.path, item.sha256); }
+          try {
+            requireValue(inside(source, item.path) && digest(item.sha256), 'CI metadata reference escapes this invocation or lacks a hash.');
+            const value = await metadata(item.path, item.sha256);
+            if (name === 'inputs') inputs = value;
+            else await videoEvidence(value, record, attempt, inputs);
+          }
           catch (error) { issue(name + '_verification_failed', error.message, item.path); }
         } else if (name === 'inputs') issue('inputs_missing', 'The fixed input snapshot is missing.');
       }

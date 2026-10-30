@@ -7,10 +7,32 @@ import { artifact, atomicJson, canonical, hash, hashFile, inside, key, noLinks, 
 import { checkFrozen } from '../validation/plan.mjs';
 import { verifyAttemptInput } from '../validation/retry-evidence.mjs';
 import { readMetadata as readJson, verifyBuildReference } from './snapshot-build.mjs';
+import { verifyVideos } from './verify-videos.mjs';
 
 const execute = promisify(execFile);
 const id = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const unique = (values, label) => requireValue(new Set(values).size === values.length, label + ' must be unique.');
+
+export async function freezeVideoPolicy(value, base, expectedFlows) {
+  if (value === undefined) return null;
+  requireValue(value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).every(name => ['requiredFlows', 'ffmpeg', 'timeoutSeconds', 'maxVideos', 'budgetSeconds'].includes(name)), 'Invalid videoPolicy fields.');
+  requireValue(Array.isArray(value.requiredFlows) && value.requiredFlows.length > 0 && value.requiredFlows.every(file => typeof file === 'string'),
+    'videoPolicy requires explicit top-level requiredFlows.');
+  const requiredFlows = value.requiredFlows.map(file => path.resolve(base, file));
+  unique(requiredFlows.map(key), 'Required video Flow paths');
+  requireValue(requiredFlows.every(file => expectedFlows.some(flow => samePath(flow.path, file))), 'Required video Flow is not a frozen top-level member.');
+  requireValue(Number.isSafeInteger(value.timeoutSeconds) && value.timeoutSeconds >= 1 && value.timeoutSeconds <= 3600 &&
+    Number.isSafeInteger(value.maxVideos) && value.maxVideos >= requiredFlows.length && value.maxVideos <= 100 &&
+    Number.isSafeInteger(value.budgetSeconds) && value.budgetSeconds <= 86400 &&
+    value.budgetSeconds >= value.maxVideos * (value.timeoutSeconds + 20) + 10,
+    'Video budget must cover maxVideos times (decode timeout + 20 seconds), plus 10 seconds.');
+  requireValue(value.ffmpeg && typeof value.ffmpeg.path === 'string' && typeof value.ffmpeg.sha256 === 'string' &&
+    /^[0-9a-f]{64}$/.test(value.ffmpeg.sha256) && Object.keys(value.ffmpeg).every(name => ['path', 'sha256'].includes(name)), 'videoPolicy needs an explicit FFmpeg path and SHA-256.');
+  const ffmpeg = { path: path.resolve(base, value.ffmpeg.path), sha256: value.ffmpeg.sha256 };
+  requireValue(await hashFile(ffmpeg.path) === ffmpeg.sha256, 'Declared FFmpeg fingerprint differs.');
+  return { requiredFlows, ffmpeg, timeoutSeconds: value.timeoutSeconds, maxVideos: value.maxVideos, budgetSeconds: value.budgetSeconds };
+}
 
 async function javaExecutable(environment) {
   if (environment.JAVA_HOME) return path.resolve(environment.JAVA_HOME, 'bin/java.exe');
@@ -83,6 +105,7 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
   const profile = { bundleId: manifest.bundleId, abilityName: manifest.abilityName, moduleName,
     environmentNames: [...names].sort(), environmentHashes: Object.fromEntries(names.map(name => [name, hash(Buffer.from(environment[name]))])) };
   const build = await verifyBuildReference(manifest.buildManifest, base, projectRoot);
+  const videoPolicy = await freezeVideoPolicy(manifest.videoPolicy, base, expected);
   const staticInspection = await inspectFlows(projectRoot, sourceRoot, expected, sources, outputDirectory, environment);
   const applicationFiles = [];
   if (manifest.applicationFile !== undefined) {
@@ -96,7 +119,8 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
   const configurationPath = path.join(projectRoot, 'config.local.ps1');
   const configurationPresent = await fs.stat(configurationPath).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1', 'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs',
-    'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/validation/io.mjs',
+    'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
+    'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
     'scripts/validation/plan.mjs', 'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
     'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch', 'config.local.ps1']) {
     const file = path.join(projectRoot, name);
@@ -105,15 +129,17 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
   requireValue(typeof powershellPath === 'string' && path.isAbsolute(powershellPath), 'XML reader requires an explicit PowerShell executable.');
   toolFiles.push({ path: powershellPath, sha256: await hashFile(powershellPath) }, { path: process.execPath, sha256: await hashFile(process.execPath) },
     ...staticInspection.implementationFiles);
+  if (videoPolicy) toolFiles.push(videoPolicy.ffmpeg);
   const value = { protocol: 'maestro.harmonyos.ci-inputs', schemaVersion: 1, frozenAt: new Date().toISOString(), suiteId: manifest.suiteId,
     projectRoot, deviceId, manifest: { path: document.path, sha256: document.sha256 }, powershellPath, configurationPresent,
     units: [{ unitId: manifest.suiteId, entry, sourceRoot, sources, requiredTopLevelFlows: expected }], profiles: { suite: profile },
     buildFiles: [...build.files.map(({ path, sha256 }) => ({ path, sha256 })), build.reference, { path: document.path, sha256: document.sha256 }],
-    applicationFiles, toolFiles, confirmation: null, build, staticInspection,
+    applicationFiles, toolFiles, confirmation: null, build, staticInspection, videoPolicy,
     installedApplicationCorrespondence: 'unverified', formalEligibility: false };
   await checkFrozen(value, environment);
   const snapshotPath = path.join(outputDirectory, 'ci-inputs.json'); await atomicJson(snapshotPath, value, true);
-  return { snapshotPath: path.resolve(snapshotPath), snapshotSha256: await hashFile(snapshotPath), suiteId: value.suiteId, unit: value.units[0], profile };
+  return { snapshotPath: path.resolve(snapshotPath), snapshotSha256: await hashFile(snapshotPath), suiteId: value.suiteId, unit: value.units[0], profile,
+    videoBudgetSeconds: videoPolicy?.budgetSeconds ?? 0 };
 }
 
 export async function loadSuite(snapshotPath, expectedHash, environment = process.env) {
@@ -154,20 +180,21 @@ export async function verifySuite(input, environment = process.env) {
   const report = { protocol: 'maestro.harmonyos.ci-quality', schemaVersion: 1, status: 'failed', checkedAt: new Date().toISOString(),
     runId: input.runId, attemptId: input.attemptId, deviceId: input.deviceId, snapshotPath: input.snapshotPath,
     snapshotSha256: input.snapshotSha256, execution: null, cleanup: null, installedApplicationCorrespondence: 'unverified',
-    formalEligibility: false, error: null, originalFiles: [] };
+    formalEligibility: false, error: null, originalFiles: [], video: { status: 'not_assessed' } };
   async function observed(file) { const doc = await readJson(file); report.originalFiles.push({ path: doc.path, sha256: doc.sha256 }); return doc; }
   try {
     const result = await observed(input.resultPath), data = result.value.data;
     report.execution = data?.status; report.cleanup = data?.cleanup;
     requireValue(result.sha256 === input.resultSha256 && data.runId === input.runId && data.attemptId === input.attemptId && data.deviceId === input.deviceId, 'Native result differs from release verification.');
     const snapshot = await loadSuite(input.snapshotPath, input.snapshotSha256, environment);
+    if (!snapshot.videoPolicy) report.video = { status: 'not_required' };
     requireValue(snapshot.deviceId === input.deviceId, 'Snapshot belongs to another device.');
     const control = await observed(input.controlRecordPath);
     requireValue(control.sha256 === input.controlSha256 && control.value.runId === input.runId && control.value.attemptId === input.attemptId &&
       control.value.deviceId === input.deviceId && typeof control.value.process?.executable === 'string' &&
       samePath(control.value.process.executable, snapshot.staticInspection.javaPath), 'Actual runner Java differs from the frozen static parser Java.');
     const base = path.dirname(result.path), index = await observed(await artifact(base, data.artifacts.evidenceIndexPath));
-    await verifyAttemptInput(result.value, index.value, input.agentRoot, snapshot.units[0], snapshot.profiles.suite);
+    const verifiedInput = await verifyAttemptInput(result.value, index.value, input.agentRoot, snapshot.units[0], snapshot.profiles.suite);
     const registered = await observed(await artifact(base, data.input.path));
     requireValue(registered.value.request.sources.length === 1 && samePath(registered.value.request.sources[0].path, snapshot.units[0].entry), 'Registered entry differs from the frozen invocation.');
     requireValue(typeof data.artifacts.junitPath === 'string', 'Native JUnit is unavailable for this execution; scenarios cannot be verified.');
@@ -178,6 +205,15 @@ export async function verifySuite(input, environment = process.env) {
     requireValue(samePath(parsed.sourcePath, xml) && parsed.sha256 === before && await hashFile(xml) === before, 'JUnit changed during XML inspection.');
     report.originalFiles.push({ path: xml, sha256: before });
     report.junit = { path: xml, sha256: before, ...checkJunit(parsed, snapshot, data.status) };
+    if (snapshot.videoPolicy) {
+      const videoDirectory = path.join(path.dirname(input.outputPath), 'video-verification');
+      try {
+        await noLinks(videoDirectory); await fs.mkdir(videoDirectory);
+        report.video = await verifyVideos({ snapshot, result: result.value, index: index.value, agentRoot: input.agentRoot,
+          outputDirectory: videoDirectory, verifiedInput });
+      } catch (error) { report.video = { status: 'failed', error: String(error.message ?? error) }; throw error; }
+      requireValue(report.video.status === 'passed', report.video.error ?? 'Required video verification failed.');
+    }
     await loadSuite(input.snapshotPath, input.snapshotSha256, environment);
     report.build = snapshot.build; report.status = 'passed';
   } catch (error) { report.error = String(error.message ?? error); }

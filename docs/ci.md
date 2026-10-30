@@ -1,6 +1,6 @@
 # 在本机或自托管 Windows 环境运行
 
-`scripts/ci/run-device-suite.ps1` 是平台无关的单设备入口。它先固定本次源码、构建文件和应用参数，再调用 Maestro CLI，核对执行结果、设备释放和原生 JUnit 场景清单。
+`scripts/ci/run-device-suite.ps1` 是平台无关的单设备入口。它先固定本次源码、构建文件和应用参数，再调用 Maestro CLI，核对执行结果、设备释放和原生 JUnit 场景清单；启用视频策略后，还会完整解码本次索引中的原视频。
 
 本机假执行器验证之外，已在一台真机上运行成功、预期断言失败及超时强制停止，检查后续阻止和 v2 恢复核销，见[补充验证记录](progress/2026-10-30-followup.md)。尚未配置或验证任何 CI 平台。此入口不安装服务、不下载工具、不构建 CLI、不安装 HAP，也不代表固定场景的稳定性验证已经完成。
 
@@ -52,6 +52,7 @@
 | `moduleName` | 可省略；省略时沿用 `MAESTRO_HARMONYOS_MODULE`，未设置则为空 |
 | `environmentNames` | 可省略；列出的变量必须已在当前进程设置，`APP_ID` 由 `bundleId` 提供 |
 | `applicationFile` | 可选的本地 HAP `{ "path": "app.hap", "sha256": "实际 SHA-256" }` |
+| `videoPolicy` | 可选的视频质量要求；省略时不启动解码器，配置方式见下文 |
 
 `expectedFlows.name` 必须与 YAML 的 `name` 一致；未写 `name` 时使用不带扩展名的文件名。顶层 Flow（包括单文件入口）必须符合实际 Maestro 选择规则：使用小写 `.yaml` 或 `.yml` 扩展名，文件主名不能是 `config`，内容也不能被识别为工作区配置。公共 `runFlow` 可放在 `common/` 等子目录中，不列为顶层场景；`common/config.yaml` 可以作为 `runFlow` 依赖解析。
 
@@ -60,6 +61,26 @@
 CI 会保存 `ci-inputs.json`，记录源码集合及哈希、场景路径和名称、应用参数与环境变量值的哈希、构建来源和实际四个核心 JAR，以及可选 HAP。它还固定 Java、Node、PowerShell、辅助脚本和安装目录中的 JAR 集合，并核对实际 runner 使用的 Java。冻结后输入发生变化会使检查失败。没有本地 HAP 仍可运行；提供 HAP 也只固定该文件，不证明手机上安装的应用与它对应，`installedApplicationCorrespondence` 保持 `unverified`。
 
 清单只列环境变量名称，但原生运行输入、日志和截图可能包含实际值，归档时应限制访问。
+
+需要视频作为通过条件时，在同一清单中增加：
+
+```json
+"videoPolicy": {
+  "requiredFlows": ["flows/login.yaml"],
+  "ffmpeg": { "path": "C:/tools/ffmpeg/bin/ffmpeg.exe", "sha256": "替换为实际 SHA-256" },
+  "timeoutSeconds": 60,
+  "maxVideos": 4,
+  "budgetSeconds": 330
+}
+```
+
+`requiredFlows` 必须是 `expectedFlows` 中明确的顶层源码路径子集，不能填公共子 Flow。每个指定 Flow 至少要有一份可归属的视频；归属按原生 retry trace 的 stepId 与证据索引关联，不按目录名或相同内容猜测。只要启用策略，本 attempt 其余已索引视频也要解码；总数超过 `maxVideos`、缺少必需视频或归属不明确都会使质量检查失败。省略整个 `videoPolicy` 保留现有无视频行为。
+
+FFmpeg 由使用者提供，入口不下载。派发前固定其字节及视频检查脚本，收尾再次检查。`timeoutSeconds` 为每片解码上限（1–3600 秒），`maxVideos` 为 1–100 且不得少于必需 Flow 数；总预算不得超过 86400 秒，也不能小于 `maxVideos × (timeoutSeconds + 20) + 10`。额外时间用于版本探测、启动和有界退出；不保证阻塞的文件系统操作可立即被中止。
+
+解码复用 `verify-recording.ps1`，每片使用独立新目录和报告指针，核对原视频前后哈希、解码器哈希、退出码、帧数、结束标记及错误输出。报告和日志留在本次 CI 目录的 `video-verification/`，由既有归档入口一并收集。坏片、超时或报告缺失使 `quality.status=failed` 和 CI 非零；原生执行状态与已经确认的 released 保持不变。此检查只验证原片完整解码，不证明画面内容、音轨、流畅度或历史尾部问题已修复。
+
+视频报告的 `process.descendantExitConfirmed` 只在取得并核对直接解码进程终态时为 true；外层超时或报告缺失时为 null。强制终止父进程可能使子解码进程的退出无法确认，不能从 Node 或 PowerShell 已退出推断整棵进程树结束。此时质量失败，已经确认的设备释放仍保留；它与 Java/HDC 的设备隔离判断分别记录。完整取消链仍需在实际 CI 平台配置后验证，不按进程名扫描或结束其他 FFmpeg。
 
 ## 记录本次构建
 
@@ -106,7 +127,7 @@ pwsh -NoProfile -File scripts/ci/run-device-suite.ps1 `
 | --- | --- | --- |
 | `TerminationWaitSeconds` | 5 | 终止本次 Java 后确认退出的等待上限 |
 | `OutputDrainSeconds` | 5 | Java 退出后等待输出管道结束的上限 |
-| `VerificationTimeoutSeconds` | 30 | 每次本机校验的上限，包括冻结、派发前复查、释放核验和质量检查 |
+| `VerificationTimeoutSeconds` | 30 | 每次元数据校验的上限；启用视频时，质量步骤另加冻结的 videoPolicy 总预算 |
 | `JobTimeoutSeconds` | 0 | 可选的平台作业预算；0 表示尚未提供平台预算 |
 
 配置平台预算时，入口要求：
@@ -116,10 +137,11 @@ JobTimeoutSeconds > RunTimeoutSeconds
                   + TerminationWaitSeconds
                   + OutputDrainSeconds
                   + 4 × VerificationTimeoutSeconds
+                  + videoPolicy.budgetSeconds（未启用为 0）
                   + 60
 ```
 
-默认校验、终止和输出等待参数下，600 秒执行预算要求作业预算大于 790 秒。额外 60 秒用于启动和归档余量；真实平台还需按构建与上传耗时增加预算。该参数不会改变平台自身的硬超时。
+默认校验、终止和输出等待参数下，600 秒执行预算要求作业预算大于 790 秒；使用上面 330 秒的视频策略时须大于 1120 秒。视频预算不足会在派发前拒绝。额外 60 秒用于启动和归档余量；真实平台还需按构建与上传耗时增加预算。该参数不会改变平台自身的硬超时。
 
 标准 YAML CLI 目前没有跨进程协作取消入口。runner 超时后只终止自己启动且 PID、启动时间、可执行文件均匹配的 Java 进程，不按进程名结束其他 Java/HDC，不发送额外的设备录屏停止命令。
 
@@ -167,7 +189,7 @@ CI 入口返回 0 要同时满足：CLI 和 runner 正常退出 0、执行结果
 | --- | --- |
 | `execution` | 原生测试是否通过，保留原始失败 |
 | `state: released` | 本次设备资源的释放已确认，可以结束该占用 |
-| `quality.status` | 固定输入、构建引用和原生 JUnit 场景记录是否一致 |
+| `quality.status` | 固定输入、构建引用、原生 JUnit 场景记录及已启用的视频要求是否满足 |
 
 例如预期场景全部出现，JUnit 如实记录断言失败，质量检查可以 passed，但 execution 仍是 failed，CI 返回非零。反过来，原生 passed 也不能覆盖缺失场景或构建文件变化。
 
@@ -207,11 +229,13 @@ node scripts/ci/collect-artifacts.mjs `
 
 `archive-manifest.json` 记录每个源路径、包内路径、复制前后源哈希、目标哈希，以及原执行、cleanup、quality 数据。`status=complete` 只表示本次声明范围已收齐，可与测试 failed 或 cleanup unknown 同时出现，不是清理或移交证明。缺文件、引用冲突、文件变化、输出未收完、超出限制或读写失败时尽量保留已得材料，标记 incomplete 并返回非零；不改原状态、gate 或结果。原生 JUnit 原样复制。工具、classpath、HAP 只保留已有指纹记录，不复制其字节；此目录是执行证据包，不是构建重放包。
 
+启用视频策略后，收集器还会逐级核对质量报告、视频报告、报告指针、独立解码报告及其日志的引用和哈希；声明的文件缺失或被修改时归档不完整，不重新解码来覆盖原结论。
+
 默认最多 4096 个文件、4096 个目录，单文件 1 GiB、合计 4 GiB。收集预算为 120 秒，在阶段和读写块之间检查，不能打断操作系统中阻塞的文件调用。平台仍需为独立收集步骤设置外层超时，并另留上传时间；强杀或磁盘不可写可能只留下部分文件而没有最终清单。链接、路径穿越、跨 attempt 引用、输出与输入嵌套及覆盖旧输出均拒绝。原始日志、截图、视频和本地路径需保留访问控制，上传失败应作为独立作业失败处理。
 
 派发前检查失败时，本次目录中的 `ci-preflight.json` 记录 `blocked`、`dispatched=false` 和原因；不会创建本次设备测试的占用记录。静态解析日志也保存在本次目录中，可用于定位错误路径或名称。
 
-原生 JUnit 保持原样。此入口核对声明的顶层场景，不据此判断每个 UI 步骤或条件分支已覆盖，也不执行全帧视频解码、重复次数统计或跨设备并发。需要进一步审核时，分别使用[验证计划](validation-plan.md)和[录屏检查工具](recording-diagnostics.md)。
+原生 JUnit 保持原样。此入口核对声明的顶层场景，不据此判断每个 UI 步骤或条件分支已覆盖，也不执行重复次数统计或跨设备并发。全帧视频解码按上述显式策略启用；进一步的统计或录屏诊断分别见[验证计划](validation-plan.md)和[录屏检查工具](recording-diagnostics.md)。
 
 ## 本机验证
 
@@ -220,10 +244,13 @@ pwsh -NoProfile -File scripts/tests/test-run-harmonyos.ps1
 pwsh -NoProfile -File scripts/tests/test-ci-device-suite.ps1
 node --test scripts/tests/test-ci-suite.mjs
 node --test scripts/tests/test-ci-collect-artifacts.mjs
+node --test scripts/tests/test-ci-videos.mjs
 pwsh -NoProfile -File scripts/tests/test-ci-junit.ps1
 ```
 
 Windows PowerShell 5.1 可为 CI 测试传入 `-TestArtifactsRoot D:\tests\ci-fixtures` 等较短的专用目录，避开旧版文件 API 的路径长度限制。
+
+只检查视频策略、预算和释放状态不被质量失败覆盖时，可对 `test-ci-device-suite.ps1` 使用 `-VideoOnly`。
 
 runner 测试使用本地 JDK 编译的假 CLI。CI 测试使用本地执行器替身和文件校验器；套件及 XML 测试用于检查固定输入、场景匹配和格式拒绝行为。测试报告以每次命令的实际输出为准。
 

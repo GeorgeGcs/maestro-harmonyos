@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$TestArtifactsRoot)
+param([string]$TestArtifactsRoot, [switch]$VideoOnly)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $testParent = if ($TestArtifactsRoot) { [IO.Path]::GetFullPath($TestArtifactsRoot) } else { Join-Path $projectRoot 'artifacts/ci-tests' }
@@ -65,7 +65,7 @@ try {
     }
     $shell = (Get-Process -Id $PID).Path
     foreach ($file in @('scripts/ci/run-device-suite.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1',
-        'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/read-junit.ps1',
+        'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/read-junit.ps1', 'scripts/ci/verify-videos.mjs', 'scripts/verify-recording.ps1',
         'scripts/validation/io.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/retry-evidence.mjs',
         'examples/agent-client/evidence.mjs', 'examples/agent-client/client.mjs')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $fixture $file)
@@ -238,9 +238,11 @@ await write(input.controlPath,{protocol:'maestro.harmonyos.runner-control',schem
     executable:input.mode==='quality-java'?path.join(root,'wrong-java.exe'):input.javaPath},processExitObserved:input.mode!=='hard-stop',
   processExitCode:status==='passed'?0:7,wrapperExitCode:status==='passed'?0:7,agentStatus:input.mode==='unknown-control'?'unknown':status,
   terminationRequested:false,stopReason:null,error:null,stdoutComplete:true,stderrComplete:true,runResultPath:path.join(base,'result.json')});
+if(input.mode==='video-decoder-change') await fs.appendFile(path.join(root,'fixture-ffmpeg.exe'),' changed after dispatch');
 '@
     Write-TestFile (Join-Path $testRoot 'fixture.mjs') $nodeFixture
 
+    if (-not $VideoOnly) {
     $suite.schemaVersion = 1
     Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
     try {
@@ -407,6 +409,38 @@ await write(input.controlPath,{protocol:'maestro.harmonyos.runner-control',schem
         } finally { [IO.Directory]::Delete($alias) }
         $passed++
     }
+    }
+
+    $defaultVideo = Invoke-Fixture 'passed' 'fixture-video-default'
+    Assert-Test ($defaultVideo.ExitCode -eq 0 -and $defaultVideo.State.quality.status -eq 'passed') ('Omitted video policy changed normal behavior: ' + $defaultVideo.Output)
+    $passed++
+    $decoder = Join-Path $testRoot 'fixture-ffmpeg.exe'
+    Write-TestFile $decoder 'Synthetic decoder bytes; missing-video fixtures never execute it.'
+    $suite.videoPolicy = @{ requiredFlows = @('flow.yaml'); ffmpeg = @{ path = $decoder; sha256 = (Get-FileHash -LiteralPath $decoder -Algorithm SHA256).Hash.ToLowerInvariant() }
+        timeoutSeconds = 1; maxVideos = 1; budgetSeconds = 31 }
+    Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
+    $beforeVideo = @(Get-Content -LiteralPath (Join-Path $testRoot 'calls.log')).Count
+    $videoBudget = Invoke-Fixture 'passed' 'fixture-video-budget' -Extra @('-JobTimeoutSeconds', '226')
+    Assert-Test ($videoBudget.ExitCode -ne 0 -and $null -eq $videoBudget.State -and $videoBudget.Output -match 'videoPolicy budget' -and
+        @(Get-Content -LiteralPath (Join-Path $testRoot 'calls.log')).Count -eq $beforeVideo) 'The video budget boundary dispatched a device action.'
+    $passed++
+    $videoMissing = Invoke-Fixture 'passed' 'fixture-video-missing' -Extra @('-JobTimeoutSeconds', '227')
+    Assert-Test ($videoMissing.ExitCode -ne 0 -and $videoMissing.State.state -eq 'released' -and $videoMissing.State.execution -eq 'passed' -and
+        $videoMissing.State.quality.status -eq 'failed' -and $videoMissing.State.wrapperExitCode -eq 0) ('Missing required video revoked release or passed CI: ' + $videoMissing.Output)
+    $videoQuality = Get-Content -LiteralPath $videoMissing.State.quality.path -Raw | ConvertFrom-Json
+    Assert-Test ($videoQuality.video.status -eq 'failed') 'Required video failure is missing from quality.'
+    $passed++
+    $suite.videoPolicy.requiredFlows = @('unlisted.yaml')
+    Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
+    $badVideo = Invoke-Fixture 'passed' 'fixture-video-unlisted'
+    Assert-Test ($badVideo.ExitCode -ne 0 -and $null -eq $badVideo.State) 'An undeclared video Flow was dispatched.'
+    $passed++
+    $suite.videoPolicy.requiredFlows = @('flow.yaml')
+    Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
+    $changedDecoder = Invoke-Fixture 'video-decoder-change' 'fixture-video-changed'
+    Assert-Test ($changedDecoder.ExitCode -ne 0 -and $changedDecoder.State.state -eq 'released' -and $changedDecoder.State.execution -eq 'passed' -and
+        $changedDecoder.State.quality.status -eq 'failed') 'Changing decoder bytes lost release or passed quality.'
+    $passed++
     $completed = $true
     Write-Output ('PASS: ' + $passed + ' CI behavior checks; skipped=' + $skipped + '. Local fake executors only; no HDC, network, device or CI provider calls.')
 } finally {

@@ -230,3 +230,59 @@ test('public command reports a missing reference with a nonzero exit and retaine
   assert.equal(run.status, 1, run.stderr); assert.equal(JSON.parse(run.stdout).status, 'incomplete');
   assert.equal(JSON.parse(await fs.readFile(path.join(f.output, 'archive-manifest.json'), 'utf8')).originals.ci.execution, 'passed');
 });
+
+test('video archive follows exact reports and logs without collecting external tools or changing execution', async t => {
+  for (const mode of ['passed', 'failed', 'report-missing', 'pointer-missing', 'pointer-changed', 'decode-log-missing',
+    'decode-log-changed', 'process-log-missing', 'version-log-missing', 'foreign-report', 'unknown-external']) await t.test(mode, async t => {
+    const f = await fixture(t), videoPath = 'flows/a/recording.mp4';
+    await write(path.join(f.attempt, videoPath), 'owned video fixture');
+    const videoHash = await fileHash(path.join(f.attempt, videoPath));
+    f.index.data.entries[0].evidence.push({ kind: 'video', state: 'available', path: videoPath, sha256: videoHash });
+    const qualityPath = path.join(f.ci, 'ci-quality.json'), inputPath = path.join(f.ci, 'ci-inputs.json');
+    const directory = path.join(f.ci, 'video-verification', 'one');
+    const decodedPath = path.join(directory, 'recording-' + randomUUID().replaceAll('-', ''), 'verification.json');
+    const pointerPath = path.join(directory, 'report-pointer.json'), reportPath = path.join(f.ci, 'video-verification', 'ci-videos.json');
+    const originals = [];
+    for (const name of ['decode.stdout.log', 'decode.stderr.log', 'version.log']) {
+      const file = path.join(path.dirname(decodedPath), name); await write(file, name);
+      originals.push({ path: file, sha256: await fileHash(file) });
+    }
+    const tool = { path: path.join(f.root, 'external-decoder.exe'), sha256: 'a'.repeat(64) };
+    const inputs = JSON.parse(await fs.readFile(inputPath, 'utf8')); inputs.toolFiles.push(tool); await write(inputPath, inputs);
+    originals.push(tool);
+    const process = {};
+    for (const name of ['stdout', 'stderr']) {
+      const file = path.join(directory, 'verifier.' + name + '.log'); await write(file, name);
+      process[name] = { path: file, sha256: await fileHash(file) };
+    }
+    await write(decodedPath, { protocol: 'maestro.harmonyos.recording-verification', schemaVersion: 1,
+      status: mode === 'failed' ? 'failed' : 'passed', inputPath: path.join(f.attempt, videoPath), inputSha256: videoHash,
+      stdout: 'decode.stdout.log', stderr: 'decode.stderr.log' });
+    await write(pointerPath, { protocol: 'maestro.harmonyos.recording-report-pointer', schemaVersion: 1,
+      reportPath: decodedPath, reportSha256: await fileHash(decodedPath) });
+    const video = { path: videoPath, sourcePath: path.join(f.attempt, videoPath), sha256: videoHash,
+      status: mode === 'failed' ? 'failed' : 'passed', process,
+      pointer: { path: pointerPath, sha256: await fileHash(pointerPath) }, verification: { path: decodedPath, sha256: await fileHash(decodedPath) } };
+    const report = { protocol: 'maestro.harmonyos.ci-videos', schemaVersion: 1, runId: f.record.runId, attemptId: f.record.attemptId,
+      status: video.status, videos: [video], originalFiles: originals };
+    if (mode === 'unknown-external') originals.push({ path: path.join(f.root, 'unrelated-secret.txt'), sha256: 'b'.repeat(64) });
+    if (mode === 'foreign-report') video.verification.path = path.join(f.root, 'foreign.json');
+    await write(reportPath, report);
+    await write(qualityPath, { status: report.status, video: { path: reportPath, sha256: await fileHash(reportPath), status: report.status } });
+    f.record.inputs.sha256 = await fileHash(inputPath); f.record.quality.sha256 = await fileHash(qualityPath); f.record.quality.status = report.status;
+    await f.persist();
+    const before = await fileHash(path.join(f.ci, 'ci-result.json'));
+    if (mode === 'report-missing') await fs.unlink(reportPath);
+    if (mode === 'pointer-missing') await fs.unlink(pointerPath);
+    if (mode === 'pointer-changed') await fs.appendFile(pointerPath, ' ');
+    if (mode === 'decode-log-missing') await fs.unlink(originals[0].path);
+    if (mode === 'decode-log-changed') await fs.appendFile(originals[0].path, ' changed');
+    if (mode === 'version-log-missing') await fs.unlink(originals[2].path);
+    if (mode === 'process-log-missing') await fs.unlink(process.stdout.path);
+    const collected = await f.collect();
+    assert.equal(collected.status, ['passed', 'failed'].includes(mode) ? 'complete' : 'incomplete', JSON.stringify(collected.issues));
+    assert.equal(collected.files.some(file => file.source === tool.path), false);
+    assert.equal(collected.originals.ci.execution, 'passed'); assert.equal(collected.originals.ci.state, 'released');
+    assert.equal(await fileHash(path.join(f.ci, 'ci-result.json')), before);
+  });
+});

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { freezeSuite, loadSuite, checkJunit, verifySuite, inspectFlows } from '../ci/suite.mjs';
+import { freezeSuite, freezeVideoPolicy, loadSuite, checkJunit, verifySuite, inspectFlows } from '../ci/suite.mjs';
 import { gitIdentity, readMetadata } from '../ci/snapshot-build.mjs';
 import { hash, hashFile, sourceFiles } from '../validation/io.mjs';
 
@@ -15,7 +15,8 @@ const powershell = process.env.CI_TEST_POWERSHELL ?? execFileSync('where.exe', [
 const json = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(value)); };
 const environment = { ...process.env, TEST_VALUE: 'fixture-value' };
 const toolNames = ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1', 'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs',
-  'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/validation/io.mjs',
+  'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
+  'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
   'scripts/validation/plan.mjs', 'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs'];
 
 async function setup(t) {
@@ -98,6 +99,40 @@ test('explicit local HAP is fingerprinted but never proves installed corresponde
   const frozen = await context.freeze(), value = await loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment);
   assert.equal(value.applicationFiles.length, 1); assert.equal(value.installedApplicationCorrespondence, 'unverified');
   await fs.appendFile(hap, 'changed'); await assert.rejects(loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment));
+});
+
+test('video policy is optional and freezes an explicit required Flow subset, decoder and budgets', async t => {
+  const context = await setup(t), decoder = path.join(context.root, 'fixture-ffmpeg.exe'); await fs.writeFile(decoder, 'fixture decoder; not executed');
+  assert.equal(await freezeVideoPolicy(undefined, context.root, []), null);
+  const policy = { requiredFlows: [context.flow], ffmpeg: { path: decoder, sha256: await hashFile(decoder) }, timeoutSeconds: 2, maxVideos: 2, budgetSeconds: 54 };
+  context.manifest.videoPolicy = policy;
+  const frozen = await context.freeze(), snapshot = await loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment);
+  assert.equal(frozen.videoBudgetSeconds, 54); assert.deepEqual(snapshot.videoPolicy.requiredFlows, [context.flow]);
+  assert.ok(snapshot.toolFiles.some(file => file.path === decoder && file.sha256 === policy.ffmpeg.sha256));
+  assert.ok(snapshot.toolFiles.some(file => file.path.endsWith('verify-recording.ps1')));
+  await fs.appendFile(decoder, ' changed'); await assert.rejects(loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment));
+});
+
+test('video policy rejects unlisted Flows, duplicate paths, missing hashes and inadequate budgets before dispatch', async t => {
+  const context = await setup(t), decoder = path.join(context.root, 'fixture-ffmpeg.exe'); await fs.writeFile(decoder, 'fixture decoder');
+  const policy = { requiredFlows: [context.flow], ffmpeg: { path: decoder, sha256: await hashFile(decoder) }, timeoutSeconds: 1, maxVideos: 1, budgetSeconds: 31 };
+  for (const mutate of [value => { value.requiredFlows = [context.dependency]; }, value => { value.requiredFlows.push(context.flow); },
+    value => { delete value.ffmpeg.sha256; }, value => { value.ffmpeg.sha256 = '0'.repeat(64); }, value => { value.budgetSeconds = 30; },
+    value => { value.maxVideos = 0; }, value => { value.requiredFlows = []; }, value => { value.timeoutSeconds = 0; }]) {
+    const value = structuredClone(policy); mutate(value);
+    await assert.rejects(freezeVideoPolicy(value, context.root, [{ path: context.flow }]));
+  }
+});
+
+test('video-required quality failure preserves the native result and confirmed cleanup', async t => {
+  const context = await setup(t), decoder = path.join(context.root, 'fixture-ffmpeg.exe'); await fs.writeFile(decoder, 'fixture decoder; never run');
+  context.manifest.videoPolicy = { requiredFlows: [context.flow], ffmpeg: { path: decoder, sha256: await hashFile(decoder) }, timeoutSeconds: 1, maxVideos: 1, budgetSeconds: 31 };
+  const frozen = await context.freeze(), snapshot = await loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment);
+  const attempt = await nativeAttempt(context, 'passed', snapshot.staticInspection.javaPath), outputPath = path.join(context.root, 'quality.json');
+  const output = await verifySuite({ ...attempt, ...frozen, outputPath }, environment), report = (await readMetadata(outputPath)).value;
+  assert.equal(output.status, 'failed'); assert.equal(report.video.status, 'failed');
+  assert.equal(report.execution, 'passed'); assert.equal(report.cleanup.state, 'complete');
+  assert.equal(await hashFile(attempt.resultPath), attempt.resultSha256);
 });
 
 test('directory suite membership excludes common subflows and rejects its workspace config before dispatch', async t => {

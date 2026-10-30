@@ -58,7 +58,8 @@ function ConvertTo-NativeArgument {
 }
 
 function Invoke-StateVerification {
-    param($InputValue, [string]$Directory, [string]$Helper = 'verify-state.mjs', [switch]$MetadataOnly)
+    param($InputValue, [string]$Directory, [string]$Helper = 'verify-state.mjs', [switch]$MetadataOnly,
+        [int]$TimeoutSeconds = $VerificationTimeoutSeconds)
     $inputPath = Join-Path $Directory ('verification-' + [guid]::NewGuid().ToString('N') + '.json')
     Write-AtomicJson $inputPath $InputValue
     $node = Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1
@@ -76,7 +77,7 @@ function Invoke-StateVerification {
         $null = $process.Start()
         $stdout = $process.StandardOutput.ReadToEndAsync()
         $stderr = $process.StandardError.ReadToEndAsync()
-        if (-not $process.WaitForExit($VerificationTimeoutSeconds * 1000)) { throw 'Local verification exceeded its budget.' }
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) { throw 'Local verification exceeded its budget.' }
         if (-not $stdout.Wait(1000) -or -not $stderr.Wait(1000)) { throw 'Verification output did not close.' }
         $message = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0) { throw ('Local verification failed: ' + $message.Trim()) }
@@ -188,6 +189,11 @@ try {
         $powershellPath = (Get-Process -Id $PID).Path
         $frozen = Invoke-StateVerification @{ operation = 'freeze'; manifestPath = $manifestPath; projectRoot = $projectRoot;
             deviceId = $DeviceId; outputDirectory = $directory; powershellPath = $powershellPath } $directory -Helper 'suite.mjs' -MetadataOnly
+        $videoBudgetSeconds = [int]$frozen.videoBudgetSeconds
+        if ($JobTimeoutSeconds -gt 0 -and $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds +
+            (4 * $VerificationTimeoutSeconds) + $videoBudgetSeconds + 60 -ge $JobTimeoutSeconds) {
+            throw 'The job budget must also reserve the frozen videoPolicy budget before dispatch.'
+        }
         $flow = $frozen.unit.entry
         $profile = $frozen.profile
         $variables = @{}
@@ -249,7 +255,8 @@ try {
                 snapshotSha256 = $frozen.snapshotSha256; deviceId = $DeviceId; runId = $state.runId; attemptId = $state.attemptId;
                 resultPath = $verification.resultPath; resultSha256 = $verification.resultSha256; agentRoot = $state.agentRoot;
                 controlRecordPath = $state.controlRecordPath; controlSha256 = $verification.controlSha256;
-                outputPath = (Join-Path $directory 'ci-quality.json') } $directory -Helper 'suite.mjs' -MetadataOnly
+                outputPath = (Join-Path $directory 'ci-quality.json') } $directory -Helper 'suite.mjs' -MetadataOnly `
+                -TimeoutSeconds ($VerificationTimeoutSeconds + $videoBudgetSeconds)
         } catch { $state.quality = @{ status = 'failed'; error = $_.Exception.Message; path = $null; sha256 = $null } }
         $state.updatedAt = [DateTime]::UtcNow.ToString('o')
         Write-AtomicJson (Join-Path $directory 'ci-result.json') $state
