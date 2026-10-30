@@ -12285,13 +12285,14 @@ index 0000000..8eafe89
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..b18ff31
+index 0000000..15d036b
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,1183 @@
+@@ -0,0 +1,1378 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
++import maestro.ScreenRecording
 +import maestro.TreeNode
 +import maestro.debuglog.ScopedLogCapture
 +import maestro.debuglog.RecordingDiagnosticContext
@@ -12317,6 +12318,8 @@ index 0000000..b18ff31
 +import java.util.UUID
 +import java.util.concurrent.CountDownLatch
 +import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.atomic.AtomicReference
 +
 +class HarmonyOSSystemScreenRecorderTest {
 +    @Test
@@ -12792,6 +12795,198 @@ index 0000000..b18ff31
 +        assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
 +        assertThat(device.deletes).isEmpty()
 +        assertThat(sink.closed).isFalse()
++    }
++
++    @Test fun `partial sink write failure preserves the complete original through recovery`(): Unit = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("recording-partial-write").toPath()
++        val journalPath = directory.resolve("recovery-journal.json")
++        val id = UUID.randomUUID().toString()
++        val device = Device().apply { sessionScratch = true }
++        val original = IOException("output write failed after partial data")
++        val sink = RecordingSink()
++        val prefixSize = device.video.size / 2
++        var bytesArchivedBeforeWrite: ByteArray? = null
++        var writes = 0
++        lateinit var marker: RecordingResourceFailure
++        lateinit var archivePath: Path
++        lateinit var archiveHash: String
++        val recording = HarmonyOSRecoveryJournal.create(journalPath, id, UUID.randomUUID().toString()).use { journal ->
++            val resources = journal.enableRecordingResources()
++            val partialSink = object : Sink by sink {
++                override fun write(source: Buffer, byteCount: Long) {
++                    writes++
++                    val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++                    archivePath = directory.resolve("recording-originals").resolve(entry["archiveName"].asText())
++                    archiveHash = entry["archiveSha256"].asText()
++                    bytesArchivedBeforeWrite = Files.readAllBytes(archivePath)
++                    sink.write(source, minOf(byteCount, prefixSize.toLong()))
++                    throw original
++                }
++            }
++            val recording = HarmonyOSSystemScreenRecorder(id, device, device::receive,
++                config().copy(recordingStopTimeout = Duration.ofSeconds(3)), journal).start(partialSink)
++
++            assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++            assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++            assertThat(writes).isEqualTo(1)
++            assertThat(bytesArchivedBeforeWrite).isEqualTo(device.video)
++            assertThat(sink.bytes.snapshot().toByteArray()).isEqualTo(device.video.copyOf(prefixSize))
++            assertThat(sink.bytes.size).isGreaterThan(0L)
++            assertThat(sink.bytes.size).isLessThan(device.video.size.toLong())
++            assertThat(sink.flushCalls).isEqualTo(0)
++            assertThat(sink.closed).isFalse()
++            assertThat(device.stops).isEqualTo(1)
++            assertThat(device.capturePids).isEmpty()
++            assertThat(device.receives).isEqualTo(1)
++            assertThat(device.deletes).isEmpty()
++            assertThat(device.wasDeleted).isFalse()
++            assertThat(Files.exists(checkNotNull(device.localPath))).isFalse()
++            val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++            assertThat(entry["captureEnded"].booleanValue()).isTrue()
++            assertThat(entry["uri"].asText()).isEqualTo(device.uri)
++            assertThat(entry["mediaRemoved"].booleanValue()).isFalse()
++            assertThat(resources.isComplete()).isFalse()
++            assertThat(resources.verifyArchives()).isTrue()
++            marker = original.suppressed.filterIsInstance<RecordingResourceFailure>().single()
++            recording
++        }
++        val suppressedBeforeRecovery = original.suppressed.toList()
++        val remote = MediaRemote(device.uri).apply { video = device.video }
++        HarmonyOSRecoveryJournal.open(journalPath).use { journal ->
++            val resources = checkNotNull(journal.recordings)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(3))).isEmpty()
++            assertThat(resources.isComplete()).isTrue()
++            assertThat(resources.verifyArchives()).isTrue()
++            assertThat(resources.resolvesFailure(marker.recordingId, marker.fingerprint)).isTrue()
++            val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++            assertThat(entry["archiveSha256"].asText()).isEqualTo(archiveHash)
++        }
++        assertThat(remote.deleted).containsExactly(device.uri)
++        assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
++        assertThat(Files.readAllBytes(archivePath)).isEqualTo(device.video)
++        assertThat(assertThrows(IOException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(original.suppressed.toList()).containsExactlyElementsIn(suppressedBeforeRecovery).inOrder()
++        assertThat(sink.bytes.snapshot().toByteArray()).isEqualTo(device.video.copyOf(prefixSize))
++        assertThat(sink.flushCalls).isEqualTo(0)
++        assertThat(sink.closed).isFalse()
++        assertThat(device.stops).isEqualTo(1)
++    }
++
++    @Test fun `interruption during receive preserves media and recovers without accepting the cancelled output`(): Unit = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("recording-receive-interrupted").toPath()
++        val journalPath = directory.resolve("recovery-journal.json")
++        val id = UUID.randomUUID().toString()
++        val device = Device().apply { sessionScratch = true }
++        val sink = RecordingSink()
++        val enteredReceive = CountDownLatch(1)
++        val releaseReceive = CountDownLatch(1)
++        val receiveFailure = AtomicReference<InterruptedException>()
++        val closeFailure = AtomicReference<Throwable>()
++        val restoredInterrupt = AtomicBoolean()
++        lateinit var marker: RecordingResourceFailure
++        val recording: ScreenRecording = HarmonyOSRecoveryJournal.create(journalPath, id, UUID.randomUUID().toString()).use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = HarmonyOSSystemScreenRecorder(id, device, { remote, path, timeout ->
++                device.receive(remote, path, timeout)
++                enteredReceive.countDown()
++                try {
++                    check(releaseReceive.await(5, TimeUnit.SECONDS)) { "Receive fixture was not released" }
++                } catch (error: InterruptedException) {
++                    receiveFailure.set(error)
++                    // Match ProcessHdcCommandRunner's restoration when its wait is interrupted.
++                    Thread.currentThread().interrupt()
++                    throw error
++                }
++            }, config().copy(recordingStopTimeout = Duration.ofSeconds(10)), journal).start(sink)
++            val worker = Thread({
++                try { recording.close() } catch (error: Throwable) { closeFailure.set(error) }
++                finally {
++                    restoredInterrupt.set(Thread.currentThread().isInterrupted)
++                    Thread.interrupted()
++                }
++            }, "recording-close-interruption-test").apply { isDaemon = true; start() }
++            try {
++                assertThat(enteredReceive.await(5, TimeUnit.SECONDS)).isTrue()
++                assertThat(worker.isAlive).isTrue()
++                worker.interrupt()
++                worker.join(5_000)
++                assertThat(worker.isAlive).isFalse()
++            } finally {
++                releaseReceive.countDown()
++                if (worker.isAlive) {
++                    worker.interrupt()
++                    worker.join(5_000)
++                }
++                check(!worker.isAlive) { "Recording close worker did not terminate" }
++            }
++
++            val original = checkNotNull(receiveFailure.get())
++            assertThat(closeFailure.get()).isSameInstanceAs(original)
++            assertThat(restoredInterrupt.get()).isTrue()
++            assertThat(Thread.currentThread().isInterrupted).isFalse()
++            assertThat(assertThrows(InterruptedException::class.java) { recording.close() }).isSameInstanceAs(original)
++            assertThat(device.stops).isEqualTo(1)
++            assertThat(device.capturePids).isEmpty()
++            assertThat(device.receives).isEqualTo(1)
++            assertThat(device.deletes).isEmpty()
++            assertThat(device.wasDeleted).isFalse()
++            // Only the pre-export removal ran; interrupted cleanup leaves the export for recovery.
++            assertThat(device.commands.count { it.first() == "rm" }).isEqualTo(1)
++            assertThat(sink.bytes.size).isEqualTo(0)
++            assertThat(sink.flushCalls).isEqualTo(0)
++            assertThat(sink.closed).isFalse()
++            assertThat(Files.exists(checkNotNull(device.localPath))).isFalse()
++            val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++            assertThat(entry["captureEnded"].booleanValue()).isTrue()
++            assertThat(entry["archiveName"].isNull).isTrue()
++            assertThat(entry["archives"].size()).isEqualTo(0)
++            assertThat(entry["mediaRemoved"].booleanValue()).isFalse()
++            assertThat(resources.isComplete()).isFalse()
++            marker = original.suppressed.filterIsInstance<RecordingResourceFailure>().single()
++            recording
++        }
++        val original = checkNotNull(receiveFailure.get())
++        val suppressedBeforeRecovery = original.suppressed.toList()
++        val remote = MediaRemote(device.uri).apply {
++            video = device.video
++            scratchPresent = true
++            scratchBytes = device.video.copyOf()
++        }
++        val archive = HarmonyOSRecoveryJournal.open(journalPath).use { journal ->
++            val resources = checkNotNull(journal.recordings)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(3)).map { it.code })
++                .containsExactly("RECORDING_ARCHIVED_RECHECK_REQUIRED")
++            assertThat(resources.isComplete()).isFalse()
++            assertThat(resources.verifyArchives()).isTrue()
++            assertThat(resources.resolvesFailure(marker.recordingId, marker.fingerprint)).isFalse()
++            assertThat(remote.exports).isEqualTo(0)
++            assertThat(remote.deleted).isEmpty()
++            assertThat(remote.scratchRemoved).isEmpty()
++            val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++            entry["archiveName"].asText() to entry["archiveSha256"].asText()
++        }
++        val archivePath = directory.resolve("recording-originals").resolve(archive.first)
++        assertThat(Files.readAllBytes(archivePath)).isEqualTo(device.video)
++        HarmonyOSRecoveryJournal.open(journalPath).use { journal ->
++            val resources = checkNotNull(journal.recordings)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(3))).isEmpty()
++            assertThat(resources.isComplete()).isTrue()
++            assertThat(resources.verifyArchives()).isTrue()
++            assertThat(resources.resolvesFailure(marker.recordingId, marker.fingerprint)).isTrue()
++            val entry = jacksonObjectMapper().readTree(resources.path.toFile())["resources"][0]
++            assertThat(entry["archiveName"].asText()).isEqualTo(archive.first)
++            assertThat(entry["archiveSha256"].asText()).isEqualTo(archive.second)
++        }
++        assertThat(remote.exports).isEqualTo(1)
++        assertThat(remote.deleted).containsExactly(device.uri)
++        assertThat(remote.commands.none { it.contains("'aa'") || it.contains("kill") }).isTrue()
++        assertThat(Files.readAllBytes(archivePath)).isEqualTo(device.video)
++        assertThat(assertThrows(InterruptedException::class.java) { recording.close() }).isSameInstanceAs(original)
++        assertThat(original.suppressed.toList()).containsExactlyElementsIn(suppressedBeforeRecovery).inOrder()
++        assertThat(sink.bytes.size).isEqualTo(0)
++        assertThat(sink.flushCalls).isEqualTo(0)
++        assertThat(sink.closed).isFalse()
++        assertThat(device.stops).isEqualTo(1)
 +    }
 +
 +    @Test fun `a short receive keeps device media and cannot authorize recovery without an archive`(): Unit = TempFileHandler().use { files ->
