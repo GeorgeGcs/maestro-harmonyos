@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 2,
+  "suiteId": "example-smoke",
+  "flowPath": "../flows/smoke.yaml",
+  "sourceRoot": "../flows",
+  "expectedFlows": [
+    {
+      "path": "../flows/smoke.yaml",
+      "name": "smoke"
+    }
+  ],
+  "bundleId": "org.example.app",
+  "abilityName": "EntryAbility",
+  "moduleName": "entry",
+  "environmentNames": [
+    "START_TEXT",
+    "BUTTON_ID",
+    "RESULT_TEXT"
+  ],
+  "buildManifest": {
+    "path": "../../artifacts/ci/build-observed.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

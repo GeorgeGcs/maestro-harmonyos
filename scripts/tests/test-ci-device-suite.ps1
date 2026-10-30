@@ -14,6 +14,20 @@ $skipped = 0
 $completed = $false
 function Assert-Test { param([bool]$Value, [string]$Message) if (-not $Value) { throw $Message } }
 function Write-TestFile { param([string]$Path, [string]$Text) [IO.File]::WriteAllText($Path, $Text, $utf8) }
+function Remove-TestDirectory {
+    param([string]$Directory, [string]$AllowedRoot)
+    if ($Directory -cne $AllowedRoot -and -not $Directory.StartsWith(($AllowedRoot + '\'), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Refusing cleanup outside this CI fixture.'
+    }
+    if (([IO.File]::GetAttributes($Directory) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing cleanup through a directory link.' }
+    foreach ($item in [IO.Directory]::EnumerateFileSystemEntries($Directory)) {
+        $attributes = [IO.File]::GetAttributes($item)
+        if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Refusing cleanup of a linked fixture entry.' }
+        if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { Remove-TestDirectory $item $AllowedRoot }
+        else { [IO.File]::Delete($item) }
+    }
+    [IO.Directory]::Delete($Directory)
+}
 function Read-State {
     param([string]$Device)
     $hasher = [Security.Cryptography.SHA256]::Create()
@@ -39,24 +53,85 @@ function Invoke-Fixture {
     return [pscustomobject]@{ ExitCode = $code; Output = ($output | Out-String); State = (Read-State $Device) }
 }
 try {
-    foreach ($directory in @($testRoot, (Join-Path $fixture 'scripts/ci'), (Join-Path $fixture 'examples/agent-client'))) {
+    $localConfiguration = Join-Path $projectRoot 'config.local.ps1'
+    if (Test-Path -LiteralPath $localConfiguration -PathType Leaf) { . $localConfiguration }
+    if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin/java.exe') -PathType Leaf)) {
+        throw 'The host fixture requires JAVA_HOME to identify a direct JDK 17+ installation.'
+    }
+    foreach ($directory in @($testRoot, (Join-Path $fixture 'scripts/ci'), (Join-Path $fixture 'scripts/validation'),
+        (Join-Path $fixture 'examples/agent-client'), (Join-Path $fixture 'patches/maestro'),
+        (Join-Path $fixture '.upstream/maestro/maestro-cli/build/install/maestro/lib'))) {
         $null = [IO.Directory]::CreateDirectory($directory)
     }
     $shell = (Get-Process -Id $PID).Path
-    foreach ($file in @('scripts/ci/run-device-suite.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'examples/agent-client/evidence.mjs', 'examples/agent-client/client.mjs')) {
+    foreach ($file in @('scripts/ci/run-device-suite.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1',
+        'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/read-junit.ps1',
+        'scripts/validation/io.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/retry-evidence.mjs',
+        'examples/agent-client/evidence.mjs', 'examples/agent-client/client.mjs')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $file) -Destination (Join-Path $fixture $file)
     }
-    Write-TestFile (Join-Path $fixture 'flow.yaml') "appId: org.example.fixture`n---`n- launchApp`n"
-    Write-TestFile (Join-Path $fixture 'suite.json') '{"schemaVersion":1,"suiteId":"fixture","flowPath":"flow.yaml","bundleId":"org.example.fixture","abilityName":"EntryAbility"}'
+    Write-TestFile (Join-Path $fixture 'flow.yaml') "appId: org.example.fixture`nname: fixture`n---`n- launchApp`n"
+    Write-TestFile (Join-Path $fixture 'upstream.lock.json') (@{ commit = ('2' * 40) } | ConvertTo-Json)
+    $patchPath = Join-Path $fixture 'patches/maestro/0001-harmonyos-host.patch'
+    Write-TestFile $patchPath 'Synthetic host fixture patch; never applied.'
+    $buildFiles = @()
+    # A valid empty ZIP lets Java source-launch inspect this synthetic classpath.
+    $emptyJar = New-Object byte[] 22
+    $emptyJar[0] = 0x50; $emptyJar[1] = 0x4b; $emptyJar[2] = 0x05; $emptyJar[3] = 0x06
+    foreach ($role in @('maestro-cli', 'maestro-client', 'maestro-orchestra', 'maestro-orchestra-models')) {
+        $jarPath = Join-Path $fixture ('.upstream/maestro/maestro-cli/build/install/maestro/lib/' + $role + '-1.0.jar')
+        [IO.File]::WriteAllBytes($jarPath, $emptyJar)
+        $buildFiles += @{ role = $role; path = $jarPath; sha256 = (Get-FileHash -LiteralPath $jarPath -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $jarPath).Length }
+    }
+    $buildPath = Join-Path $fixture 'retained-build.json'
+    Write-TestFile $buildPath (@{ status = 'passed'; cliBuildStatus = 'passed'; cliVersionStatus = 'passed'; sourceDirectory = $fixture
+        projectCommit = ('1' * 40); upstreamCommit = ('2' * 40); patchSha256 = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        outputFiles = $buildFiles } | ConvertTo-Json -Depth 8)
+    $suite = @{ schemaVersion = 2; suiteId = 'fixture'; flowPath = 'flow.yaml'; sourceRoot = '.'
+        bundleId = 'org.example.fixture'; abilityName = 'EntryAbility'; moduleName = 'entry'; environmentNames = @('CI_FIXTURE_PARAMETER')
+        expectedFlows = @(@{ path = 'flow.yaml'; name = 'fixture' })
+        buildManifest = @{ path = 'retained-build.json'; sha256 = (Get-FileHash -LiteralPath $buildPath -Algorithm SHA256).Hash.ToLowerInvariant() } }
+    $suitePath = Join-Path $fixture 'suite.json'
+    Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
     $env:CI_FIXTURE_ROOT = $testRoot
     $env:CI_FIXTURE_RECOVERY = $recoveryRoot
+    $env:CI_FIXTURE_PARAMETER = 'fixture parameter with spaces'
+    # Only the temporary checkout contains this mock. Production has no bypass.
+    $fakeInspector = @'
+import java.nio.file.Path;
+class InspectFlows {
+    public static void main(String[] args) throws Exception {
+        if (args.length != 2) throw new IllegalArgumentException("Expected request and response paths.");
+        Process child = new ProcessBuilder("node", Path.of("scripts", "ci", "inspect-flows-fixture.mjs").toAbsolutePath().toString(), args[0], args[1])
+            .inheritIO().start();
+        System.exit(child.waitFor());
+    }
+}
+'@
+    Write-TestFile (Join-Path $fixture 'scripts/ci/InspectFlows.java') $fakeInspector
+    $fakeInspectionNode = @'
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createHash } from 'node:crypto';
+const request = JSON.parse(await fs.readFile(process.argv[2], 'utf8'));
+const entry = path.join(request.sourceRoot, 'flow.yaml');
+const sha256 = createHash('sha256').update(await fs.readFile(entry)).digest('hex');
+if (request.schemaVersion !== 1 || request.flows.length !== 1 || path.resolve(request.flows[0].path) !== entry ||
+    request.flows[0].name !== 'fixture' || !request.sources.some(source => path.resolve(source.path) === entry && source.sha256 === sha256)) {
+  throw new Error('The mock inspector only supports the known host fixture.');
+}
+await fs.writeFile(process.argv[3], JSON.stringify({protocol:'maestro.harmonyos.ci-static-flows',schemaVersion:1,
+  flows:[{path:entry,name:'fixture'}],dependencies:[{path:entry,sha256,kind:'yaml'}]}), {flag:'wx'});
+'@
+    Write-TestFile (Join-Path $fixture 'scripts/ci/inspect-flows-fixture.mjs') $fakeInspectionNode
     $fakeRunner = @'
 param($FlowPath, $BundleId, $AbilityName, $DeviceId, $Env, $Artifacts, $AgentRoot, $RunId, $AttemptId, $RunTimeoutSeconds, $TerminationWaitSeconds, $OutputDrainSeconds, $ControlRecordPath, $Module)
 $ErrorActionPreference = 'Stop'
 if ($env:CI_FIXTURE_MODE -eq 'before-control') { [Environment]::Exit(87) }
 $inputFile = Join-Path $env:CI_FIXTURE_ROOT ($DeviceId + '.input.json')
-$value = @{ deviceId=$DeviceId; artifacts=$Artifacts; agentRoot=$AgentRoot; runId=$RunId; attemptId=$AttemptId; controlPath=$ControlRecordPath; mode=$env:CI_FIXTURE_MODE }
-[IO.File]::WriteAllText($inputFile, ($value | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+$value = @{ deviceId=$DeviceId; artifacts=$Artifacts; agentRoot=$AgentRoot; runId=$RunId; attemptId=$AttemptId; controlPath=$ControlRecordPath; mode=$env:CI_FIXTURE_MODE
+    flowPath=$FlowPath; bundleId=$BundleId; abilityName=$AbilityName; moduleName=$Module; environment=$Env; javaPath=(Join-Path $env:JAVA_HOME 'bin/java.exe') }
+[IO.File]::WriteAllText($inputFile, ($value | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 & node (Join-Path $env:CI_FIXTURE_ROOT 'fixture.mjs') $inputFile
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($env:CI_FIXTURE_MODE -eq 'hard-stop') { [Environment]::Exit(86) }
@@ -120,12 +195,23 @@ const owner=randomUUID();
 await release(owner,input.mode==='hard-stop'?'unknown':'complete');
 const base=path.join(input.agentRoot,'runs',input.runId,input.attemptId);
 await fs.mkdir(base,{recursive:true});
-await fs.writeFile(path.join(base,'input.json'),JSON.stringify({flow:'appId: fixture\n---\n- launchApp\n'}));
-await fs.writeFile(path.join(base,'junit.xml'),'<testsuites><testsuite tests="1" failures="0"/></testsuites>');
+const sourceContent=await fs.readFile(input.flowPath,'utf8');
+const registeredInput={kind:'flow',deviceId:input.deviceId,request:{sources:[{path:input.flowPath,files:[{
+  path:input.flowPath,sha256:hash(sourceContent),content:sourceContent,dependencies:[]}]}],configuration:{
+  ability:input.abilityName,module:input.moduleName||null,environment:{...input.environment,APP_ID:input.bundleId}}}};
+// Quality fixtures are constructed before hashing every dependent native document.
+if(input.mode==='quality-profile') registeredInput.request.configuration.ability='DifferentAbility';
+await write(path.join(base,'input.json'),registeredInput);
+const status=input.mode==='failed'?'failed':'passed';
+const xmlEscape=value=>String(value).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+const caseName=input.mode==='quality-name'?'unexpected-fixture':'fixture';
+const nativeFailure=status==='failed'?'<failure>fixture assertion failed</failure>':'';
+const nativeCase=`<testcase name="${caseName}" file="${xmlEscape(input.flowPath)}" id="fixture" classname="fixture" status="${status==='failed'?'ERROR':'SUCCESS'}">${nativeFailure}</testcase>`;
+await fs.writeFile(path.join(base,'junit.xml'),input.mode==='quality-empty'?'<testsuites><testsuite tests="1" failures="0"/></testsuites>':
+  `<testsuites><testsuite name="Test Suite" tests="1" failures="${status==='failed'?1:0}">${nativeCase}</testsuite></testsuites>`);
 await fs.mkdir(path.join(base,'maestro'),{recursive:true});
 await fs.writeFile(path.join(base,'maestro','manifest.json'),JSON.stringify({commands:[]}));
 await fs.writeFile(path.join(base,'fixture.log'),'retained evidence');
-const status=input.mode==='failed'?'failed':'passed';
 const stepId=randomUUID();
 const result=document('runResult',{runId:input.runId,attemptId:input.attemptId,attemptNo:1,sessionId:null,deviceId:input.deviceId,flow:null,
   status,startedAt:new Date().toISOString(),endedAt:new Date().toISOString(),effects:'observed',error:status==='passed'?null:{kind:'assertion',code:'ASSERTION_FAILED',message:'fixture'},
@@ -148,19 +234,44 @@ if(input.mode==='tampered-native') await fs.writeFile(path.join(base,'maestro','
 if(input.mode==='tampered-junit') await fs.writeFile(path.join(base,'junit.xml'),'<testsuites/>');
 if(input.mode==='omitted-metadata') { metadata.files=metadata.files.filter(item=>item.path!=='evidence-index.json'); await write(path.join(base,'agent-manifest.json'),metadata); }
 await write(input.controlPath,{protocol:'maestro.harmonyos.runner-control',schemaVersion:1,runId:input.runId,attemptId:input.attemptId,deviceId:input.deviceId,
-  phase:input.mode==='hard-stop'?'running':'exited',process:{pid:2147483000,startTimeTicks:1,executable:'fixture'},processExitObserved:input.mode!=='hard-stop',
+  phase:input.mode==='hard-stop'?'running':'exited',process:{pid:2147483000,startTimeTicks:1,
+    executable:input.mode==='quality-java'?path.join(root,'wrong-java.exe'):input.javaPath},processExitObserved:input.mode!=='hard-stop',
   processExitCode:status==='passed'?0:7,wrapperExitCode:status==='passed'?0:7,agentStatus:input.mode==='unknown-control'?'unknown':status,
   terminationRequested:false,stopReason:null,error:null,stdoutComplete:true,stderrComplete:true,runResultPath:path.join(base,'result.json')});
 '@
     Write-TestFile (Join-Path $testRoot 'fixture.mjs') $nodeFixture
 
+    $suite.schemaVersion = 1
+    Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8)
+    try {
+        $legacy = Invoke-Fixture 'passed' 'fixture-v1'
+        Assert-Test ($legacy.ExitCode -ne 0 -and $null -eq $legacy.State -and -not (Test-Path -LiteralPath (Join-Path $testRoot 'calls.log')) -and
+            $legacy.Output -match 'schemaVersion 1 is no longer dispatched') 'A legacy suite dispatched or created a launch state.'
+    } finally { $suite.schemaVersion = 2; Write-TestFile $suitePath ($suite | ConvertTo-Json -Depth 8) }
+    $passed++
+
     $success = Invoke-Fixture 'passed'
     Assert-Test ($success.ExitCode -eq 0 -and $success.State.state -eq 'released' -and $success.State.execution -eq 'passed') ('Normal completion failed: ' + $success.Output)
     Assert-Test ($success.State.resolution.reportSha256 -match '^[0-9a-f]{64}$') 'Release lacks a checked inner receipt.'
+    Assert-Test ($success.State.quality.status -eq 'passed' -and $success.State.inputs.sha256 -match '^[0-9a-f]{64}$') 'Normal completion lacks checked fixed inputs and native scenarios.'
     $passed++
     $failure = Invoke-Fixture 'failed'
     Assert-Test ($failure.ExitCode -ne 0 -and $failure.State.state -eq 'released' -and $failure.State.execution -eq 'failed' -and $failure.State.wrapperExitCode -eq 7) 'An assertion failure was converted to success or lost its exit.'
+    Assert-Test ($failure.State.quality.status -eq 'passed') ('The matching native ERROR testcase was rejected: ' + $failure.Output)
     $passed++
+    foreach ($mode in @('quality-empty', 'quality-name', 'quality-profile', 'quality-java')) {
+        $quality = Invoke-Fixture $mode ('fixture-' + $mode)
+        Assert-Test ($quality.ExitCode -ne 0 -and $quality.State.state -eq 'released' -and $quality.State.execution -eq 'passed' -and
+            $quality.State.wrapperExitCode -eq 0 -and $quality.State.resolution.releaseConfirmed -eq $true -and
+            $quality.State.resolution.processExitCode -eq 0 -and $quality.State.quality.status -eq 'failed') ('Quality failure changed release or execution: ' + $mode + ' ' + $quality.Output)
+        $report = Get-Content -LiteralPath $quality.State.quality.path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $reason = switch ($mode) { 'quality-empty' { 'count differs' }; 'quality-name' { 'different name' }; 'quality-profile' { 'application profile differs' }; 'quality-java' { 'Actual runner Java differs' } }
+        Assert-Test ($report.execution -eq 'passed' -and $report.cleanup.state -eq 'complete' -and $report.error -match $reason) ('Quality fixture failed for an unintended reason: ' + $mode + ' ' + $report.error)
+        $original = Get-Content -LiteralPath $quality.State.resolution.resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Test ($original.data.status -eq 'passed' -and $original.data.cleanup.state -eq 'complete' -and
+            (Get-FileHash -LiteralPath $quality.State.resolution.resultPath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $quality.State.resolution.resultSha256) 'Quality verification changed the native result.'
+        $passed++
+    }
     $recording = Invoke-Fixture 'recording-v2' 'fixture-recording'
     Assert-Test ($recording.ExitCode -eq 0 -and $recording.State.resolution.recordingCheckedFiles -eq 2) ('A clean v2 recording receipt was rejected: ' + $recording.Output)
     foreach ($mode in @('recording-bad-snapshot','recording-unclean','recording-bad-original')) {
@@ -275,6 +386,11 @@ await write(input.controlPath,{protocol:'maestro.harmonyos.runner-control',schem
     $budget = Invoke-Fixture 'passed' 'fixture-budget' -Extra @('-JobTimeoutSeconds','30')
     Assert-Test ($budget.ExitCode -ne 0 -and $null -eq $budget.State) 'An insufficient platform budget still wrote a launch intent.'
     $passed++
+    $callsBeforeBudget = @(Get-Content -LiteralPath (Join-Path $testRoot 'calls.log')).Count
+    $legacyBudget = Invoke-Fixture 'passed' 'fixture-budget-150' -Extra @('-JobTimeoutSeconds','150')
+    Assert-Test ($legacyBudget.ExitCode -ne 0 -and $null -eq $legacyBudget.State -and
+        @(Get-Content -LiteralPath (Join-Path $testRoot 'calls.log')).Count -eq $callsBeforeBudget) 'The old job budget dispatched despite the new 195-second minimum.'
+    $passed++
     $alias = Join-Path $testRoot 'artifact-alias'
     $junctionCreated = $false
     try { $null = New-Item -ItemType Junction -Path $alias -Target $testRoot; $junctionCreated = $true }
@@ -302,6 +418,8 @@ await write(input.controlPath,{protocol:'maestro.harmonyos.runner-control',schem
         $resolved = (Resolve-Path -LiteralPath $testRoot).Path
         $prefix = [IO.Path]::GetFullPath($testParent).TrimEnd('\') + '\'
         if (-not $resolved.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Refusing cleanup outside the CI test directory.' }
-        Remove-Item -LiteralPath $resolved -Recurse -Force
+        # The retained recording paths exceed MAX_PATH on Windows PowerShell 5.1.
+        $extended = if ($resolved.StartsWith('\\')) { '\\?\UNC\' + $resolved.Substring(2) } else { '\\?\' + $resolved }
+        Remove-TestDirectory $extended $extended
     } elseif (Test-Path -LiteralPath $testRoot) { Write-Output ('Retained failed CI fixture: ' + $testRoot) }
 }
