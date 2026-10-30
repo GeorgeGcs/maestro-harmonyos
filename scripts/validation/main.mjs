@@ -6,10 +6,13 @@ import { verifyDeviceRelease } from '../ci/verify-state.mjs';
 import { artifact, canonical, digestPattern, hashFile, inside, key, noLinks, readJson, requireValue, samePath, uuid } from './io.mjs';
 import { checkFrozen, freezePlan, saveSummary } from './plan.mjs';
 import { inspectAttempt, verifyAttemptInput } from './retry-evidence.mjs';
+import { verifyControlRuntime } from './runtime.mjs';
+import { reviewPreparation, unknownPreparationReview } from './preparation.mjs';
 
 async function load(summaryPath) {
   const state = (await readJson(summaryPath)).value, frozen = await readJson(state.planPath), plan = frozen.value;
-  requireValue(state.protocol === 'maestro.harmonyos.validation-summary' && state.schemaVersion === 1 &&
+  requireValue(state.protocol === 'maestro.harmonyos.validation-summary' && [1, 2].includes(state.schemaVersion) &&
+    plan.protocol === 'maestro.harmonyos.validation-plan' && plan.schemaVersion === state.schemaVersion &&
     frozen.sha256 === state.planSha256 && plan.planId === state.planId, 'Frozen plan and summary do not match.');
   requireValue(state.batches.length === plan.batches.length && state.slots.length === plan.batches.length * plan.repeat,
     'Planned denominator was changed.');
@@ -29,6 +32,7 @@ async function load(summaryPath) {
 
 export async function startBatch(input) {
   const { state, plan } = await load(input.summaryPath);
+  requireValue(plan.schemaVersion === 2, 'Legacy frozen v1 plans can be rechecked but cannot dispatch new executions. Create a new v2 snapshot.');
   await checkFrozen(plan);
   const batch = state.batches.find(value => value.batchId === input.batchId);
   requireValue(state.status === 'running' && batch?.status === 'pending', 'A batch cannot be restarted.');
@@ -68,6 +72,8 @@ function matrixIdentity(matrix, unit, profile, batch, plan) {
       const frozen = plan.buildFiles.filter(file => path.basename(file.path) === jar.file);
       requireValue(frozen.length === 1 && frozen[0].sha256 === jar.sha256,
         'Formal build fingerprint does not uniquely cover the executed implementation JAR: ' + jar.file);
+      if (plan.schemaVersion === 2) requireValue(plan.runtime.classpath.filter(file => path.basename(file.path) === jar.file &&
+        file.sha256 === jar.sha256).length === 1, 'Matrix implementation JAR is absent from the frozen runtime classpath: ' + jar.file);
     }
     requireValue(requiredRoles.every(role => observedRoles.has(role)), 'Formal implementation fingerprint must include CLI, client, orchestra, and orchestra-models JARs.');
   }
@@ -111,12 +117,13 @@ export async function importBatch(input, recheck = null) {
   const originalBatch = { ...batch };
   for (const slot of selected) Object.assign(slot, { status: 'pending', firstPassStatus: 'not_run', finalPass: false,
     cleanup: null, evidenceComplete: false, coverageComplete: false, retryComplete: false,
+    ...(plan.schemaVersion === 2 ? { runtimeVerification: { state: 'unknown', reason: 'No executed runtime record.' } } : {}),
     videoComplete: !plan.evidencePolicy.requireVideo, reason: null, flows: [], videos: [] });
   batch.releaseConfirmed = false;
   batch.matrixExitCode = input.matrixExitCode;
   let allControlsTrusted = true, attempted = 0;
   try {
-    if (!recheck) await checkFrozen(plan);
+    if (!recheck) await checkFrozen(plan, process.env, { executionPreparation: false });
     const pointer = await readJson(batch.pointerPath), value = pointer.value;
     requireValue(value.protocol === 'maestro.harmonyos.matrix-pointer' && value.schemaVersion === 1 &&
       path.isAbsolute(value.matrixDirectory) && inside(batch.outputDirectory, value.matrixDirectory) &&
@@ -149,6 +156,12 @@ export async function importBatch(input, recheck = null) {
         if (!control) { slot.status = 'not-run'; slot.firstPassStatus = 'not_run'; slot.reason = run.reason; batch.stopDevice = true; continue; }
         attempted++;
         slot.controlPath = control.path; slot.controlSha256 = control.sha256;
+        if (plan.schemaVersion === 2) {
+          try {
+            const checked = await verifyControlRuntime(plan.runtime, control.value);
+            slot.runtimeVerification = { state: checked.verified ? 'verified' : 'unknown', reason: checked.reason ?? null };
+          } catch (error) { slot.runtimeVerification = { state: 'mismatch', reason: error.message }; }
+        }
         const expectedResult = path.join(batch.agentRoot, 'runs', run.runId, run.attemptId, 'result.json');
         requireValue(samePath(run.runResultPath, expectedResult), 'Result path differs from the planned attempt.');
         const result = await readJson(expectedResult); validateDocument(result.value, 'runResult', [1]);
@@ -206,7 +219,8 @@ async function recheckResults(state, plan) {
     await importBatch({ batchId: batch.batchId, matrixExitCode: batch.matrixExitCode }, { state, plan });
   } else for (const slot of state.slots.filter(slot => slot.batchId === batch.batchId)) {
     Object.assign(slot, { firstPassStatus: slot.status === 'not-run' ? 'not_run' : 'unknown', finalPass: false,
-      evidenceComplete: false, coverageComplete: false, retryComplete: false, videoComplete: false });
+      evidenceComplete: false, coverageComplete: false, retryComplete: false, videoComplete: false,
+      ...(plan.schemaVersion === 2 ? { runtimeVerification: { state: 'unknown', reason: 'No retained matrix invocation.' } } : {}) });
   }
 }
 
@@ -230,15 +244,24 @@ export async function finishPlan(input) {
   }
   await recheckResults(state, plan);
   // Completion never constitutes a human review, including when invoked again later.
-  for (const slot of state.slots) { slot.manualIntervention = 'unknown'; slot.reviewNotes = null; }
+  for (const slot of state.slots) {
+    slot.manualIntervention = 'unknown'; slot.reviewNotes = null;
+    if (plan.schemaVersion === 2) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
+  }
   state.status = input.interrupted ? 'interrupted' : 'completed'; state.endedAt = new Date().toISOString();
   await saveSummary(input.summaryPath, state, plan);
-  return { qualified: state.qualified, originalExecutionSucceeded: state.batches.every(batch => batch.matrixExitCode === 0), summaryPath: input.summaryPath };
+  return { qualified: state.qualified, formalQualified: state.schemaVersion === 2 && state.formalQualified === true,
+    originalExecutionSucceeded: state.batches.every(batch => batch.matrixExitCode === 0), summaryPath: input.summaryPath };
+}
+
+function preparationFor(plan, slot) {
+  const profileId = plan.units.find(unit => unit.unitId === slot.unitId)?.profile;
+  return plan.preparations?.find(entry => entry.profileId === profileId && entry.deviceId === slot.deviceId);
 }
 
 export async function reviewPlan(input) {
   const { state, plan } = await load(input.summaryPath), audit = await readJson(input.reviewPath), review = audit.value;
-  requireValue(state.status !== 'running' && review.schemaVersion === 1 && review.planId === state.planId &&
+  requireValue(state.status !== 'running' && [1, 2].includes(review.schemaVersion) && review.planId === state.planId &&
     review.planSha256 === state.planSha256 && Array.isArray(review.slots) && Number.isFinite(Date.parse(review.observedAt)) &&
     Date.parse(review.observedAt) >= Date.parse(state.endedAt) && Date.parse(review.observedAt) <= Date.now() + 30000,
     'Review must identify the completed plan and a subsequent observation.');
@@ -250,6 +273,9 @@ export async function reviewPlan(input) {
     const slot = state.slots.find(value => value.slotId === item.slotId);
     requireValue(slot && !reviewed.has(item.slotId) && ['none', 'present'].includes(item.manualIntervention), 'Invalid or repeated reviewed slot.');
     reviewed.add(item.slotId); slot.manualIntervention = item.manualIntervention; slot.reviewNotes = item.notes ?? null;
+    if (plan.schemaVersion === 2) slot.preparationVerification = review.schemaVersion === 2 && item.preparation ?
+      await reviewPreparation({ entry: preparationFor(plan, slot), review: item.preparation, observedAt: review.observedAt }) :
+      unknownPreparationReview(preparationFor(plan, slot));
     const reports = [];
     for (const reference of item.videoReports ?? []) {
       requireValue(digestPattern.test(reference.sha256), 'Video verification reference needs a hash.');
@@ -270,18 +296,22 @@ export async function reviewPlan(input) {
   }
   (state.reviews ??= []).push({ path: audit.path, sha256: audit.sha256, observedAt: review.observedAt });
   state.reviewError = null;
-  await saveSummary(input.summaryPath, state, plan); return { qualified: state.qualified, groups: state.groups };
+  await saveSummary(input.summaryPath, state, plan); return { qualified: state.qualified,
+    formalQualified: state.schemaVersion === 2 && state.formalQualified === true, groups: state.groups };
   } catch (error) {
     // Keep the fresh evidence check visible even when a later review attachment fails.
     state.reviewError = error.message;
-    for (const slot of state.slots) { slot.manualIntervention = 'unknown'; slot.videoComplete = !plan.evidencePolicy.requireVideo; }
+    for (const slot of state.slots) {
+      slot.manualIntervention = 'unknown'; slot.videoComplete = !plan.evidencePolicy.requireVideo;
+      if (plan.schemaVersion === 2) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
+    }
     await saveSummary(input.summaryPath, state, plan);
     throw error;
   }
 }
 
 export async function dispatch(input) {
-  if (input.operation === 'freeze') return freezePlan(input.planPath, input.outputDirectory, input.projectRoot);
+  if (input.operation === 'freeze') return freezePlan(input.planPath, input.outputDirectory, input.projectRoot, process.env, { powershellPath: input.powershellPath });
   if (input.operation === 'start') return startBatch(input);
   if (input.operation === 'import') return importBatch(input);
   if (input.operation === 'skip') return skipBatch(input);

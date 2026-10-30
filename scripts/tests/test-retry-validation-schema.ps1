@@ -8,7 +8,7 @@ $script:checks = 0
 $script:realDocuments = 0
 function Copy-Value($Value) { return $Value | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable }
 function Assert-Schema($Name, $Value, [bool]$Expected, $Label, [int]$Version = 1) {
-    if ($Name -eq 'retry-summary' -and $Value.schemaVersion -eq 2) { $Version = 2 }
+    if ($Name -in @('retry-summary', 'validation-plan-input', 'validation-plan', 'validation-summary', 'validation-review') -and $Value.schemaVersion -eq 2) { $Version = 2 }
     $actual = Test-Json -Json ($Value | ConvertTo-Json -Depth 100 -Compress) -SchemaFile (Join-Path $schemas ($Name + '-v' + $Version + '.schema.json')) -ErrorAction SilentlyContinue
     if ($actual -ne $Expected) { throw ('Schema expectation failed: ' + $Label) }
     $script:checks++
@@ -127,6 +127,125 @@ $bad=Copy-Value $summary; $bad.qualified='true'; Assert-Schema 'validation-summa
 $review = @{schemaVersion=1;planId='fixture';planSha256=$sha;observedAt=$stamp;slots=@(@{slotId=($id+':1');manualIntervention='none';notes='Synthetic review.'})}
 Assert-Schema 'validation-review' $review $true 'human review'
 $bad=Copy-Value $review; $bad.slots[0].manualIntervention='unknown'; Assert-Schema 'validation-review' $bad $false 'review needs explicit intervention decision'
+
+# Version 2 adds runtime and preparation observations without changing the v1 fixtures above.
+$plan2=Copy-Value $plan; $plan2.schemaVersion=2
+Assert-Schema 'validation-plan-input' $plan2 $true 'v2 development input may omit preparation declarations'
+$formal2=Copy-Value $formal; $formal2.schemaVersion=2
+Assert-Schema 'validation-plan-input' $formal2 $false 'v2 formal input needs preparation references and application versions'
+$formal2.preparations=@(@{path='preparation.json';sha256=$sha})
+Assert-Schema 'validation-plan-input' $formal2 $false 'v2 formal profile still needs application version'
+$formal2.profiles.demo.applicationVersion=@{versionCode='1';versionName='1.0.0'}
+Assert-Schema 'validation-plan-input' $formal2 $true 'v2 formal input structure'
+$bad=Copy-Value $formal2; $bad.profiles.demo.applicationVersion.versionCode=1
+Assert-Schema 'validation-plan-input' $bad $false 'application version code is a decimal string'
+$bad=Copy-Value $formal2; $bad.profiles.demo.applicationVersion.versionCode='01'
+Assert-Schema 'validation-plan-input' $bad $false 'application version code has canonical decimal syntax'
+$bad=Copy-Value $formal2; $bad.profiles.demo.applicationVersion.versionName=''
+Assert-Schema 'validation-plan-input' $bad $false 'application version name cannot be empty'
+$bad=Copy-Value $formal2; $bad.preparations=@()
+Assert-Schema 'validation-plan-input' $bad $false 'formal preparation references cannot be empty'
+$bad=Copy-Value $plan; $bad.preparations=@()
+Assert-Schema 'validation-plan-input' $bad $false 'v1 input does not silently accept v2 fields'
+
+$runtimeFile=@{path='C:\fixture\bin\java.exe';sha256=$sha;bytes=100}
+$runtime=@{schemaVersion=1;projectRoot='C:\fixture';cliHome='C:\fixture\cli';classpathArgument='C:\fixture\cli\lib\*';
+    java=(Copy-Value $runtimeFile);node=@{path='C:\fixture\bin\node.exe';sha256=$sha;bytes=100};
+    powershell=@{path='C:\fixture\bin\pwsh.exe';sha256=$sha;bytes=100};
+    classpath=@(@{path='C:\fixture\cli\lib\maestro-cli.jar';sha256=$sha;bytes=100});
+    configuration=@{path='C:\fixture\config.local.ps1';present=$false;sha256=$null;bytes=$null}}
+$unknownPreparation=@{planId='fixture';profileId='demo';deviceId='fixture-device';preparationId=$null;state='unknown';
+    reference=$null;application=$null;installation=$null;packageObservation=$null;preparation=$null;files=@()}
+$hap=@{path='C:\fixture\app.hap';sha256=$sha}
+$install=@{path='C:\fixture\install.txt';sha256=$sha}
+$package=@{path='C:\fixture\package.txt';sha256=$sha}
+$prepare=@{path='C:\fixture\prepare.txt';sha256=$sha}
+$readyPreparation=@{planId='fixture';profileId='demo';deviceId='fixture-device';preparationId=$id;state='ready';
+    reference=@{path='C:\fixture\preparation.json';sha256=$sha};
+    application=@{bundleId='org.example.fixture';moduleName='entry';abilityName='EntryAbility';versionCode='1';versionName='1.0.0';hap=$hap};
+    installation=@{basis='operator_attested';installedAt=$stamp;record=$install};
+    packageObservation=@{basis='operator_attested';observedAt=$stamp;bundleId='org.example.fixture';versionCode='1';versionName='1.0.0';record=$package};
+    preparation=@{basis='operator_attested';completedAt=$stamp;procedureSha256=$sha;record=$prepare};files=@($hap,$install,$package,$prepare)}
+$frozen2=Copy-Value $frozen; $frozen2.schemaVersion=2; $frozen2.runtime=Copy-Value $runtime; $frozen2.preparations=@((Copy-Value $unknownPreparation))
+Assert-Schema 'validation-plan' $frozen2 $true 'v2 development freeze retains explicit unknown preparation'
+$bad=Copy-Value $frozen2; $null=$bad.Remove('runtime')
+Assert-Schema 'validation-plan' $bad $false 'v2 frozen runtime cannot be omitted'
+$bad=Copy-Value $frozen2; $null=$bad.Remove('preparations')
+Assert-Schema 'validation-plan' $bad $false 'v2 frozen preparation list cannot be omitted'
+$bad=Copy-Value $frozen2; $bad.runtime.configuration.sha256=$sha
+Assert-Schema 'validation-plan' $bad $false 'absent configuration cannot claim a file hash'
+$bad=Copy-Value $frozen2; $bad.runtime.configuration.present=$true
+Assert-Schema 'validation-plan' $bad $false 'present configuration requires bytes and hash'
+$configured=Copy-Value $frozen2; $configured.runtime.configuration=@{path='C:\fixture\config.local.ps1';present=$true;sha256=$sha;bytes=0}
+Assert-Schema 'validation-plan' $configured $true 'present empty configuration is fingerprinted'
+$bad=Copy-Value $frozen2; $bad.runtime.classpath=@()
+Assert-Schema 'validation-plan' $bad $false 'runtime classpath cannot be empty'
+$bad=Copy-Value $frozen2; $bad.runtime.classpathArgument='lib/*'
+Assert-Schema 'validation-plan' $bad $false 'runtime classpath argument must be absolute'
+$bad=Copy-Value $frozen2; $bad.preparations=@()
+Assert-Schema 'validation-plan' $bad $false 'frozen development plans retain unknown entries rather than an empty list'
+$bad=Copy-Value $frozen2; $bad.runtime.java.path='relative.exe'
+Assert-Schema 'validation-plan' $bad $false 'runtime tool path must be absolute'
+$bad=Copy-Value $frozen2; $bad.runtime.java.bytes=-1
+Assert-Schema 'validation-plan' $bad $false 'runtime byte count cannot be negative'
+$bad=Copy-Value $frozen2; $bad.preparations[0].preparationId=$id
+Assert-Schema 'validation-plan' $bad $false 'unknown preparation does not claim a registered identity'
+$prepared2=Copy-Value $frozen2; $prepared2.preparations=@((Copy-Value $readyPreparation)); $prepared2.profiles.demo.applicationVersion=@{versionCode='1';versionName='1.0.0'}
+Assert-Schema 'validation-plan' $prepared2 $true 'v2 retained operator preparation structure'
+$bad=Copy-Value $prepared2; $bad.preparations[0].installation.basis='device_observed'
+Assert-Schema 'validation-plan' $bad $false 'operator evidence cannot be relabelled as a device observation'
+$bad=Copy-Value $prepared2; $bad.preparations[0].preparationId=$null
+Assert-Schema 'validation-plan' $bad $false 'ready preparation requires identity'
+$bad=Copy-Value $prepared2; $bad.preparations[0].files=@($hap)
+Assert-Schema 'validation-plan' $bad $false 'ready preparation retains HAP and all three evidence records'
+$formalFrozen2=Copy-Value $prepared2; $formalFrozen2.purpose='formal'; $formalFrozen2.confirmation=@{path='C:\fixture\scope.txt';sha256=$sha}
+$formalFrozen2.buildFiles=@(@{path='C:\fixture\implementation.jar';sha256=$sha}); $formalFrozen2.applicationFiles=@($hap)
+Assert-Schema 'validation-plan' $formalFrozen2 $true 'v2 formal freeze structure'
+$bad=Copy-Value $formalFrozen2; $bad.preparations=@((Copy-Value $unknownPreparation))
+Assert-Schema 'validation-plan' $bad $false 'formal freeze cannot rely on unknown preparation'
+
+$unknownCheck=@{state='unknown';preparationId=$null;preparationSha256=$null;reviewedAt=$null;basis=$null;
+    installationUnchanged=$null;preparationUnchanged=$null;reason='preparation_missing'}
+$summary2=Copy-Value $summary; $summary2.schemaVersion=2; $summary2.formalEligible=$false; $summary2.formalQualified=$false
+$summary2.slots[0].runtimeVerification=@{state='unknown';reason=$null}; $summary2.slots[0].preparationVerification=Copy-Value $unknownCheck
+foreach ($field in @('runtimeComplete','preparationComplete','formalEligible','formalQualified')) { $summary2.groups[0][$field]=$false }
+Assert-Schema 'validation-summary' $summary2 $true 'v2 pending summary records unknown checks'
+$bad=Copy-Value $summary2; $null=$bad.slots[0].Remove('runtimeVerification')
+Assert-Schema 'validation-summary' $bad $false 'v2 cannot omit runtime verification'
+$bad=Copy-Value $summary2; $null=$bad.slots[0].Remove('preparationVerification')
+Assert-Schema 'validation-summary' $bad $false 'v2 cannot omit preparation verification'
+$bad=Copy-Value $summary2; $bad.slots[0].runtimeVerification.state='passed'
+Assert-Schema 'validation-summary' $bad $false 'runtime verification has explicit distinct states'
+$bad=Copy-Value $summary2; $bad.formalQualified=$true
+Assert-Schema 'validation-summary' $bad $false 'formal qualification needs statistical qualification and eligibility'
+$bad=Copy-Value $summary2; $bad.groups[0].formalEligible=$true
+Assert-Schema 'validation-summary' $bad $false 'formal group eligibility needs runtime and preparation completeness'
+$bad=Copy-Value $summary2; $bad.slots[0].preparationVerification.state='confirmed'
+Assert-Schema 'validation-summary' $bad $false 'confirmed preparation cannot retain missing evidence fields'
+$confirmed2=Copy-Value $summary2
+$confirmed2.slots[0].runtimeVerification=@{state='verified';reason=$null}
+$confirmed2.slots[0].preparationVerification=@{state='confirmed';preparationId=$id;preparationSha256=$sha;reviewedAt=$stamp;
+    basis='operator_attested';installationUnchanged=$true;preparationUnchanged=$true;reason=$null}
+Assert-Schema 'validation-summary' $confirmed2 $true 'confirmed per-slot preparation does not by itself claim overall success'
+$bad=Copy-Value $confirmed2; $bad.slots[0].preparationVerification.installationUnchanged=$false
+Assert-Schema 'validation-summary' $bad $false 'changed installation cannot remain confirmed'
+$bad=Copy-Value $summary; $bad.formalQualified=$false
+Assert-Schema 'validation-summary' $bad $false 'legacy summary format is not silently extended'
+
+$review2=Copy-Value $review; $review2.schemaVersion=2
+Assert-Schema 'validation-review' $review2 $true 'v2 review can leave preparation unknown'
+$review2.slots[0].preparation=@{preparationSha256=$sha;installationUnchanged=$true;preparationUnchanged=$true}
+Assert-Schema 'validation-review' $review2 $true 'v2 preparation review is tied to a frozen reference'
+$bad=Copy-Value $review2; $bad.slots[0].preparation.installationUnchanged='true'
+Assert-Schema 'validation-review' $bad $false 'preparation review confirmations must be booleans'
+$bad=Copy-Value $review2; $null=$bad.slots[0].preparation.Remove('preparationUnchanged')
+Assert-Schema 'validation-review' $bad $false 'both preparation review decisions are explicit'
+$bad=Copy-Value $review2; $bad.slots[0].preparation.extra='ignored'
+Assert-Schema 'validation-review' $bad $false 'preparation review rejects unknown fields'
+$unknownReview2=Copy-Value $review2; $unknownReview2.slots[0].preparation=$null
+Assert-Schema 'validation-review' $unknownReview2 $true 'null preparation review remains unknown'
+$bad=Copy-Value $review2; $bad.schemaVersion=1
+Assert-Schema 'validation-review' $bad $false 'v1 review cannot acquire v2 preparation semantics'
 
 if (-not $ValidationArtifactRoot) { $ValidationArtifactRoot=Join-Path $project 'artifacts/validation-device-smoke' }
 if (-not $RetryArtifactRoot) { $RetryArtifactRoot=Join-Path $project 'artifacts/retry-trace-device' }

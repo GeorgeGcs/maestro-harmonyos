@@ -65,7 +65,8 @@ try {
     Assert-DeviceReservationPath $trustedRecoveryRoot
     $outputDirectory = Join-Path $artifacts ('validation-' + [guid]::NewGuid().ToString('N'))
     $null = [IO.Directory]::CreateDirectory($outputDirectory)
-    $frozen = Invoke-ValidationHelper @{ operation = 'freeze'; planPath = $planFile; outputDirectory = $outputDirectory; projectRoot = $projectRoot }
+    $frozen = Invoke-ValidationHelper @{ operation = 'freeze'; planPath = $planFile; outputDirectory = $outputDirectory; projectRoot = $projectRoot;
+        powershellPath = (Get-Process -Id $PID).Path }
     $summaryPath = $frozen.summaryPath
     Write-Output ('Validation plan: ' + $summaryPath)
     $stoppedDevices = @{}

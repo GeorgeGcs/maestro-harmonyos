@@ -140,6 +140,11 @@ $env:RUNNER_CONFIG_MARKER = 'loaded'
     $invocation = Get-Content -LiteralPath (Join-Path $firstArtifacts 'invocation.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-Test ($invocation.agentStatus -eq 'unknown' -and $invocation.cliExitCode -eq 0) 'Missing typed results were treated as confirmed success.'
     Assert-Test ($invocation.runId -ceq $captured[21] -and $invocation.attemptId -ceq $captured[23]) 'Invocation identifiers changed before CLI launch.'
+    $runtimeControl = Get-Content -LiteralPath (Join-Path $firstArtifacts 'execution-control.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($runtimeControl.runtime.schemaVersion -eq 1 -and $runtimeControl.runtime.java.path -eq $runtimeControl.executable) 'The actual Java launch target was not retained.'
+    Assert-Test ($runtimeControl.runtime.java.sha256 -eq (Get-FileHash -LiteralPath $runtimeControl.executable -Algorithm SHA256).Hash.ToLowerInvariant()) 'The retained Java hash differs.'
+    Assert-Test ($runtimeControl.runtime.classpath.Count -eq 1 -and $runtimeControl.runtime.classpath[0].sha256 -eq (Get-FileHash -LiteralPath (Join-Path $libraryDirectory 'capture.jar') -Algorithm SHA256).Hash.ToLowerInvariant()) 'The executed classpath member was not retained.'
+    Assert-Test ($runtimeControl.runtime.configuration.present -eq $true -and $runtimeControl.runtime.powershell.path -eq (Get-Process -Id $PID).Path) 'The actual PowerShell or local configuration identity is missing.'
     $passed++
 
     $parameters.RunTimeoutSeconds = 1

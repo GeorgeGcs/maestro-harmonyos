@@ -1,0 +1,1037 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:validation-plan:2",
+  "title": "Frozen validation plan v2",
+  "$comment": "Structure only. This schema does not establish cross-document identity, original file hashes, command execution, or qualification. See retry-and-validation.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "status",
+    "purpose",
+    "measurementMode",
+    "repeat",
+    "runTimeoutSeconds",
+    "thresholdPolicy",
+    "preparationProcedure",
+    "retryPolicy",
+    "manualInterventionPolicy",
+    "evidencePolicy",
+    "devices",
+    "environmentFingerprint",
+    "protocol",
+    "frozenAt",
+    "sourcePlan",
+    "projectRoot",
+    "profiles",
+    "units",
+    "confirmation",
+    "buildFiles",
+    "applicationFiles",
+    "toolFiles",
+    "batches",
+    "runtime",
+    "preparations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "status": {
+      "const": "frozen"
+    },
+    "purpose": {
+      "enum": [
+        "development",
+        "formal"
+      ]
+    },
+    "measurementMode": {
+      "enum": [
+        "per-flow",
+        "suite"
+      ]
+    },
+    "repeat": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "runTimeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "thresholdPolicy": {
+      "$ref": "#/$defs/thresholdPolicy"
+    },
+    "preparationProcedure": {
+      "type": "string",
+      "minLength": 1
+    },
+    "retryPolicy": {
+      "type": "string",
+      "minLength": 1
+    },
+    "manualInterventionPolicy": {
+      "const": "review-required"
+    },
+    "evidencePolicy": {
+      "$ref": "#/$defs/evidencePolicy"
+    },
+    "devices": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/device"
+      }
+    },
+    "environmentFingerprint": {
+      "description": "Operator-supplied JSON metadata. Recorded, not probed or verified."
+    },
+    "protocol": {
+      "const": "maestro.harmonyos.validation-plan"
+    },
+    "frozenAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sourcePlan": {
+      "$ref": "#/$defs/absoluteFingerprint"
+    },
+    "projectRoot": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/unit"
+      }
+    },
+    "confirmation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/absoluteFingerprint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "buildFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "applicationFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "toolFiles": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "$ref": "#/$defs/absoluteFingerprint"
+      }
+    },
+    "batches": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/batchIdentity"
+      }
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime"
+    },
+    "preparations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10000,
+      "items": {
+        "$ref": "#/$defs/preparationEntry"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "measurementMode": {
+            "const": "per-flow"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "units": {
+            "items": {
+              "properties": {
+                "requiredTopLevelFlows": {
+                  "maxItems": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "formal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "confirmation": {
+            "$ref": "#/$defs/absoluteFingerprint"
+          },
+          "buildFiles": {
+            "minItems": 1
+          },
+          "applicationFiles": {
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "formal"
+          }
+        },
+        "required": [
+          "purpose"
+        ]
+      },
+      "then": {
+        "required": [
+          "preparations"
+        ],
+        "properties": {
+          "preparations": {
+            "minItems": 1
+          },
+          "profiles": {
+            "additionalProperties": {
+              "required": [
+                "applicationVersion"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "purpose": {
+            "const": "formal"
+          }
+        },
+        "required": [
+          "purpose"
+        ]
+      },
+      "then": {
+        "properties": {
+          "preparations": {
+            "items": {
+              "properties": {
+                "state": {
+                  "const": "ready"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "absoluteFingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "thresholdPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "minimumRate"
+      ],
+      "properties": {
+        "metric": {
+          "enum": [
+            "firstPass",
+            "finalPass"
+          ]
+        },
+        "minimumRate": {
+          "type": "string",
+          "pattern": "^(?:0(?:\\.\\d{1,6})?|1(?:\\.0{1,6})?)$"
+        }
+      }
+    },
+    "evidencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requireVideo"
+      ],
+      "properties": {
+        "requireVideo": {
+          "type": "boolean"
+        },
+        "decoderSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "deviceId"
+      ],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+        },
+        "matrixInfoSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "batchIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "batchId",
+        "unitId",
+        "deviceId"
+      ],
+      "properties": {
+        "batchId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleId",
+        "abilityName",
+        "moduleName",
+        "environmentNames",
+        "environmentHashes"
+      ],
+      "properties": {
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "abilityName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environmentNames": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "string",
+            "pattern": "^(?![Aa][Pp][Pp]_[Ii][Dd]$)[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "uniqueItems": true
+        },
+        "environmentHashes": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^(?![Aa][Pp][Pp]_[Ii][Dd]$)[A-Za-z_][A-Za-z0-9_]*$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        },
+        "applicationVersion": {
+          "$ref": "#/$defs/applicationVersion"
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unitId",
+        "profile",
+        "entry",
+        "sourceRoot",
+        "sources",
+        "requiredTopLevelFlows"
+      ],
+      "properties": {
+        "unitId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "profile": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sourceRoot": {
+          "type": "string",
+          "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+          "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/absoluteFingerprint"
+          }
+        },
+        "requiredTopLevelFlows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "sha256",
+              "name",
+              "requiredSteps"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+                "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "requiredSteps": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "sourcePath",
+                    "sourceSha256",
+                    "commandIndex",
+                    "role"
+                  ],
+                  "properties": {
+                    "sourcePath": {
+                      "type": "string",
+                      "pattern": "^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)",
+                      "description": "Absolute path syntax only; containment, existence and links require filesystem checks."
+                    },
+                    "sourceSha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "commandIndex": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "role": {
+                      "enum": [
+                        "action",
+                        "assertion"
+                      ]
+                    }
+                  }
+                },
+                "contains": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "const": "assertion"
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "applicationVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "versionCode",
+        "versionName"
+      ],
+      "properties": {
+        "versionCode": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "versionName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "runtimeFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "projectRoot",
+        "cliHome",
+        "classpathArgument",
+        "java",
+        "classpath",
+        "node",
+        "powershell",
+        "configuration"
+      ],
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "projectRoot": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "cliHome": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "classpathArgument": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "java": {
+          "$ref": "#/$defs/runtimeFile"
+        },
+        "classpath": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/runtimeFile"
+          }
+        },
+        "node": {
+          "$ref": "#/$defs/runtimeFile"
+        },
+        "powershell": {
+          "$ref": "#/$defs/runtimeFile"
+        },
+        "configuration": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "present",
+            "sha256",
+            "bytes"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/$defs/absolutePath"
+            },
+            "present": {
+              "type": "boolean"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "bytes": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "present": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "present"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "sha256": {
+                    "type": "null"
+                  },
+                  "bytes": {
+                    "type": "null"
+                  }
+                }
+              },
+              "else": {
+                "properties": {
+                  "sha256": {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "preparationApplication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleId",
+        "moduleName",
+        "abilityName",
+        "versionCode",
+        "versionName",
+        "hap"
+      ],
+      "properties": {
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "moduleName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "abilityName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "versionCode": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "versionName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "hap": {
+          "$ref": "#/$defs/absoluteFingerprint"
+        }
+      }
+    },
+    "preparationInstallation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "installedAt",
+        "record"
+      ],
+      "properties": {
+        "basis": {
+          "const": "operator_attested"
+        },
+        "installedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "record": {
+          "$ref": "#/$defs/absoluteFingerprint"
+        }
+      }
+    },
+    "preparationPackageObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "observedAt",
+        "bundleId",
+        "versionCode",
+        "versionName",
+        "record"
+      ],
+      "properties": {
+        "basis": {
+          "const": "operator_attested"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "bundleId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "versionCode": {
+          "type": "string",
+          "pattern": "^(0|[1-9][0-9]*)$"
+        },
+        "versionName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "record": {
+          "$ref": "#/$defs/absoluteFingerprint"
+        }
+      }
+    },
+    "preparationProcedureRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "basis",
+        "completedAt",
+        "procedureSha256",
+        "record"
+      ],
+      "properties": {
+        "basis": {
+          "const": "operator_attested"
+        },
+        "completedAt": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "procedureSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "record": {
+          "$ref": "#/$defs/absoluteFingerprint"
+        }
+      }
+    },
+    "preparationEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "profileId",
+        "deviceId",
+        "preparationId",
+        "state",
+        "reference",
+        "application",
+        "installation",
+        "packageObservation",
+        "preparation",
+        "files"
+      ],
+      "properties": {
+        "planId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "profileId": {
+          "$ref": "#/$defs/identifier"
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "preparationId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "unknown"
+          ]
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/absoluteFingerprint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "application": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/preparationApplication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/preparationInstallation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "packageObservation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/preparationPackageObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preparation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/preparationProcedureRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/absoluteFingerprint"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "ready"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "preparationId": {
+                "$ref": "#/$defs/uuid"
+              },
+              "reference": {
+                "$ref": "#/$defs/absoluteFingerprint"
+              },
+              "application": {
+                "$ref": "#/$defs/preparationApplication"
+              },
+              "installation": {
+                "$ref": "#/$defs/preparationInstallation"
+              },
+              "packageObservation": {
+                "$ref": "#/$defs/preparationPackageObservation"
+              },
+              "preparation": {
+                "$ref": "#/$defs/preparationProcedureRecord"
+              },
+              "files": {
+                "minItems": 4,
+                "maxItems": 4
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "preparationId": {
+                "type": "null"
+              },
+              "reference": {
+                "type": "null"
+              },
+              "application": {
+                "type": "null"
+              },
+              "installation": {
+                "type": "null"
+              },
+              "packageObservation": {
+                "type": "null"
+              },
+              "preparation": {
+                "type": "null"
+              },
+              "files": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

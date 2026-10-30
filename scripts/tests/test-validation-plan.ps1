@@ -40,6 +40,8 @@ function Invoke-Case {
         reservation = if ($stateFiles.Count) { Get-Content -LiteralPath $stateFiles[0].FullName -Raw | ConvertFrom-Json } else { $null } }
 }
 try {
+    $localConfig = Join-Path $projectRoot 'config.local.ps1'
+    if (Test-Path -LiteralPath $localConfig -PathType Leaf) { . $localConfig }
     foreach ($directory in @('scripts/validation', 'scripts/ci', 'scripts/tests', 'examples/agent-client')) {
         $null = [IO.Directory]::CreateDirectory((Join-Path $fixture $directory))
     }
@@ -48,6 +50,11 @@ try {
         Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination (Join-Path $fixture $relative)
     }
     Get-ChildItem -LiteralPath (Join-Path $projectRoot 'scripts/validation') -Filter '*.mjs' | Copy-Item -Destination (Join-Path $fixture 'scripts/validation')
+    $fakeDistribution = Join-Path $fixture '.upstream/maestro/maestro-cli/build/install/maestro'
+    $null = [IO.Directory]::CreateDirectory((Join-Path $fakeDistribution 'lib'))
+    $null = [IO.Directory]::CreateDirectory((Join-Path $fakeDistribution 'bin'))
+    [IO.File]::WriteAllText((Join-Path $fakeDistribution 'lib/fixture.jar'), 'Synthetic dependency; never executed.', $utf8)
+    [IO.File]::WriteAllText((Join-Path $fakeDistribution 'bin/maestro.bat'), 'Synthetic launcher placeholder.', $utf8)
     $matrix = @'
 param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts, $Repeat, $ReportPointerPath, $ControlRecordDirectory, $MatrixInvocationId, $RunTimeoutSeconds)
 $ErrorActionPreference = 'Stop'

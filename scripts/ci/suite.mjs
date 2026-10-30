@@ -121,7 +121,8 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1', 'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs',
     'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
     'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
-    'scripts/validation/plan.mjs', 'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
+    'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
+    'scripts/validation/retry-evidence.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
     'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch', 'config.local.ps1']) {
     const file = path.join(projectRoot, name);
     try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (name !== 'config.local.ps1' || error.code !== 'ENOENT') throw error; }

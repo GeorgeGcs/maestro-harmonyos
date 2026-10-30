@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicJson, canonical, digestPattern, hash, hashFile, inside, key, noLinks, readJson, requireValue, samePath, sourceFiles } from './io.mjs';
+import { freezeRuntime, checkRuntime } from './runtime.mjs';
+import { freezePreparations, checkPreparations, unknownPreparationReview } from './preparation.mjs';
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const variable = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -30,9 +32,9 @@ async function fingerprintFiles(value, base, required) {
   return result;
 }
 
-export async function freezePlan(planPath, outputDirectory, projectRoot, environment = process.env) {
+export async function freezePlan(planPath, outputDirectory, projectRoot, environment = process.env, options = {}) {
   const input = await readJson(planPath), plan = input.value, base = path.dirname(input.path);
-  requireValue(plan.schemaVersion === 1 && identifier.test(plan.planId) && plan.status === 'frozen', 'Plan must have schemaVersion=1, a stable planId, and status=frozen.');
+  requireValue([1, 2].includes(plan.schemaVersion) && identifier.test(plan.planId) && plan.status === 'frozen', 'Plan must have schemaVersion=1 or 2, a stable planId, and status=frozen.');
   requireValue(['development', 'formal'].includes(plan.purpose) && ['per-flow', 'suite'].includes(plan.measurementMode), 'Specify purpose and measurementMode.');
   requireValue(Number.isSafeInteger(plan.repeat) && plan.repeat >= 1 && plan.repeat <= 1000, 'repeat must be between 1 and 1000.');
   requireValue(Number.isSafeInteger(plan.runTimeoutSeconds) && plan.runTimeoutSeconds >= 1 && plan.runTimeoutSeconds <= 86400, 'A bounded runTimeoutSeconds is required.');
@@ -43,6 +45,7 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
   requireValue(plan.manualInterventionPolicy === 'review-required' && typeof plan.evidencePolicy?.requireVideo === 'boolean', 'Use review-required intervention policy and explicit requireVideo.');
   let confirmation = null;
   if (plan.purpose === 'formal') {
+    requireValue(plan.schemaVersion === 2, 'New formal execution requires a v2 plan with installation and preparation evidence.');
     requireValue(plan.confirmation?.status === 'confirmed' && typeof plan.confirmation.path === 'string' &&
       digestPattern.test(plan.confirmation.sha256), 'A formal plan needs a previously confirmed scope reference.');
     confirmation = { path: path.resolve(base, plan.confirmation.path), sha256: plan.confirmation.sha256 };
@@ -60,6 +63,12 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
     requireValue(moduleName === null || typeof moduleName === 'string' && moduleName.trim(), 'moduleName must be a nonempty string when supplied.');
     profiles[id] = { bundleId: profile.bundleId, abilityName: profile.abilityName, moduleName,
       environmentNames: [...names].sort(), environmentHashes: Object.fromEntries(names.map(name => [name, hash(Buffer.from(environment[name]))])) };
+    if (profile.applicationVersion !== undefined) {
+      requireValue(/^(?:0|[1-9][0-9]*)$/.test(profile.applicationVersion?.versionCode) && typeof profile.applicationVersion.versionCode === 'string' &&
+        typeof profile.applicationVersion.versionName === 'string' && profile.applicationVersion.versionName.trim(), 'applicationVersion requires a decimal-string versionCode and a nonempty versionName.');
+      profiles[id].applicationVersion = { versionCode: profile.applicationVersion.versionCode, versionName: profile.applicationVersion.versionName };
+    }
+    requireValue(plan.purpose !== 'formal' || profiles[id].applicationVersion, 'Every formal profile requires applicationVersion.');
   }
   const devices = array(plan.devices, 'devices');
   requireValue(devices.length > 0 && devices.every(device => typeof device.deviceId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(device.deviceId)), 'Provide explicit device identities.');
@@ -106,15 +115,19 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
   const toolFiles = [];
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/test-device-matrix.ps1', 'scripts/test-validation-plan.ps1',
     'scripts/validation/main.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/io.mjs', 'scripts/validation/retry-evidence.mjs',
+    'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
     'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
     'config.local.ps1', 'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch']) {
     const file = path.resolve(projectRoot, name);
     try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
-  const frozen = { protocol: 'maestro.harmonyos.validation-plan', schemaVersion: 1, planId: plan.planId, purpose: plan.purpose,
+  const runtime = await freezeRuntime(projectRoot, options, environment);
+  const preparations = await freezePreparations({ references: plan.preparations ?? [], base, planId: plan.planId,
+    profiles, devices, units, applicationFiles, preparationProcedure: plan.preparationProcedure, purpose: plan.purpose });
+  const frozen = { protocol: 'maestro.harmonyos.validation-plan', schemaVersion: 2, planId: plan.planId, purpose: plan.purpose,
     status: 'frozen', frozenAt: new Date().toISOString(), sourcePlan: { path: input.path, sha256: input.sha256 },
     projectRoot: path.resolve(projectRoot), measurementMode: plan.measurementMode, repeat: plan.repeat, runTimeoutSeconds: plan.runTimeoutSeconds,
-    thresholdPolicy: plan.thresholdPolicy, profiles, devices, units, confirmation, buildFiles, applicationFiles, toolFiles,
+    thresholdPolicy: plan.thresholdPolicy, profiles, devices, units, confirmation, buildFiles, applicationFiles, toolFiles, runtime, preparations,
     environmentFingerprint: plan.environmentFingerprint ?? null, preparationProcedure: plan.preparationProcedure,
     retryPolicy: plan.retryPolicy, evidencePolicy: plan.evidencePolicy, manualInterventionPolicy: plan.manualInterventionPolicy };
   const batches = units.flatMap(unit => devices.map(device => ({ batchId: randomUUID(), unitId: unit.unitId, deviceId: device.deviceId })));
@@ -122,20 +135,29 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
   const slots = batches.flatMap(batch => Array.from({ length: plan.repeat }, (_, index) => ({ ...batch, slotId: batch.batchId + ':' + (index + 1),
     round: index + 1, status: 'pending', firstPassStatus: 'not_run', finalPass: false, manualIntervention: 'unknown',
     cleanup: null, evidenceComplete: false, coverageComplete: false, retryComplete: false, videoComplete: !plan.evidencePolicy.requireVideo,
+    runtimeVerification: { state: 'unknown', reason: 'No executed runtime record.' },
+    preparationVerification: unknownPreparationReview(preparations.find(entry => entry.deviceId === batch.deviceId &&
+      entry.profileId === units.find(unit => unit.unitId === batch.unitId).profile)),
     runId: null, attemptId: null, reason: null })));
   await fs.mkdir(outputDirectory, { recursive: true });
   const snapshotPath = path.join(outputDirectory, 'plan.json');
   await atomicJson(snapshotPath, frozen, true);
-  const state = { protocol: 'maestro.harmonyos.validation-summary', schemaVersion: 1, planId: plan.planId,
+  const state = { protocol: 'maestro.harmonyos.validation-summary', schemaVersion: 2, planId: plan.planId,
     planPath: path.resolve(snapshotPath), planSha256: await hashFile(snapshotPath), status: 'running', createdAt: frozen.frozenAt,
     batches: batches.map(batch => ({ ...batch, status: 'pending', matrixExitCode: null, stopDevice: false, releaseConfirmed: false })), slots };
   await saveSummary(path.join(outputDirectory, 'validation-summary.json'), state, frozen);
   return { snapshotPath, summaryPath: path.join(outputDirectory, 'validation-summary.json'), batches };
 }
 
-export async function checkFrozen(plan, environment = process.env) {
+export async function checkFrozen(plan, environment = process.env, { executionPreparation = true } = {}) {
+  // CI also reuses these source checks with its own inputs v1; validation v2 alone owns these additions.
+  if (executionPreparation && plan.protocol === 'maestro.harmonyos.validation-plan' && plan.schemaVersion === 2) {
+    await checkRuntime(plan.runtime, environment);
+    await checkPreparations(plan.preparations);
+  }
   for (const unit of plan.units) requireValue(canonical(await sourceFiles(unit.sourceRoot)) === canonical(unit.sources), 'Frozen Flow sources changed; create a new plan.');
-  for (const file of [...plan.buildFiles, ...plan.applicationFiles, ...plan.toolFiles, ...(plan.confirmation ? [plan.confirmation] : [])]) {
+  const executionFiles = executionPreparation || plan.schemaVersion !== 2 ? [...plan.buildFiles, ...plan.applicationFiles] : [];
+  for (const file of [...executionFiles, ...plan.toolFiles, ...(plan.confirmation ? [plan.confirmation] : [])]) {
     requireValue(await hashFile(file.path) === file.sha256, 'Frozen implementation, application or confirmation changed.');
   }
   for (const profile of Object.values(plan.profiles)) for (const [name, digest] of Object.entries(profile.environmentHashes)) {
@@ -157,10 +179,15 @@ export function aggregate(state, plan) {
       .every(batch => batch.releaseConfirmed === true);
     const complete = handoffComplete && slots.length > 0 && slots.some(slot => slot.coverageComplete) && slots.every(slot => ['passed', 'failed'].includes(slot.status) &&
       slot.cleanup?.state === 'complete' && slot.evidenceComplete && slot.retryComplete && slot.videoComplete && slot.manualIntervention !== 'unknown');
+    const qualified = complete && unattended >= minimum;
+    const runtimeComplete = slots.length > 0 && slots.every(slot => slot.runtimeVerification?.state === 'verified');
+    const preparationComplete = slots.length > 0 && slots.every(slot => slot.preparationVerification?.state === 'confirmed');
+    const formalEligible = plan.schemaVersion === 2 && plan.purpose === 'formal' && Boolean(plan.confirmation) && runtimeComplete && preparationComplete;
     return { unitId: unit.unitId, deviceId: device.deviceId, planned: slots.length, firstPassCount: first, finalPassCount: final,
       firstPassRate: first / slots.length, finalPassRate: final / slots.length, minimumPassCount: minimum,
       thresholdMet: (plan.thresholdPolicy.metric === 'firstPass' ? first : final) >= minimum,
-      unattendedPassCount: unattended, complete, qualified: complete && unattended >= minimum,
+      unattendedPassCount: unattended, complete, qualified,
+      ...(plan.schemaVersion === 2 ? { runtimeComplete, preparationComplete, formalEligible, formalQualified: formalEligible && qualified } : {}),
       failed: count('failed'), cancelled: count('cancelled'), blocked: count('blocked'), unknown: count('unknown'), notRun: count('not-run') + count('pending') };
   }));
 }
@@ -169,10 +196,15 @@ export async function saveSummary(file, state, plan) {
   state.groups = aggregate(state, plan);
   state.updatedAt = new Date().toISOString();
   state.qualified = state.groups.every(group => group.qualified);
+  if (plan.schemaVersion === 2) {
+    state.formalEligible = state.groups.every(group => group.formalEligible);
+    state.formalQualified = state.groups.every(group => group.formalQualified);
+  }
   await atomicJson(file, state);
   const escape = value => String(value).replace(/[|\r\n]/g, ' ');
   const rows = state.groups.map(group => `| ${escape(group.unitId)} | ${escape(group.deviceId)} | ${group.planned} | ${group.firstPassCount}/${group.planned} | ${group.finalPassCount}/${group.planned} | ${group.unknown} | ${group.notRun} | ${group.qualified} |`);
   const text = ['# Validation plan results', '', `Plan: ${escape(state.planId)}. State: ${state.status}.`, '',
+    `Formal qualification: ${state.schemaVersion === 2 && state.formalQualified === true}. Legacy v1 and development plans cannot qualify for formal acceptance.`, '',
     'First pass means no actual extra retry. Planned slots remain in the denominator. Execution, evidence, cleanup and manual review are separate.', '',
     '| Unit | Device | Planned | First pass | Final pass | Unknown | Not run | Qualified |', '| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |', ...rows, '',
     'A matrix exit code is preserved even when a numerical threshold is met. See validation-summary.json for every slot and original evidence references.', ''].join('\n');

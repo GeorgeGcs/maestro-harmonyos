@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:validation-review:2",
+  "title": "Human review input v2",
+  "$comment": "Structure only. This schema does not establish cross-document identity, original file hashes, command execution, or qualification. See retry-and-validation.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "planId",
+    "planSha256",
+    "observedAt",
+    "slots"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "planId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "planSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "slots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slotId",
+          "manualIntervention"
+        ],
+        "properties": {
+          "slotId": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:[1-9][0-9]*$"
+          },
+          "manualIntervention": {
+            "enum": [
+              "none",
+              "present"
+            ]
+          },
+          "notes": {
+            "description": "Operator-supplied notes; not interpreted."
+          },
+          "videoReports": {
+            "type": "array",
+            "minItems": 0,
+            "items": {
+              "$ref": "#/$defs/fingerprint"
+            }
+          },
+          "preparation": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/preparationReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "preparationReview": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preparationSha256",
+        "installationUnchanged",
+        "preparationUnchanged"
+      ],
+      "properties": {
+        "preparationSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "installationUnchanged": {
+          "type": "boolean"
+        },
+        "preparationUnchanged": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

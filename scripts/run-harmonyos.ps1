@@ -236,12 +236,32 @@ try {
     if ([IO.File]::Exists($controlPath)) { throw 'ControlRecordPath already exists; each launch must use a new record.' }
     $argumentHasher = [Security.Cryptography.SHA256]::Create()
     try { $argumentHash = ([BitConverter]::ToString($argumentHasher.ComputeHash([Text.Encoding]::UTF8.GetBytes(($arguments | ConvertTo-Json -Compress))))).Replace('-', '').ToLowerInvariant() } finally { $argumentHasher.Dispose() }
+    # Retain the files selected for this launch, including dependencies outside the four project JARs.
+    # This records host files; it does not claim to inspect classes already loaded inside Java.
+    $runtimeJars = @()
+    foreach ($runtimeJar in @(Get-ChildItem -LiteralPath $libraryDirectory -File | Where-Object { $_.Extension -ieq '.jar' } | Sort-Object FullName)) {
+        Assert-RunnerControlPath $runtimeJar.FullName
+        $runtimeJars += @{ path = $runtimeJar.FullName; sha256 = (Get-FileHash -LiteralPath $runtimeJar.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $runtimeShell = (Get-Process -Id $PID).Path
+    Assert-RunnerControlPath $javaExecutable
+    Assert-RunnerControlPath $runtimeShell
+    Assert-RunnerControlPath $localConfig
+    $runtimeConfigurationPresent = Test-Path -LiteralPath $localConfig -PathType Leaf
+    $runtime = [ordered]@{
+        schemaVersion = 1; cliHome = [IO.Path]::GetFullPath($distribution); classpathArgument = (Join-Path $libraryDirectory '*')
+        java = @{ path = [IO.Path]::GetFullPath($javaExecutable); sha256 = (Get-FileHash -LiteralPath $javaExecutable -Algorithm SHA256).Hash.ToLowerInvariant() }
+        powershell = @{ path = $runtimeShell; sha256 = (Get-FileHash -LiteralPath $runtimeShell -Algorithm SHA256).Hash.ToLowerInvariant() }
+        classpath = @($runtimeJars)
+        configuration = @{ path = $localConfig; present = [bool]$runtimeConfigurationPresent; sha256 = if ($runtimeConfigurationPresent) { (Get-FileHash -LiteralPath $localConfig -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null } }
+    }
     $control = [ordered]@{
         protocol = 'maestro.harmonyos.runner-control'; schemaVersion = 1
         launchId = [guid]::NewGuid().ToString(); runId = $RunId; attemptId = $AttemptId; attemptNo = $AttemptNo
         deviceId = $DeviceId; createdAt = [DateTime]::UtcNow.ToString('o'); updatedAt = $null; phase = 'launching'
         artifactDirectory = $artifactDirectory; invocationPath = (Join-Path $artifactDirectory 'invocation.json'); runResultPath = $invocation.runResultPath
         executable = [IO.Path]::GetFullPath($javaExecutable); argumentsSha256 = $argumentHash
+        runtime = $runtime
         process = $null; processExitObserved = $false; processExitCode = $null; wrapperExitCode = $null
         runTimeoutSeconds = $RunTimeoutSeconds; terminationWaitSeconds = $TerminationWaitSeconds; outputDrainSeconds = $OutputDrainSeconds
         terminationRequested = $false; terminationRequestedAt = $null; stopReason = $null

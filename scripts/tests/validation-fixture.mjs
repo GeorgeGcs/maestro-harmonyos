@@ -7,6 +7,39 @@ import { hash, hashFile } from '../validation/io.mjs';
 export async function json(file, value) { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(value, null, 2)); }
 const document = (kind, data) => ({ protocol: 'maestro.harmonyos.agent', schemaVersion: 1, kind, revision: 1, observedAt: new Date().toISOString(), data });
 
+// Metadata-only fixtures. These JAR/HAP bytes are never dispatched to a device.
+export async function fixtureRuntime(project) {
+  const home = path.join(project, '.upstream/maestro/maestro-cli/build/install/maestro');
+  await fs.mkdir(path.join(home, 'lib'), { recursive: true });
+  await fs.mkdir(path.join(home, 'bin'), { recursive: true });
+  await fs.writeFile(path.join(home, 'bin/maestro.bat'), 'synthetic launcher placeholder');
+  await fs.writeFile(path.join(home, 'lib/dependency.jar'), 'synthetic dependency');
+  return home;
+}
+
+export async function fixturePreparation(root, plan, hap) {
+  const profile = plan.profiles.fixture;
+  profile.applicationVersion = { versionCode: '1', versionName: '1.0-test' };
+  const stamp = new Date().toISOString(), references = {};
+  for (const name of ['install', 'package', 'prepare']) {
+    const file = path.join(root, name + '.txt');
+    await fs.writeFile(file, 'Synthetic ' + name + ' evidence for host tests; no app installed.');
+    references[name] = { path: file, sha256: await hashFile(file) };
+  }
+  const value = { protocol: 'maestro.harmonyos.validation-preparation', schemaVersion: 1,
+    preparationId: randomUUID(), planId: plan.planId, profileId: 'fixture', deviceId: 'fixture-device',
+    application: { bundleId: profile.bundleId, abilityName: profile.abilityName, moduleName: profile.moduleName,
+      ...profile.applicationVersion, hap },
+    installation: { basis: 'operator_attested', installedAt: stamp, record: references.install },
+    packageObservation: { basis: 'operator_attested', observedAt: stamp, bundleId: profile.bundleId,
+      ...profile.applicationVersion, record: references.package },
+    preparation: { basis: 'operator_attested', completedAt: stamp,
+      procedureSha256: hash(Buffer.from(plan.preparationProcedure)), record: references.prepare } };
+  const file = path.join(root, 'preparation.json'); await json(file, value);
+  plan.preparations = [{ path: file, sha256: await hashFile(file) }];
+  return { file, value };
+}
+
 export async function fixturePlan(root, { repeat = 2, mode = 'per-flow', units = 1 } = {}) {
   const flows = path.join(root, 'flows'); await fs.mkdir(flows, { recursive: true });
   const definitions = [];
@@ -136,9 +169,12 @@ export async function writeMatrixFixture(input) {
     const required = ['input.json', 'result.json', 'evidence-index.json', 'state.json', 'registration.json', 'junit.xml', ...manifests.slice(1)];
     await json(path.join(base, 'agent-manifest.json'), { schemaVersion: 1, runId, attemptId, files: await Promise.all(required.map(async relative => ({ path: relative, sha256: await hashFile(path.join(base, relative)) }))) });
     await json(controlRecordPath, { protocol: 'maestro.harmonyos.runner-control', schemaVersion: 1, runId, attemptId, deviceId: batch.deviceId,
+      executable: plan.runtime?.java.path, runtime: plan.runtime ? { schemaVersion: 1, cliHome: plan.runtime.cliHome,
+        classpathArgument: plan.runtime.classpathArgument, java: plan.runtime.java, powershell: plan.runtime.powershell,
+        classpath: plan.runtime.classpath, configuration: plan.runtime.configuration } : undefined,
       phase: 'exited', processExitObserved: true, processExitCode: run.cliExitCode, wrapperExitCode: run.cliExitCode, agentStatus: status,
       terminationRequested: false, stopReason: null, error: null, stdoutComplete: true, stderrComplete: true,
-      runResultPath: resultPath, process: { pid: 99999999, startTimeTicks: 1, executable: 'fixture' } });
+      runResultPath: resultPath, process: { pid: 99999999, startTimeTicks: 1, executable: plan.runtime?.java.path ?? 'fixture' } });
   }
   const files = plan.measurementMode === 'suite' ? unit.sources.filter(file => path.dirname(file.path) === unit.entry || file.path.startsWith(unit.entry + path.sep)) : unit.sources.filter(file => file.path === unit.entry);
   const matrix = { schemaVersion: 1, status: 'completed', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), error: null,

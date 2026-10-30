@@ -7,17 +7,19 @@ import { freezePlan, minimumCount, checkFrozen } from '../validation/plan.mjs';
 import { startBatch, importBatch, finishPlan, reviewPlan } from '../validation/main.mjs';
 import { verifyTrace } from '../validation/retry-evidence.mjs';
 import { hash, hashFile, readJson } from '../validation/io.mjs';
-import { fixturePlan, writeMatrixFixture, traceFixture, json } from './validation-fixture.mjs';
+import { fixturePlan, fixtureRuntime, fixturePreparation, writeMatrixFixture, traceFixture, json } from './validation-fixture.mjs';
 
 async function setup(t, options = {}, modify = () => {}) {
   const testRoot = path.resolve('artifacts/validation-unit-tests'); await fs.mkdir(testRoot, { recursive: true });
   const root = await fs.mkdtemp(path.join(testRoot, 'case-'));
   t.after(() => { assert.equal(path.dirname(root), testRoot); return fs.rm(root, { recursive: true, force: true }); });
-  const source = await fixturePlan(root, options); await modify(source.plan, root); await json(source.file, source.plan);
+  const source = await fixturePlan(root, options);
   const output = path.join(root, 'output'), project = path.join(root, 'project'); await fs.mkdir(project);
-  const result = await freezePlan(source.file, output, project);
+  await fixtureRuntime(project); await modify(source.plan, root, project); await json(source.file, source.plan);
+  const runtimeOptions = { powershellPath: process.env.TEST_POWERSHELL_PATH ?? process.execPath };
+  const result = await freezePlan(source.file, output, project, process.env, runtimeOptions);
   const plan = (await readJson(result.snapshotPath)).value;
-  return { root, output, project, source, plan, ...result };
+  return { root, output, project, source, plan, runtimeOptions, ...result };
 }
 
 async function execute(context, modes = [], index = 0, edit = async () => {}) {
@@ -97,15 +99,16 @@ async function sourceIdentityScenario(t, { version = 2, actual = 'A', required =
 
 const implementationRoles = ['maestro-cli', 'maestro-client', 'maestro-orchestra', 'maestro-orchestra-models'];
 async function formalFixture(t, versioned = false) {
-  return setup(t, { repeat: 1 }, async (plan, root) => {
-    plan.purpose = 'formal';
+  return setup(t, { repeat: 1 }, async (plan, root, project) => {
+    plan.schemaVersion = 2; plan.purpose = 'formal';
     const confirmationPath = path.join(root, 'confirmed-scope.txt'), applicationPath = path.join(root, 'fixture.hap');
     await fs.writeFile(confirmationPath, 'Synthetic scope confirmation for host tests only.');
     await fs.writeFile(applicationPath, 'Synthetic application fingerprint; never installed.');
     plan.confirmation = { status: 'confirmed', path: confirmationPath, sha256: await hashFile(confirmationPath) };
     plan.applicationFingerprint.files = [{ path: applicationPath, sha256: await hashFile(applicationPath) }];
+    await fixturePreparation(root, plan, plan.applicationFingerprint.files[0]);
     for (const role of implementationRoles) {
-      const file = path.join(root, role + (versioned || role === 'maestro-cli' ? '-2.12.0' : '') + '.jar');
+      const file = path.join(project, '.upstream/maestro/maestro-cli/build/install/maestro/lib', role + (versioned || role === 'maestro-cli' ? '-2.12.0' : '') + '.jar');
       await fs.writeFile(file, 'Synthetic implementation fingerprint: ' + role);
       plan.buildFingerprint.files.push({ path: file, sha256: await hashFile(file) });
     }
@@ -165,7 +168,7 @@ test('formal fingerprints reject a CLI-only report and changed frozen runtime by
   assert.equal(result.imported.status, 'unknown'); assert.match(result.imported.error, /must include CLI, client, orchestra, and orchestra-models/);
   const changed = await formalFixture(t);
   await fs.appendFile(changed.plan.buildFiles[1].path, 'changed after freeze');
-  await assert.rejects(executeFormal(changed), /Frozen implementation, application or confirmation changed/);
+  await assert.rejects(executeFormal(changed), /Frozen implementation|runtime|classpath|changed/i);
   assert.equal((await readJson(changed.summaryPath)).value.batches[0].status, 'pending');
 });
 
@@ -189,6 +192,122 @@ test('all-pass import keeps manual review separate and then qualifies', async t 
   const outcome = await review(context);
   assert.equal(outcome.finished.originalExecutionSucceeded, true);
   assert.equal(outcome.reviewed.qualified, true);
+  assert.equal(context.plan.schemaVersion, 2);
+  assert.equal(outcome.reviewed.formalQualified, false);
+});
+
+async function formalReview(context, edit = () => {}) {
+  const state = (await readJson(context.summaryPath)).value;
+  const entry = context.plan.preparations[0], file = path.join(context.root, 'formal-review.json');
+  const audit = { schemaVersion: 2, planId: state.planId, planSha256: state.planSha256, observedAt: new Date().toISOString(),
+    slots: state.slots.map(slot => ({ slotId: slot.slotId, manualIntervention: 'none', preparation: {
+      preparationSha256: entry.reference.sha256, installationUnchanged: true, preparationUnchanged: true } })) };
+  await edit(audit); await json(file, audit);
+  return reviewPlan({ summaryPath: context.summaryPath, reviewPath: file });
+}
+
+test('formal qualification requires runtime and a v2 preparation review separate from manual intervention', async t => {
+  const context = await formalFixture(t); await executeFormal(context);
+  const oldReview = await review(context);
+  assert.equal(oldReview.reviewed.qualified, true);
+  assert.equal(oldReview.reviewed.formalQualified, false);
+  const checked = await formalReview(context);
+  assert.equal(checked.formalQualified, true);
+  const state = (await readJson(context.summaryPath)).value;
+  assert.equal(state.slots[0].runtimeVerification.state, 'verified');
+  assert.equal(state.slots[0].preparationVerification.basis, 'operator_attested');
+  assert.equal(state.groups[0].firstPassCount, 1);
+  const changed = await formalReview(context, audit => { audit.slots[0].preparation.preparationUnchanged = false; });
+  assert.equal(changed.qualified, true); assert.equal(changed.formalQualified, false);
+  assert.equal(changed.groups[0].finalPassCount, 1);
+});
+
+test('changed installation evidence cannot qualify, and finish preserves original successful execution', async t => {
+  const context = await formalFixture(t); await executeFormal(context);
+  await fs.appendFile(context.plan.preparations[0].installation.record.path, '\nchanged evidence');
+  const finished = await finishPlan({ summaryPath: context.summaryPath, interrupted: false });
+  assert.equal(finished.originalExecutionSucceeded, true); assert.equal(finished.formalQualified, false);
+  await assert.rejects(formalReview(context), /hash|fingerprint|changed|differs/i);
+  const state = (await readJson(context.summaryPath)).value;
+  assert.equal(state.groups[0].firstPassCount, 1); assert.equal(state.groups[0].finalPassCount, 1);
+  assert.equal(state.batches[0].releaseConfirmed, true); assert.equal(state.formalQualified, false);
+});
+
+test('local HAP changes after execution do not erase native counts during the first import', async t => {
+  for (const removed of [false, true]) await t.test(removed ? 'removed' : 'changed', async t => {
+    const context = await formalFixture(t);
+    const result = await execute(context, [], 0, async generated => {
+      generated.matrix.build.implementationJars = context.plan.buildFiles.map(file => ({ file: path.basename(file.path), sha256: file.sha256 }));
+      await json(path.join(generated.matrixRoot, 'matrix.json'), generated.matrix);
+      const hap = context.plan.applicationFiles[0].path;
+      if (removed) await fs.unlink(hap); else await fs.appendFile(hap, 'replaced after CLI exit');
+    });
+    assert.equal(result.state.groups[0].finalPassCount, 1); assert.equal(result.imported.releaseConfirmed, true);
+    assert.equal((await finishPlan({ summaryPath: context.summaryPath })).originalExecutionSucceeded, true);
+    await assert.rejects(formalReview(context));
+    const state = (await readJson(context.summaryPath)).value;
+    assert.equal(state.groups[0].firstPassCount, 1); assert.equal(state.formalQualified, false);
+  });
+});
+
+test('wrong preparation hash and absent pre-run evidence cannot be supplied by a later review', async t => {
+  const context = await formalFixture(t); await executeFormal(context); await review(context);
+  await assert.rejects(formalReview(context, audit => { audit.slots[0].preparation.preparationSha256 = '0'.repeat(64); }), /bind|hash/i);
+  const development = await setup(t); await execute(development); await review(development);
+  const state = (await readJson(development.summaryPath)).value;
+  const file = path.join(development.root, 'late-preparation.json');
+  await json(file, { schemaVersion: 2, planId: state.planId, planSha256: state.planSha256, observedAt: new Date().toISOString(),
+    slots: state.slots.map(slot => ({ slotId: slot.slotId, manualIntervention: 'none', preparation: {
+      preparationSha256: '0'.repeat(64), installationUnchanged: true, preparationUnchanged: true } })) });
+  await assert.rejects(reviewPlan({ summaryPath: development.summaryPath, reviewPath: file }), /absent at freeze/);
+});
+
+test('missing or mismatched executed runtime blocks formal qualification without erasing native pass or release', async t => {
+  for (const mode of ['missing', 'dependency', 'java']) await t.test(mode, async t => {
+    const context = await formalFixture(t);
+    const result = await execute(context, [], 0, async (generated, paths) => {
+      generated.matrix.build.implementationJars = context.plan.buildFiles.map(file => ({ file: path.basename(file.path), sha256: file.sha256 }));
+      await json(path.join(generated.matrixRoot, 'matrix.json'), generated.matrix);
+      const index = (await readJson(paths.controlIndexPath)).value;
+      const file = index.entries[0].controlRecordPath, control = (await readJson(file)).value;
+      if (mode === 'missing') delete control.runtime;
+      else if (mode === 'java') control.runtime.java.sha256 = '0'.repeat(64);
+      else control.runtime.classpath.find(file => path.basename(file.path) === 'dependency.jar').sha256 = '0'.repeat(64);
+      await json(file, control);
+    });
+    assert.equal(result.state.slots[0].finalPass, true); assert.equal(result.imported.releaseConfirmed, true);
+    await review(context);
+    const checked = await formalReview(context);
+    assert.equal(checked.qualified, true); assert.equal(checked.formalQualified, false);
+    assert.equal(checked.groups[0].finalPassCount, 1); assert.equal(checked.groups[0].runtimeComplete, false);
+  });
+});
+
+test('historical review checks retained launch identity without rereading replaced runtime bytes', async t => {
+  const context = await formalFixture(t); await executeFormal(context); await review(context);
+  const dependency = context.plan.runtime.classpath.find(file => path.basename(file.path) === 'dependency.jar');
+  await fs.appendFile(dependency.path, 'new installed distribution after old execution');
+  assert.equal((await formalReview(context)).formalQualified, true);
+  await assert.rejects(checkFrozen(context.plan), /runtime|classpath|changed|differ/i);
+});
+
+test('legacy plans retain statistics but cannot dispatch new work or gain formal qualification', async t => {
+  const context = await formalFixture(t); await executeFormal(context); await review(context);
+  const legacy = structuredClone(context.plan); legacy.schemaVersion = 1; delete legacy.runtime; delete legacy.preparations;
+  for (const profile of Object.values(legacy.profiles)) delete profile.applicationVersion;
+  await json(context.snapshotPath, legacy);
+  const state = (await readJson(context.summaryPath)).value;
+  state.schemaVersion = 1; state.planSha256 = await hashFile(context.snapshotPath);
+  delete state.formalEligible; delete state.formalQualified;
+  for (const group of state.groups) for (const name of ['runtimeComplete', 'preparationComplete', 'formalEligible', 'formalQualified']) delete group[name];
+  for (const slot of state.slots) { delete slot.runtimeVerification; delete slot.preparationVerification; }
+  await json(context.summaryPath, state);
+  await assert.rejects(startBatch({ summaryPath: context.summaryPath }), /Legacy frozen v1/);
+  assert.equal((await review(context)).reviewed.formalQualified, false);
+  assert.equal((await readJson(context.summaryPath)).value.qualified, true);
+  assert.equal(Object.hasOwn((await readJson(context.summaryPath)).value, 'formalQualified'), false);
+  context.source.plan.schemaVersion = 1; await json(context.source.file, context.source.plan);
+  await assert.rejects(freezePlan(context.source.file, path.join(context.root, 'new'), context.project, process.env, context.runtimeOptions), /New formal execution requires a v2/);
 });
 
 test('recovered retry and original failure produce 18/20 first, 19/20 final without erasing exit failure', async t => {
@@ -331,7 +450,7 @@ test('source changes, output overlap, and unconfirmed formal plans are rejected 
   const context = await setup(t);
   await fs.appendFile(context.plan.units[0].entry, '# changed'); await assert.rejects(checkFrozen(context.plan), /sources changed/);
   await assert.rejects(freezePlan(context.source.file, context.plan.units[0].sourceRoot, context.project), /outside/);
-  context.source.plan.purpose = 'formal'; await json(context.source.file, context.source.plan);
+  context.source.plan.schemaVersion = 2; context.source.plan.purpose = 'formal'; await json(context.source.file, context.source.plan);
   await assert.rejects(freezePlan(context.source.file, path.join(context.root, 'formal'), context.project), /confirmed scope/);
 });
 
@@ -350,7 +469,7 @@ test('workspace-config suites are rejected before dispatch and effective module 
   await fs.writeFile(path.join(context.plan.units[0].entry, 'config.yaml'), 'flows:\n  - flow.yaml\n');
   await assert.rejects(freezePlan(context.source.file, path.join(context.root, 'another'), context.project), /workspace config/);
   await fs.unlink(path.join(context.plan.units[0].entry, 'config.yaml'));
-  const result = await freezePlan(context.source.file, path.join(context.root, 'module'), context.project, { MAESTRO_HARMONYOS_MODULE: 'entry' });
+  const result = await freezePlan(context.source.file, path.join(context.root, 'module'), context.project, { ...process.env, MAESTRO_HARMONYOS_MODULE: 'entry' }, context.runtimeOptions);
   assert.equal((await readJson(result.snapshotPath)).value.profiles.fixture.moduleName, 'entry');
 });
 

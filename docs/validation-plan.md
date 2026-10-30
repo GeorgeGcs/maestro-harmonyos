@@ -34,7 +34,7 @@ appId: ${APP_ID}
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "planId": "login-development-01",
   "status": "frozen",
   "purpose": "development",
@@ -125,6 +125,10 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 | `thresholdMet` | 选定原始通过率是否达到计划阈值 |
 | `unattendedPassCount` | 达到所选成功口径，并完成必测覆盖、证据、清理、视频检查，且人工复核确认无干预 |
 | `qualified` | 全部槽位均有确定执行结果及所需证据，且有效无人干预成功数达到阈值 |
+| `runtimeComplete` | 每轮控制记录的 Java、完整 JAR 集合、PowerShell 和本地配置均匹配冻结值 |
+| `preparationComplete` | 每轮人工复核均绑定冻结的安装准备记录，并确认安装和准备状态未变 |
+| `formalEligible` | v2 正式计划具备范围确认，且运行环境与准备证据完整 |
+| `formalQualified` | 在 `formalEligible` 的基础上，`qualified` 也成立 |
 
 分母始终是计划槽位数。`minimumRate` 使用十进制字符串，最小成功次数按向上取整计算。缺 trace、trace 截断、身份或哈希不匹配时，首次成功记 `unknown`，不从最终 passed 推断首次成功。optional retry 只要实际进入第二次，也不算首次成功；可选步骤只出现 Warned 不会单独推翻原始最终结果，但不能充当必测覆盖。
 
@@ -133,6 +137,12 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 一次正常失败仍占分母，也允许其必测路径未完成。失败轮的证据必须完整；成功轮只有完成自己的必测路径才计入 `unattendedPassCount`。无法确认清理完成、取消或未知结果会停止同设备后续轮次及后续 unit。
 
 数字阈值达到不改写原退出码。当前执行入口要求人工复核；刚跑完时 `manualIntervention=unknown`、`qualified=false`，所以返回 1。复核可以更新资格结论，但不会把之前失败的矩阵或入口退出码改成成功。自动化系统应分别展示原执行退出码和最终审核结论。
+
+`qualified` 保留原来的统计含义。开发计划即使 `qualified=true`，也始终 `formalQualified=false`；准备证据缺失或实际运行环境不匹配，同样不能形成正式合格。原始首次/最终通过数和设备释放结论分别保留。
+
+冻结时自动记录实际 Node、PowerShell、Java 可执行文件的路径与 SHA-256、`config.local.ps1` 的存在性和字节，以及安装目录 `lib` 中全部 JAR 的成员列表与哈希。CLI 使用仓库内 `.upstream/maestro/maestro-cli/build/install/maestro`，与现有运行器一致。Java 先采用绝对路径 `JAVA_HOME`，否则由同一 PowerShell 的 `Get-Command java` 选择；相对路径配置需先改为绝对路径。
+
+每个批次派发前检查这些文件是否变化。每轮启动 Java 前，运行器保存本轮所选文件指纹，导入时与冻结值比较。历史复核使用保留下来的控制记录，不用今天安装的工具替代过去的身份。这是本机文件观察记录，并非 JVM 已加载类的内存证明；执行期间应保持安装目录不变。
 
 ## 复核人工干预和录屏
 
@@ -183,11 +193,61 @@ node .\scripts\validation\main.mjs D:\maestro-plans\review-request.json
 
 ## 正式计划与故障处理
 
-`purpose=formal` 还要求：`confirmation.status=confirmed`，提供已确认范围文件的 `path` / `sha256`；`buildFingerprint.files` 和 `applicationFingerprint.files` 非空，每项包含文件路径和 SHA-256。矩阵的实现指纹必须完整包含 `maestro-cli`、`maestro-client`、`maestro-orchestra`、`maestro-orchestra-models` 四个 JAR 角色，各出现一次，并逐项匹配冻结的 build 文件名和 SHA-256。支持无版本名（如 `maestro-client.jar`）和数字开头的版本名（如 `maestro-cli-2.12.0.jar`）；缺角色、重复角色或同名冻结文件不唯一都会拒绝。旧矩阵若漏记角色，不能用于正式统计，不补写旧报告。设备基线可用 `devices[].matrixInfoSha256` 约束矩阵中 `info` 对象的规范 JSON 哈希；说明性环境信息可放在 `environmentFingerprint`。
+`purpose=formal` 使用输入 v2，还要求：`confirmation.status=confirmed`，提供已确认范围文件的 `path` / `sha256`；`buildFingerprint.files` 和 `applicationFingerprint.files` 非空，每项包含文件路径和 SHA-256。矩阵的实现指纹必须完整包含 `maestro-cli`、`maestro-client`、`maestro-orchestra`、`maestro-orchestra-models` 四个 JAR 角色，各出现一次，并逐项匹配冻结的 build 文件及实际 classpath。支持无版本名（如 `maestro-client.jar`）和数字开头的版本名（如 `maestro-cli-2.12.0.jar`）；缺角色、重复角色或同名冻结文件不唯一都会拒绝。旧矩阵若漏记角色，不能用于正式统计，不补写旧报告。设备基线可用 `devices[].matrixInfoSha256` 约束矩阵中 `info` 对象的规范 JSON 哈希；说明性环境信息可放在 `environmentFingerprint`。
 
 正式计划的轮数、阈值、应用版本、准备步骤和场景范围由使用者确定，工具没有内置“正式通过”的默认数值。冻结后更换脚本、实现、应用文件或参数，应另建计划。
 
-应用指纹只核对本机文件，不能证明手机安装的正是这个 HAP。`environmentFingerprint` 是说明记录，不会自动探测或核验；可选的 `matrixInfoSha256` 只约束矩阵实际采集的字段。安装包、系统版本和准备状态仍须按准备步骤与人工复核确认。
+每个 profile 声明 `applicationVersion: {"versionCode":"1","versionName":"1.0.0"}`，版本以实际应用为准。对每个使用中的 profile/设备组合，在执行前保存一份安装准备记录，并在计划的 `preparations` 数组中填写其 `path` 与 `sha256`。准备记录示例字段如下；其中时间、UUID、文件路径、哈希和版本必须来自实际操作，不可直接照填：
+
+```json
+{
+  "protocol": "maestro.harmonyos.validation-preparation",
+  "schemaVersion": 1,
+  "preparationId": "本次准备的 UUID",
+  "planId": "与源计划一致的 ID",
+  "profileId": "demo",
+  "deviceId": "实际设备编号",
+  "application": {
+    "bundleId": "com.example.demo", "moduleName": "entry", "abilityName": "EntryAbility",
+    "versionCode": "1", "versionName": "1.0.0",
+    "hap": {"path": "app.hap", "sha256": "与 applicationFingerprint 完全一致的哈希"}
+  },
+  "installation": {
+    "basis": "operator_attested", "installedAt": "实际安装的 UTC ISO 时间",
+    "record": {"path": "install.txt", "sha256": "安装记录的哈希"}
+  },
+  "packageObservation": {
+    "basis": "operator_attested", "observedAt": "核对应用版本的 UTC ISO 时间",
+    "bundleId": "com.example.demo", "versionCode": "1", "versionName": "1.0.0",
+    "record": {"path": "package.txt", "sha256": "版本核对记录的哈希"}
+  },
+  "preparation": {
+    "basis": "operator_attested", "completedAt": "完成准备的 UTC ISO 时间",
+    "procedureSha256": "preparationProcedure 原字符串 UTF-8 字节的 SHA-256",
+    "record": {"path": "prepare.txt", "sha256": "准备操作记录的哈希"}
+  }
+}
+```
+
+这些路径相对准备记录文件。安装记录写明设备、安装包和安装结果；版本记录写明包名和核对到的版本；准备记录说明初始数据、账号与界面状态。三份记录分开保存，不能跨设备复用。HAP 必须命中冻结的应用指纹；安装、版本核对、准备完成的时间依次排列，均发生在冻结前。
+
+当前入口支持人工安装和人工核对，依据明确记为 `operator_attested`。它检查文件与关联，不会自动安装，也不读取手机中已安装 HAP 的完整字节。`device_observed` 尚未支持，不能用这个标签把手工填写的版本变成设备自动观测。`environmentFingerprint` 仍是说明记录。
+
+正式审核使用 review v2，除人工干预和视频字段外，每个槽位还要增加：
+
+```json
+{
+  "preparation": {
+    "preparationSha256": "本槽位 profile/设备对应的冻结准备记录哈希",
+    "installationUnchanged": true,
+    "preparationUnchanged": true
+  }
+}
+```
+
+两个布尔值须按本轮实际情况填写，不能由 `manualIntervention=none` 推导。缺少记录、哈希不符、引用被删改或任何一项为 false，均不能正式合格。运行后更换或删除本地 HAP 不会抹去已核验的原执行通过数，但旧准备证据不能再用于正式审核。
+
+输入 v1 的开发计划仍可冻结为新的 v2 产物；新正式执行必须使用 v2。旧冻结 v1 可以复核原始记录，但不允许派发新执行，也不会升级为正式合格。review v1 可用于人工干预和视频复核，不能补齐 v2 的准备证据。旧原件及 v1 Schema 保留。
 
 进程被强制终止时，设备预约会留在 `running` 或 `needs_inspection`。新任务拒绝覆盖它。按 [CI 文档](ci.md) 完成原会话恢复与 `-ReconcileOnly` 核销；验证工具不自动恢复、不删除门禁、不重放未知动作。恢复结果不会把旧计划的未知或未执行槽位改为成功。
 
