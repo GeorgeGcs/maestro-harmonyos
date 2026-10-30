@@ -416,6 +416,8 @@ Windows 原子替换遇到 `AccessDeniedException` 时，`HarmonyOSJournalFileWr
 
 协议默认保持 v1。调用方的首条 `agent.describe {schemaVersion:2}` 显式启用 v2，之后版本固定；新增的 `agent.recover` 返回独立恢复报告，原尝试的结果、错误、副作用和证据文件均不改写。恢复报告先写入不可覆盖的本地审计文件，再更新 owner 记录，并返回报告路径与 SHA-256。恢复成功只确认旧资源收尾，后续执行仍需新建会话并实际取得设备锁。
 
+主机维护的基础工具另提供 Windows 启动观察，组合无损 uptime、最近启动时间、主机绑定和工具指纹判断主机启动变化。它尚未接入会话释放；主机条件通过不能代替设备命令终结或资源清理证明。入口、判据和限制见 [Windows 主机启动观察](host-boot-observation.md)。
+
 [协议客户端示例](../examples/agent-client/README.md)使用 Node.js 内置模块启动实际 CLI，通过 JSONL 完成预检、执行、查询、取消、恢复和可选 YAML 接管。调用超时只查询原尝试，不重发动作；证据和恢复报告核对真实路径归属及文件哈希。示例将每次调用的材料独立保存，方便使用方排查原执行与后续恢复各自发生了什么。
 
 ## 18. 重试追踪与验证计划
