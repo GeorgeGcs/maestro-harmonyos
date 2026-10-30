@@ -9914,6 +9914,81 @@ index 0000000..b7ea2b2
 +
 +    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt
+new file mode 100644
+index 0000000..e7ac48d
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt
+@@ -0,0 +1,69 @@
++package maestro.harmonyos.hdc
++
++import java.io.FileOutputStream
++import java.nio.file.AccessDeniedException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.util.UUID
++import java.util.concurrent.TimeUnit
++
++/** Retries only replacement of the same already-flushed bytes, never device work. */
++internal class HarmonyOSJournalFileWriter(
++    private val move: (Path, Path) -> Unit = { source, target ->
++        Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++        Unit
++    },
++    private val nanoTime: () -> Long = System::nanoTime,
++    private val pause: (Long) -> Unit = Thread::sleep,
++    private val delete: (Path) -> Unit = { Files.deleteIfExists(it); Unit },
++) {
++    fun write(path: Path, bytes: ByteArray) {
++        interrupted()
++        val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
++        var primary: Throwable? = null
++        try {
++            FileOutputStream(staging.toFile()).use { stream -> stream.write(bytes); stream.fd.sync() }
++            val started = nanoTime()
++            var attempts = 0
++            while (true) {
++                interrupted()
++                try {
++                    attempts++
++                    move(staging, path)
++                    return
++                } catch (error: AccessDeniedException) {
++                    val remaining = RETRY_BUDGET_NANOS - (nanoTime() - started)
++                    if (attempts >= MAX_ATTEMPTS || remaining <= 0) throw error
++                    val waitMillis = minOf(10L shl (attempts - 1), TimeUnit.NANOSECONDS.toMillis(remaining))
++                    if (waitMillis <= 0) throw error
++                    interrupted()
++                    try { pause(waitMillis) } catch (interruption: InterruptedException) {
++                        Thread.currentThread().interrupt()
++                        throw interruption
++                    }
++                    interrupted()
++                    if (nanoTime() - started >= RETRY_BUDGET_NANOS) throw error
++                }
++            }
++        } catch (error: Throwable) {
++            primary = error
++            throw error
++        } finally {
++            try { delete(staging) } catch (cleanup: Throwable) {
++                val original = primary
++                if (original == null) throw cleanup
++                if (cleanup !== original) original.addSuppressed(cleanup)
++            }
++        }
++    }
++
++    private fun interrupted() {
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("Interrupted while persisting the recovery journal")
++    }
++
++    private companion object {
++        const val MAX_ATTEMPTS = 5
++        val RETRY_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(200)
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
 index 0000000..f8ced01
@@ -10375,24 +10450,22 @@ index 0000000..f8ced01
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..9bc7757
+index 0000000..b72c991
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,425 @@
+@@ -0,0 +1,495 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import com.fasterxml.jackson.core.JsonParser
 +import com.fasterxml.jackson.databind.DeserializationFeature
 +import com.fasterxml.jackson.databind.JsonNode
-+import java.io.FileOutputStream
 +import java.nio.channels.FileChannel
 +import java.nio.channels.FileLock
 +import java.nio.channels.OverlappingFileLockException
 +import java.nio.file.Files
 +import java.nio.file.LinkOption
 +import java.nio.file.Path
-+import java.nio.file.StandardCopyOption
 +import java.nio.file.StandardOpenOption
 +import java.security.MessageDigest
 +import java.time.Duration
@@ -10420,11 +10493,17 @@ index 0000000..9bc7757
 +    private val state: State,
 +    private val ownerChannel: FileChannel,
 +    private val ownerLock: FileLock,
++    private val writeState: (Path, ByteArray) -> Unit = HarmonyOSJournalFileWriter()::write,
 +) : AutoCloseable {
 +    val deviceId: String get() = state.deviceId
 +    val ownerId: String get() = state.ownerId
 +    private var activeCalls = 0
 +    private var closed = false
++    private var persistenceUnconfirmed = false
++    private class DispatchBoundary(val parent: DispatchBoundary?, var entered: Boolean = false)
++    private class BeforeDispatchFailure(val boundary: DispatchBoundary, val original: Throwable) :
++        RuntimeException(original.message, original)
++    private val dispatchBoundary = ThreadLocal<DispatchBoundary>()
 +    var recordings: HarmonyOSRecordingResourceJournal? = null
 +        private set
 +
@@ -10499,10 +10578,17 @@ index 0000000..9bc7757
 +    }
 +
 +    internal fun shell(arguments: List<String>, recoverable: Boolean, allowSealed: Boolean = false, execute: (List<String>) -> HdcCommandResult): HdcCommandResult {
-+        val operation = synchronized(this) {
++        val (operation, previousRootRemoved) = synchronized(this) {
 +            if (allowSealed) { ensureOpen(); check(state.sealed && recoverable) } else requireDispatch()
-+            Operation(UUID.randomUUID().toString(), UUID.randomUUID().toString(), hash(mapper.writeValueAsBytes(arguments)), recoverable)
-+                .also { state.rootRemoved = false; state.operations += it; persist() }
++            val previousRootRemoved = state.rootRemoved
++            val operation = Operation(UUID.randomUUID().toString(), UUID.randomUUID().toString(), hash(mapper.writeValueAsBytes(arguments)), recoverable)
++            state.rootRemoved = false
++            state.operations += operation
++            try { persist() } catch (failure: Throwable) {
++                rollbackOperation(operation, previousRootRemoved, failure)
++                throw failure
++            }
++            operation to previousRootRemoved
 +        }
 +        val proof = proof(operation)
 +        val directory = "${state.remoteRoot}/${operation.id}"
@@ -10524,9 +10610,21 @@ index 0000000..9bc7757
 +            append("printf '\\n${ack}%s\\n' \"\$__maestro_recovery_status\"; exit \"\$__maestro_recovery_status\"")
 +        }
 +        var error: HdcCommandException? = null
-+        val result = try { execute(listOf("sh", "-c", script)) } catch (failure: HdcCommandException) {
++        val previousBoundary = dispatchBoundary.get()
++        val boundary = DispatchBoundary(previousBoundary)
++        dispatchBoundary.set(boundary)
++        val result = try { execute(listOf("sh", "-c", script)) } catch (failure: BeforeDispatchFailure) {
++            // Only hostCall's own failed registration can supply this private, scoped proof.
++            // A callback entered earlier in this scope (including Process.start/observer) forbids rollback.
++            if (failure.boundary === boundary && !boundary.entered) synchronized(this) {
++                rollbackOperation(operation, previousRootRemoved, failure.original)
++            }
++            throw failure.original
++        } catch (failure: HdcCommandException) {
 +            error = failure
 +            failure.result
++        } finally {
++            if (previousBoundary == null) dispatchBoundary.remove() else dispatchBoundary.set(previousBoundary)
 +        }
 +        val completion = Regex("\\r?\\n" + Regex.escape(ack) + "([0-9]{1,3})\\r?\\n?$").find(result.stdout)
 +        val completedStatus = completion?.groupValues?.get(1)?.toIntOrNull()
@@ -10542,16 +10640,37 @@ index 0000000..9bc7757
 +    }
 +
 +    internal fun <T> hostCall(allowSealed: Boolean = false, execute: ((HostProcess) -> Unit) -> T): T {
++        val boundary = dispatchBoundary.get()
 +        val call = synchronized(this) {
 +            if (allowSealed) ensureOpen() else requireDispatch()
-+            HostCall(UUID.randomUUID().toString()).also { state.hostCalls += it; activeCalls++; persist() }
++            val call = HostCall(UUID.randomUUID().toString())
++            state.hostCalls += call
++            activeCalls++
++            try { persist() } catch (failure: Throwable) {
++                state.hostCalls.remove(call)
++                activeCalls--
++                persistRollback(failure)
++                if (boundary != null && !boundary.entered) throw BeforeDispatchFailure(boundary, failure)
++                throw failure
++            }
++            call
 +        }
++        // Set before entering any runner, not after a PID observer: starting may already have effects.
++        var enteredBoundary = boundary
++        while (enteredBoundary != null) {
++            enteredBoundary.entered = true
++            enteredBoundary = enteredBoundary.parent
++        }
++        var primary: Throwable? = null
 +        try {
 +            return execute { identity ->
 +                synchronized(this) {
 +                    if (identity !in call.processes) { call.processes += identity; persist() }
 +                }
 +            }
++        } catch (failure: Throwable) {
++            primary = failure
++            throw failure
 +        } finally {
 +            synchronized(this) {
 +                call.returned = true
@@ -10559,7 +10678,11 @@ index 0000000..9bc7757
 +                // return only after their own finite work has unwound.
 +                call.stopped = if (call.processes.isEmpty()) true else call.processes.all(::processStopped)
 +                activeCalls--
-+                persist()
++                try { persist() } catch (failure: Throwable) {
++                    val original = primary
++                    if (original == null) throw failure
++                    if (failure !== original) original.addSuppressed(failure)
++                }
 +            }
 +        }
 +    }
@@ -10676,6 +10799,7 @@ index 0000000..9bc7757
 +    }
 +    private fun report(extra: List<RecoveryIssue> = emptyList()): RecoveryReport {
 +        val issues = extra.toMutableList()
++        if (persistenceUnconfirmed) issues += RecoveryIssue("JOURNAL_PERSISTENCE_UNCONFIRMED", "The latest journal state has not been durably confirmed.")
 +        if (!state.sealed) issues += RecoveryIssue("SESSION_ACTIVE", "The journal is not sealed against new dispatch.")
 +        if (activeCalls != 0) issues += RecoveryIssue("HOST_CALL_ACTIVE", "A local invocation is still active.")
 +        if (state.hostCalls.any { !it.stopped }) issues += RecoveryIssue("HOST_PROCESS_UNCONFIRMED", "A native invocation has no confirmed termination.")
@@ -10687,13 +10811,31 @@ index 0000000..9bc7757
 +            state.operations.count { !it.completed }, state.temporaryFiles.size, issues.distinct())
 +    }
 +    private fun ensureOpen() = check(!closed) { "Recovery journal is closed." }
-+    private fun requireDispatch() { ensureOpen(); check(!state.sealed) { "Recovery journal is sealed; no new dispatch is allowed." } }
++    private fun requireDispatch() {
++        ensureOpen()
++        check(!state.sealed) { "Recovery journal is sealed; no new dispatch is allowed." }
++        check(!persistenceUnconfirmed) { "Recovery journal persistence is unconfirmed; no new dispatch is allowed." }
++    }
++    private fun rollbackOperation(operation: Operation, previousRootRemoved: Boolean, failure: Throwable) {
++        state.operations.remove(operation)
++        // Another thread may have registered or dispatched work while this callback unwound.
++        if (previousRootRemoved && state.operations.all { it.markerRemoved } &&
++            (state.temporaryFiles.isEmpty() || state.operations.isEmpty())) state.rootRemoved = true
++        persistRollback(failure)
++    }
++    private fun persistRollback(original: Throwable) {
++        try { persist() } catch (failure: Throwable) {
++            if (failure !== original) original.addSuppressed(failure)
++        }
++    }
 +    private fun persist() {
-+        val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
 +        try {
-+            FileOutputStream(staging.toFile()).use { stream -> stream.write(mapper.writeValueAsBytes(state)); stream.fd.sync() }
-+            Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-+        } finally { Files.deleteIfExists(staging) }
++            writeState(path, mapper.writeValueAsBytes(state))
++            persistenceUnconfirmed = false
++        } catch (failure: Throwable) {
++            persistenceUnconfirmed = true
++            throw failure
++        }
 +    }
 +
 +    companion object {
@@ -10726,13 +10868,16 @@ index 0000000..9bc7757
 +                !external
 +            }
 +        }
-+        fun create(path: Path, deviceId: String, ownerId: String): HarmonyOSRecoveryJournal {
++        fun create(path: Path, deviceId: String, ownerId: String): HarmonyOSRecoveryJournal =
++            create(path, deviceId, ownerId, HarmonyOSJournalFileWriter()::write)
++
++        internal fun create(path: Path, deviceId: String, ownerId: String, writeState: (Path, ByteArray) -> Unit): HarmonyOSRecoveryJournal {
 +            require(uuid(ownerId) && deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*")))
 +            val generation = UUID.randomUUID().toString()
 +            return locked(path) { file, channel, lock ->
 +                require(!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) { "Recovery journal already exists." }
 +                HarmonyOSRecoveryJournal(file, State(deviceId = deviceId, ownerId = ownerId, generation = generation,
-+                    remoteRoot = "/data/local/tmp/maestro-session-$generation"), channel, lock).also { it.persist() }
++                    remoteRoot = "/data/local/tmp/maestro-session-$generation"), channel, lock, writeState).also { it.persist() }
 +            }
 +        }
 +        fun open(path: Path): HarmonyOSRecoveryJournal = locked(path) { file, channel, lock ->
@@ -14237,6 +14382,121 @@ index 0000000..93af213
 +            else int(bytes.size + 8) + type.toByteArray() + bytes
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSJournalFileWriterTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSJournalFileWriterTest.kt
+new file mode 100644
+index 0000000..3d213c2
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSJournalFileWriterTest.kt
+@@ -0,0 +1,109 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.IOException
++import java.nio.file.AccessDeniedException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.util.concurrent.TimeUnit
++
++class HarmonyOSJournalFileWriterTest {
++    @TempDir lateinit var directory: Path
++    private fun target() = directory.resolve("journal.json")
++    private fun replace(source: Path, target: Path) {
++        Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++    }
++
++    @Test fun `transient access denial retries identical flushed staging bytes and commits once`() {
++        Files.writeString(target(), "old")
++        val sources = mutableListOf<Path>()
++        var now = 0L
++        val pauses = mutableListOf<Long>()
++        HarmonyOSJournalFileWriter(move = { source, destination ->
++            sources.add(source)
++            assertThat(Files.readString(source)).isEqualTo("new")
++            if (sources.size < 3) {
++                assertThat(Files.readString(destination)).isEqualTo("old")
++                throw AccessDeniedException(source.toString(), destination.toString(), null)
++            }
++            replace(source, destination)
++        }, nanoTime = { now }, pause = { pauses += it; now += TimeUnit.MILLISECONDS.toNanos(it) }).write(target(), "new".toByteArray())
++        assertThat(sources).hasSize(3)
++        assertThat(sources.distinct()).hasSize(1)
++        assertThat(pauses).containsExactly(10L, 20L).inOrder()
++        assertThat(Files.readString(target())).isEqualTo("new")
++        Files.list(directory).use { assertThat(it.count()).isEqualTo(1) }
++    }
++
++    @Test fun `persistent access denial is bounded and preserves committed bytes`() {
++        Files.writeString(target(), "old")
++        var attempts = 0
++        var now = 0L
++        val writer = HarmonyOSJournalFileWriter(move = { source, destination ->
++            attempts++
++            throw AccessDeniedException(source.toString(), destination.toString(), null)
++        }, nanoTime = { now }, pause = { now += TimeUnit.MILLISECONDS.toNanos(it) })
++        assertThrows(AccessDeniedException::class.java) { writer.write(target(), "new".toByteArray()) }
++        assertThat(attempts).isEqualTo(5)
++        assertThat(now).isEqualTo(TimeUnit.MILLISECONDS.toNanos(150))
++        assertThat(Files.readString(target())).isEqualTo("old")
++        Files.list(directory).use { assertThat(it.count()).isEqualTo(1) }
++    }
++
++    @Test fun `elapsed move time consumes the same monotonic retry budget`() {
++        Files.writeString(target(), "old")
++        var attempts = 0
++        var now = 0L
++        val writer = HarmonyOSJournalFileWriter(move = { source, destination ->
++            attempts++; now += TimeUnit.MILLISECONDS.toNanos(195)
++            throw AccessDeniedException(source.toString(), destination.toString(), null)
++        }, nanoTime = { now }, pause = { now += TimeUnit.MILLISECONDS.toNanos(it) })
++        assertThrows(AccessDeniedException::class.java) { writer.write(target(), "new".toByteArray()) }
++        assertThat(attempts).isEqualTo(1)
++        assertThat(now).isEqualTo(TimeUnit.MILLISECONDS.toNanos(200))
++        assertThat(Files.readString(target())).isEqualTo("old")
++    }
++
++    @Test fun `other IO failures never retry and cleanup cannot hide the original`() {
++        Files.writeString(target(), "old")
++        val primary = IOException("replacement failed")
++        val cleanup = IOException("staging cleanup failed")
++        var attempts = 0
++        val writer = HarmonyOSJournalFileWriter(move = { _, _ -> attempts++; throw primary },
++            pause = { error("Must not wait") }, delete = { throw cleanup })
++        assertThat(assertThrows(IOException::class.java) { writer.write(target(), "new".toByteArray()) }).isSameInstanceAs(primary)
++        assertThat(primary.suppressed.toList()).containsExactly(cleanup)
++        assertThat(attempts).isEqualTo(1)
++        assertThat(Files.readString(target())).isEqualTo("old")
++    }
++
++    @Test fun `preexisting interruption prevents staging or a move and preserves interrupt status`() {
++        Files.writeString(target(), "old")
++        Thread.currentThread().interrupt()
++        try {
++            assertThrows(InterruptedException::class.java) {
++                HarmonyOSJournalFileWriter(move = { _, _ -> error("Must not move") }).write(target(), "new".toByteArray())
++            }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            Files.list(directory).use { assertThat(it.count()).isEqualTo(1) }
++        } finally { Thread.interrupted() }
++    }
++
++    @Test fun `interruption during backoff stops before another attempt and restores status`() {
++        Files.writeString(target(), "old")
++        var attempts = 0
++        val writer = HarmonyOSJournalFileWriter(move = { source, destination ->
++            attempts++; throw AccessDeniedException(source.toString(), destination.toString(), null)
++        }, pause = { throw InterruptedException("wait interrupted") })
++        try {
++            assertThrows(InterruptedException::class.java) { writer.write(target(), "new".toByteArray()) }
++            assertThat(Thread.currentThread().isInterrupted).isTrue()
++            assertThat(attempts).isEqualTo(1)
++        } finally { Thread.interrupted() }
++        assertThat(Files.readString(target())).isEqualTo("old")
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
 index 0000000..5943dcf
@@ -14926,6 +15186,284 @@ index 0000000..5943dcf
 +            val innerStatus = if (marker == null) "" else "\n$marker$status\n"
 +            afterReply(command)
 +            return HdcCommandResult(0, "$output$innerStatus\n$acknowledgement$status\n", if (isTest) testStderr else "")
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalPersistenceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalPersistenceTest.kt
+new file mode 100644
+index 0000000..d2de8a9
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalPersistenceTest.kt
+@@ -0,0 +1,272 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.IOException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicInteger
++import java.util.concurrent.atomic.AtomicReference
++
++class HarmonyOSRecoveryJournalPersistenceTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private fun file() = directory.resolve("journal.json")
++    private fun state() = mapper.readTree(file().toFile())
++    private val unavailable = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device query expected") })
++
++    private inner class Writer {
++        var fail: (JsonNode) -> Boolean = { false }
++        val failure = IOException("Injected journal persistence failure")
++        private val real = HarmonyOSJournalFileWriter()
++        fun write(path: Path, bytes: ByteArray) {
++            if (fail(mapper.readTree(bytes))) throw failure
++            real.write(path, bytes)
++        }
++    }
++    private fun create(writer: Writer) = HarmonyOSRecoveryJournal.create(file(), "fixture-target", UUID.randomUUID().toString(), writer::write)
++
++    @Test fun `failed shell registration never executes or survives close as pending`() {
++        val writer = Writer()
++        val journal = create(writer)
++        var failed = false
++        writer.fail = { it["operations"].size() == 1 && !failed.also { failed = true } }
++        var dispatched = 0
++        assertThat(assertThrows(IOException::class.java) {
++            journal.shell(listOf("uitest", "dumpLayout"), true) { dispatched++; error("Must not execute") }
++        }).isSameInstanceAs(writer.failure)
++        assertThat(dispatched).isEqualTo(0)
++        assertThat(state()["operations"].size()).isEqualTo(0)
++        assertThat(state()["rootRemoved"].asBoolean()).isTrue()
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { assertThat(it.recover(unavailable).state).isEqualTo("complete") }
++    }
++
++    @Test fun `failed registration retains previous pending operation and root ownership`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            assertThrows(HdcException::class.java) { journal.shell(listOf("uitest", "dumpLayout"), true) { HdcCommandResult(0, "no proof", "") } }
++            val oldId = state()["operations"][0]["id"].asText()
++            var failed = false
++            writer.fail = { it["operations"].size() == 2 && !failed.also { failed = true } }
++            assertThrows(IOException::class.java) { journal.shell(listOf("uitest", "uiInput"), true) { error("Must not execute") } }
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["operations"][0]["id"].asText()).isEqualTo(oldId)
++            assertThat(state()["rootRemoved"].asBoolean()).isFalse()
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++    }
++
++    @Test fun `failed standalone host registration removes call and active count before close`() {
++        val writer = Writer()
++        val journal = create(writer)
++        var failed = false
++        writer.fail = { it["hostCalls"].size() == 1 && !failed.also { failed = true } }
++        var entered = false
++        assertThat(assertThrows(IOException::class.java) { journal.hostCall { entered = true; Unit } }).isSameInstanceAs(writer.failure)
++        assertThat(entered).isFalse()
++        assertThat(journal.snapshot().issues.map { it.code }).doesNotContain("HOST_CALL_ACTIVE")
++        assertThat(state()["hostCalls"].size()).isEqualTo(0)
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { assertThat(it.recover(unavailable).state).isEqualTo("complete") }
++    }
++
++    @Test fun `nested host registration failure also rolls back the already committed shell operation`() {
++        val writer = Writer()
++        val journal = create(writer)
++        var failed = false
++        writer.fail = { it["hostCalls"].size() == 1 && !failed.also { failed = true } }
++        val dispatches = AtomicInteger()
++        val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> dispatches.incrementAndGet(); error("Must not dispatch") }).withRecoveryJournal(journal)
++        assertThat(assertThrows(IOException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }).isSameInstanceAs(writer.failure)
++        assertThat(dispatches.get()).isEqualTo(0)
++        assertThat(state()["operations"].size()).isEqualTo(0)
++        assertThat(state()["hostCalls"].size()).isEqualTo(0)
++        assertThat(state()["rootRemoved"].asBoolean()).isTrue()
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { assertThat(it.recover(unavailable).state).isEqualTo("complete") }
++    }
++
++    @Test fun `failed rollback remains unknown and forbids new normal dispatch until persisted`() {
++        val writer = Writer()
++        val journal = create(writer)
++        writer.fail = { true }
++        assertThrows(IOException::class.java) { journal.shell(listOf("uitest", "dumpLayout"), true) { error("Must not execute") } }
++        assertThat(journal.snapshot().state).isEqualTo("unknown")
++        assertThat(journal.snapshot().issues.map { it.code }).contains("JOURNAL_PERSISTENCE_UNCONFIRMED")
++        assertThrows(IllegalStateException::class.java) { journal.hostCall { error("Must not execute") } }
++        writer.fail = { false }
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { assertThat(it.recover(unavailable).state).isEqualTo("complete") }
++    }
++
++    @Test fun `ordinary failure after transport entry cannot roll back a dispatched operation`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            val failure = IOException("Transport entered; response unavailable")
++            var entered = 0
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> entered++; throw failure }).withRecoveryJournal(journal)
++            assertThat(assertThrows(IOException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }).isSameInstanceAs(failure)
++            assertThat(entered).isEqualTo(1)
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["hostCalls"].size()).isEqualTo(1)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++        HarmonyOSRecoveryJournal.open(file()).use { journal ->
++            var queries = 0
++            val noProof = HdcClient("fake", HdcCommandRunner { _, _ -> queries++; HdcCommandResult(0, "", "") })
++            assertThat(journal.recover(noProof).issues.map { it.code }).contains("REMOTE_COMPLETION_UNCONFIRMED")
++            assertThat(queries).isEqualTo(1)
++        }
++    }
++
++    @Test fun `a later pre-execute failure cannot erase an earlier dispatch in the same shell scope`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            var failed = false
++            writer.fail = { it["hostCalls"].size() == 2 && !failed.also { failed = true } }
++            var entered = 0
++            assertThrows(IOException::class.java) {
++                journal.shell(listOf("uitest", "dumpLayout"), true) {
++                    journal.hostCall { entered++ }
++                    journal.hostCall { error("Second transport must not enter") }
++                    HdcCommandResult(0, "", "")
++                }
++            }
++            assertThat(entered).isEqualTo(1)
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["hostCalls"].size()).isEqualTo(1)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++    }
++
++    @Test fun `rollback cannot reset root removed over a concurrently registered operation`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            val firstRegistered = CountDownLatch(1)
++            val secondRegistered = CountDownLatch(1)
++            val failure = AtomicReference<Throwable?>()
++            var failed = false
++            writer.fail = { Thread.currentThread().name == "registration-failure" && it["hostCalls"].size() == 1 && !failed.also { failed = true } }
++            val first = Thread({
++                try {
++                    journal.shell(listOf("uitest", "first"), true) {
++                        firstRegistered.countDown()
++                        check(secondRegistered.await(5, TimeUnit.SECONDS))
++                        journal.hostCall { error("Must not execute first operation") }
++                        HdcCommandResult(0, "", "")
++                    }
++                } catch (error: Throwable) { failure.set(error) }
++            }, "registration-failure")
++            first.start()
++            try {
++                check(firstRegistered.await(5, TimeUnit.SECONDS))
++                assertThrows(HdcException::class.java) { journal.shell(listOf("uitest", "second"), true) { HdcCommandResult(0, "unconfirmed", "") } }
++                val secondId = state()["operations"].last()["id"].asText()
++                secondRegistered.countDown()
++                first.join(5_000)
++                assertThat(first.isAlive).isFalse()
++                assertThat(failure.get()).isSameInstanceAs(writer.failure)
++                assertThat(state()["operations"].size()).isEqualTo(1)
++                assertThat(state()["operations"][0]["id"].asText()).isEqualTo(secondId)
++                assertThat(state()["rootRemoved"].asBoolean()).isFalse()
++            } finally { secondRegistered.countDown(); first.interrupt(); first.join(5_000) }
++        }
++    }
++
++    @Test fun `nested shell dispatch also prevents rollback of its enclosing callback`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            var failed = false
++            writer.fail = { it["hostCalls"].size() == 2 && !failed.also { failed = true } }
++            assertThrows(IOException::class.java) {
++                journal.shell(listOf("uitest", "outer"), true) {
++                    journal.shell(listOf("uitest", "inner"), true) {
++                        journal.hostCall {
++                            val token = state()["operations"].last()["token"].asText().replace("-", "")
++                            HdcCommandResult(0, "\nMAESTRO_RECOVERY_$token=0\n", "")
++                        }
++                    }
++                    journal.hostCall { error("Must not enter this later transport") }
++                    HdcCommandResult(0, "", "")
++                }
++            }
++            assertThat(state()["operations"].size()).isEqualTo(2)
++            assertThat(state()["operations"][0]["completed"].asBoolean()).isFalse()
++            assertThat(state()["operations"][1]["completed"].asBoolean()).isTrue()
++        }
++    }
++
++    @Test fun `transport error remains primary when recording its return also fails`() {
++        val writer = Writer()
++        val journal = create(writer)
++        val transportFailure = IOException("Actual transport failure")
++        writer.fail = { it["hostCalls"].any { call -> call["returned"].asBoolean() } }
++        val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> throw transportFailure }).withRecoveryJournal(journal)
++        assertThat(assertThrows(IOException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }).isSameInstanceAs(transportFailure)
++        assertThat(transportFailure.suppressed.toList()).contains(writer.failure)
++        assertThat(journal.snapshot().issues.map { it.code }).contains("JOURNAL_PERSISTENCE_UNCONFIRMED")
++        assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        writer.fail = { false }
++        journal.close()
++        assertThat(state()["operations"].size()).isEqualTo(1)
++    }
++
++    @Test fun `acknowledged operation is retained when persisting its completion fails`() {
++        val writer = Writer()
++        create(writer).use { journal ->
++            var failed = false
++            writer.fail = { it["operations"].any { op -> op["completed"].asBoolean() } && !failed.also { failed = true } }
++            var entered = 0
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ ->
++                entered++
++                val token = state()["operations"].last()["token"].asText().replace("-", "")
++                HdcCommandResult(0, "\nMAESTRO_RECOVERY_$token=0\n", "")
++            }).withRecoveryJournal(journal)
++            assertThat(assertThrows(IOException::class.java) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }).isSameInstanceAs(writer.failure)
++            assertThat(entered).isEqualTo(1)
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["operations"][0]["completed"].asBoolean()).isFalse()
++            assertThat(journal.snapshot().issues.map { it.code }).contains("JOURNAL_PERSISTENCE_UNCONFIRMED")
++        }
++        assertThat(state()["operations"].size()).isEqualTo(1)
++        assertThat(state()["operations"][0]["completed"].asBoolean()).isTrue()
++    }
++
++    @Test fun `failure recording a started native process retains its identity and pending command`() {
++        val writer = Writer()
++        val observedPid = AtomicReference<Long>()
++        create(writer).use { journal ->
++            var failed = false
++            writer.fail = { state ->
++                val processes = state["hostCalls"].lastOrNull()?.get("processes")
++                if (processes != null && !processes.isEmpty && !failed) {
++                    failed = true; observedPid.set(processes[0]["pid"].asLong()); true
++                } else false
++            }
++            assertThat(assertThrows(IOException::class.java) {
++                journal.shell(listOf("uitest", "dumpLayout"), true) {
++                    journal.hostCall { observer ->
++                        ProcessHdcCommandRunner().runObserved(HdcProcessTestChild.command("sleep", directory.resolve("owned-child.pid").toString()), Duration.ofSeconds(10), observer)
++                    }
++                }
++            }).isSameInstanceAs(writer.failure)
++            assertThat(ProcessHandle.of(observedPid.get()).map { it.isAlive }.orElse(false)).isFalse()
++            assertThat(state()["hostCalls"][0]["processes"][0]["pid"].asLong()).isEqualTo(observedPid.get())
++            assertThat(state()["hostCalls"][0]["returned"].asBoolean()).isTrue()
++            assertThat(state()["hostCalls"][0]["stopped"].asBoolean()).isTrue()
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            journal.seal()
++            val noProof = HdcClient("fake", HdcCommandRunner { _, _ -> HdcCommandResult(0, "", "") })
++            assertThat(journal.recover(noProof).issues.map { it.code }).contains("REMOTE_COMPLETION_UNCONFIRMED")
 +        }
 +    }
 +}
