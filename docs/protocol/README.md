@@ -5,8 +5,8 @@
 | 数据 | Schema | 说明 |
 | --- | --- | --- |
 | agent 消息 | [v1](agent-v1.schema.json)、[v2](agent-v2.schema.json) | [调用协议](../agent-protocol.md)，v2 需要显式协商 |
-| retry JSONL 每条事件 | [v1](retry-trace-v1.schema.json) | 实际步骤、源码和尝试上下文 |
-| retry 摘要 | [v1](retry-summary-v1.schema.json) | 完整性、首次通过与追踪文件引用 |
+| retry JSONL 每条事件 | 当前 [v2](retry-trace-v2.schema.json)，旧 [v1](retry-trace-v1.schema.json) | 实际步骤、登记的源码身份和尝试上下文 |
+| retry 摘要 | 当前 [v2](retry-summary-v2.schema.json)，旧 [v1](retry-summary-v1.schema.json) | 完整性、首次通过与同版本追踪文件引用 |
 | 用户输入的验证计划 | [v1](validation-plan-input-v1.schema.json) | 冻结前的计划输入 |
 | 已冻结验证计划 | [v1](validation-plan-v1.schema.json) | 工具记录的源码、配置和批次 |
 | 验证汇总 | [v1](validation-summary-v1.schema.json) | 每个运行槽位、原始状态、首次/最终计数和资格判断 |
@@ -19,5 +19,7 @@
 以上采用 JSON Schema 2020-12，检查 JSON 结构和局部约束。JSONL 应逐行检查。跨文件身份、文件哈希、事件顺序、重复 ID、步骤覆盖、计数及设备清理状态仍由运行验证器核验；Schema 通过不能直接作为运行成功或设备可接管的依据。读取器还应拒绝重复 JSON 键、尾随内容和超出读取预算的文件。
 
 重试事件、源码关联、冻结计划与人工审核字段见 [Retry 与验证计划协议](retry-and-validation.md)；录屏身份、阶段和内部凭据见[录屏资源格式](recording-resources.md)。
+
+retry v2 的 `sourceIdentity` 区分内容相同的不同来源文件。旧 v1 仍可读取，但只有内容哈希能唯一对应本次登记来源时，才可证明必测覆盖；v2 的源码步骤缺少身份时不会回退猜测。这次版本变化不修改 agent 消息、证据索引或旧产物。
 
 runner 控制记录、矩阵指针及控制索引是脚本间的内部接口，目前由 [CI 验证器](../../scripts/ci/verify-state.mjs) 和[验证计划入口](../../scripts/validation/main.mjs) 检查，不承诺独立的对外兼容接口。

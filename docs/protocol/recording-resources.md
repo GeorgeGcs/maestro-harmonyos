@@ -55,3 +55,5 @@ Test-Json -Json (Get-Content -LiteralPath './artifacts/video-check/verification.
 `verification.json` 记录输入、解码器与哈希、原始参数、起止时间、预算、实际退出码、帧数和结束标记；日志通过 `stdout`、`stderr` 引用同目录文件。执行失败可能发生在打开输入或启动解码器之前，此时尚未取得的值保留 null，`exitCode=null` 表示没有确认到进程退出码。
 
 `passed` 要求解码退出 0、未超时、收到结束标记、至少一帧、无错误，且前后输入哈希一致。Schema 约束这些字段的形态和固定值；两个哈希的相等性、日志内容和原文件字节需要实际验证。具体参数、使用方法和覆盖范围见[录屏检查与恢复](../recording-diagnostics.md)。
+
+可选 `-ReportPointerPath` 写独立指针：`protocol=maestro.harmonyos.recording-report-pointer`、`schemaVersion=1`、`reportPath`（本次报告绝对路径）和 `reportSha256`（封存字节的 SHA-256）。指针使用新路径原子发布，不修改解码报告 v1。消费者须限定报告属于本次唯一输出目录并核对哈希，再检查报告中的输入、解码器、日志和终态；失败报告也可有有效指针。

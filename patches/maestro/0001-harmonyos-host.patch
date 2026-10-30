@@ -5625,10 +5625,10 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..54eb6b9
+index 0000000..3cc31f8
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,594 @@
+@@ -0,0 +1,679 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -5661,6 +5661,7 @@ index 0000000..54eb6b9
 +import maestro.orchestra.debug.CommandDebugMetadata
 +import maestro.orchestra.debug.CommandOutcome
 +import maestro.orchestra.debug.FlowDebugOutput
++import maestro.orchestra.debug.OrchestraListener
 +import maestro.orchestra.debug.ExecutionContext
 +import maestro.orchestra.debug.ExecutionEvent
 +import maestro.orchestra.debug.ExecutionTraceArtifacts
@@ -5756,6 +5757,90 @@ index 0000000..54eb6b9
 +        assertThat(result["error"].isNull).isTrue()
 +        assertThat(result["failedStepId"].isNull).isTrue()
 +        assertThat(result["effects"].asText()).isEqualTo("possible")
++    }
++
++    @Test
++    fun `real optional retries retain Warned outcomes and count only actual extra attempts`() {
++        for (scenario in listOf("warning-without-retry", "recovered", "exhausted")) {
++            val maxRetries = if (scenario == "warning-without-retry") 0 else 1
++            val attempts = maxRetries + 1
++            val warned = scenario != "recovered"
++            val source = directory.resolve("optional-$scenario.yaml")
++            val condition = if (warned) "false" else "\${output.optionalAttempt >= 2}"
++            Files.writeString(source, """
++                appId: org.example.fixture
++                ---
++                - evalScript: ${'$'}{output.optionalAttempt = 0}
++                - retry:
++                    maxRetries: $maxRetries
++                    optional: true
++                    commands:
++                      - evalScript: ${'$'}{output.optionalAttempt += 1}
++                      - assertTrue: $condition
++                - assertTrue: ${'$'}{output.optionalAttempt == $attempts}
++            """.trimIndent())
++            val report = HarmonyOsCliAgentReport.create(directory.resolve("optional-$scenario"), null, null, 1,
++                "fixture-device", setOf(source.toFile()), emptyMap())
++            val commands = YamlCommandReader.readCommands(source)
++            val owner = commands.single { it.retryCommand != null }
++            val assertion = owner.retryCommand!!.commands.single { it.assertConditionCommand != null }
++            val tail = commands.last()
++            val bundle = Files.createDirectories(report.directory.resolve("flows/main"))
++            val observer = report.flow(source.toFile(), bundle, commands)
++            val retries = mutableListOf<RetryExecutionEvent>()
++            val outcomes = mutableListOf<Pair<MaestroCommand, CommandOutcome>>()
++            var traceEnd: ExecutionTraceEnd? = null
++            val native = object : OrchestraListener {
++                override fun onRetryExecution(event: RetryExecutionEvent) { retries += event }
++                override fun onCommandFinished(cmd: MaestroCommand, outcome: CommandOutcome, startedAt: Long, finishedAt: Long) {
++                    outcomes += cmd to outcome
++                }
++                override fun onExecutionTraceEnd(end: ExecutionTraceEnd) { traceEnd = end }
++            }
++            val returned = runBlocking {
++                Orchestra(recordingMaestro(null), artifactsDir = bundle, listeners = listOf(observer, native),
++                    onCommandStart = { index, command -> observer.starting(command, index) },
++                    onCommandFailed = { _, _, _ -> Orchestra.ErrorResolution.FAIL }).runFlow(commands)
++            }
++            observer.finished(returned)
++            report.finish(returned.success)
++
++            assertThat(returned.success).isTrue()
++            assertThat(retries.all { it.optional }).isTrue()
++            assertThat(retries.map { it.invocationId }.distinct()).hasSize(1)
++            assertThat(retries.filter { it.kind == "retryTryStarted" }.map { it.tryNo })
++                .containsExactlyElementsIn((1..attempts).toList()).inOrder()
++            assertThat(retries.filter { it.kind == "retryScheduled" }.map { it.tryNo })
++                .containsExactlyElementsIn((2..attempts).toList()).inOrder()
++            assertThat(retries.single { it.kind == "retryBlockFinished" }.outcome)
++                .isEqualTo(if (warned) "failed" else "completed")
++            assertThat(outcomes.single { it.first === owner }.second)
++                .isEqualTo(if (warned) CommandOutcome.Warned else CommandOutcome.Completed)
++            assertThat(outcomes.filter { it.first === assertion }).hasSize(attempts)
++            assertThat(outcomes.count { it.first === assertion && it.second is CommandOutcome.Failed })
++                .isEqualTo(if (warned) attempts else 1)
++            assertThat(outcomes.single { it.first === tail }.second).isEqualTo(CommandOutcome.Completed)
++            assertThat(checkNotNull(traceEnd).activeCommands).isEqualTo(0)
++            assertThat(checkNotNull(traceEnd).activeRetries).isEqualTo(0)
++
++            val summary = mapper.readTree(bundle.resolve("retry-summary.json").toFile())
++            assertThat(summary["state"].asText()).isEqualTo("complete")
++            assertThat(summary["retryUsed"].asBoolean()).isEqualTo(attempts > 1)
++            assertThat(summary["optionalRetryUsed"].asBoolean()).isEqualTo(attempts > 1)
++            assertThat(summary["firstPassStatus"].asText()).isEqualTo(if (attempts > 1) "not_passed" else "passed")
++            assertThat(summary["outcomeCounts"].path("Warned").asInt()).isEqualTo(if (warned) 1 else 0)
++            val events = Files.readAllLines(bundle.resolve("retry-trace.jsonl")).map { mapper.readTree(it) }
++            val block = events.single { it["event"].asText() == "retryBlockStarted" }
++            val ownerStep = events.single { it["event"].asText() == "stepFinished" && it["stepId"] == block["retryCommandStepId"] }
++            assertThat(ownerStep["outcome"].asText()).isEqualTo(if (warned) "Warned" else "Completed")
++            assertThat(events.last()["event"].asText()).isEqualTo("traceCompleted")
++            val saved = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++            assertThat(saved["status"].asText()).isEqualTo("passed")
++            assertThat(saved["error"].isNull).isTrue()
++            val entries = mapper.readTree(report.directory.resolve("evidence-index.json").toFile())["data"]["entries"]
++            assertThat(entries.single { it["stepId"] == ownerStep["stepId"] }["status"].asText())
++                .isEqualTo(if (warned) "skipped" else "passed")
++        }
 +    }
 +
 +    @Test
@@ -18241,10 +18326,10 @@ index 0000000..234a60f
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt
 new file mode 100644
-index 0000000..9e0e445
+index 0000000..e0e5d3c
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/test/RetryTraceIntegrationTest.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,230 @@
 +package maestro.test
 +
 +import com.google.common.truth.Truth.assertThat
@@ -18253,6 +18338,7 @@ index 0000000..9e0e445
 +import maestro.DeviceUnreachableException
 +import maestro.Maestro
 +import maestro.MaestroException
++import maestro.js.JsEvaluationException
 +import maestro.orchestra.ApplyConfigurationCommand
 +import maestro.orchestra.BackPressCommand
 +import maestro.orchestra.EvalScriptCommand
@@ -18406,6 +18492,45 @@ index 0000000..9e0e445
 +            assertThat(recorder.finished).isEmpty()
 +            recorder.assertClosed()
 +        }
++    }
++
++    @Test
++    fun `Graal script errors propagate out of retry without another attempt or tail command`() {
++        var calls = 0
++        val driver = object : FakeDriver() {
++            override fun backPress() { calls++; super.backPress() }
++        }
++        val broken = script("\${(() => { throw new Error('retry-graal-fixture') })()}")
++        val innerTail = back()
++        val outerTail = back()
++        val block = retry(listOf(back(), broken, innerTail), "3")
++        val recorder = Recorder()
++
++        val thrown = assertThrows<JsEvaluationException> {
++            run(driver, listOf(block, outerTail), recorder)
++        }
++
++        assertThat(thrown.message).contains("retry-graal-fixture")
++        assertThat(thrown).isNotInstanceOf(MaestroException::class.java)
++        assertThat(calls).isEqualTo(1)
++        assertThat(recorder.started.filter { it.command === broken }).hasSize(1)
++        assertThat(recorder.started.none { it.command === innerTail || it.command === outerTail }).isTrue()
++        assertThat(recorder.retries.map { it.kind }).containsExactly(
++            "retryBlockStarted", "retryTryStarted", "retryTryFinished", "retryBlockFinished",
++        ).inOrder()
++        assertThat(recorder.retries.single { it.kind == "retryTryStarted" }.tryNo).isEqualTo(1)
++        val failedTry = recorder.retries.single { it.kind == "retryTryFinished" }
++        assertThat(failedTry.outcome).isEqualTo("interrupted")
++        assertThat(failedTry.error).isInstanceOf(JsEvaluationException::class.java)
++        assertThat(generateSequence<Throwable>(thrown) { it.cause }.take(16).toList()).contains(failedTry.error)
++        assertThat(recorder.retries.last().outcome).isEqualTo("interrupted")
++        assertThat(recorder.retries.last().error).isSameInstanceAs(failedTry.error)
++        val scriptContext = recorder.started.single { it.command === broken }.context
++        assertThat(scriptContext.retryContext.map { it.tryNo }).containsExactly(1)
++        val scriptOutcome = recorder.finished.single { it.first == scriptContext }.second
++        assertThat(scriptOutcome).isInstanceOf(CommandOutcome.Failed::class.java)
++        assertThat((scriptOutcome as CommandOutcome.Failed).error).isSameInstanceAs(failedTry.error)
++        recorder.assertClosed()
 +    }
 +
 +    @Test

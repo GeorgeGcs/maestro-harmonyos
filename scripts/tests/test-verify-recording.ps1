@@ -10,23 +10,52 @@ $utf8 = [Text.UTF8Encoding]::new($false)
 $passed = 0
 function Assert-Test { param([bool]$Condition, [string]$Message) if (-not $Condition) { throw $Message } }
 function Invoke-Verification {
-    param([string]$InputFile, [string]$Decoder = $FfmpegPath, [int]$Budget = 10)
+    param([string]$InputFile, [string]$Decoder = $FfmpegPath, [int]$Budget = 10, [switch]$Pointer)
     $directory = Join-Path $testRoot ([guid]::NewGuid().ToString('N').Substring(0, 8))
-    $output = @(& $script -InputPath $InputFile -FfmpegPath $Decoder -OutputDirectory $directory -TimeoutSeconds $Budget)
+    $extra = @{}
+    if ($Pointer) { $extra.ReportPointerPath = Join-Path $testRoot ([guid]::NewGuid().ToString('N') + '.pointer.json') }
+    $output = @(& $script -InputPath $InputFile -FfmpegPath $Decoder -OutputDirectory $directory -TimeoutSeconds $Budget @extra)
     $code = $LASTEXITCODE
-    $reports = @(Get-ChildItem -LiteralPath $directory -Recurse -Filter verification.json)
-    Assert-Test ($reports.Count -eq 1) 'Expected exactly one verification report.'
-    return [pscustomobject]@{ ExitCode = $code; Report = (Get-Content -LiteralPath $reports[0].FullName -Raw -Encoding UTF8 | ConvertFrom-Json); Path = $reports[0].FullName }
+    if ($Pointer) {
+        $reference = Get-Content -LiteralPath $extra.ReportPointerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Test ($reference.protocol -eq 'maestro.harmonyos.recording-report-pointer' -and $reference.schemaVersion -eq 1) 'Pointer identity differs.'
+        Assert-Test ($reference.reportSha256 -ceq (Get-FileHash -LiteralPath $reference.reportPath -Algorithm SHA256).Hash.ToLowerInvariant()) 'Pointer does not identify the finalized report.'
+        Assert-Test ($reference.reportPath.StartsWith($directory + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) 'Pointer escaped its unique output directory.'
+        $reportFile = $reference.reportPath
+    } else {
+        $reports = @(Get-ChildItem -LiteralPath $directory -Recurse -Filter verification.json)
+        Assert-Test ($reports.Count -eq 1) 'Expected exactly one verification report.'
+        $reportFile = $reports[0].FullName
+    }
+    return [pscustomobject]@{ ExitCode = $code; Report = (Get-Content -LiteralPath $reportFile -Raw -Encoding UTF8 | ConvertFrom-Json); Path = $reportFile; PointerPath = $extra.ReportPointerPath }
 }
 
 $valid = Join-Path $testRoot ('video ' + [char]0x718a + [char]0x732b + '.mp4')
 & $FfmpegPath -nostdin -hide_banner -loglevel error -f lavfi -i 'color=c=blue:s=64x64:r=10:d=1' -c:v libx264 -pix_fmt yuv420p $valid
 Assert-Test ($LASTEXITCODE -eq 0) 'Could not generate a video fixture.'
 $originalHash = (Get-FileHash -LiteralPath $valid).Hash
-$result = Invoke-Verification $valid
+$result = Invoke-Verification $valid -Pointer
 Assert-Test ($result.ExitCode -eq 0 -and $result.Report.status -eq 'passed' -and $result.Report.frames -eq 10 -and $result.Report.progressEnded) 'A complete ten-frame video did not pass.'
 Assert-Test ($result.Report.inputSha256 -ceq $result.Report.inputSha256After -and (Get-FileHash -LiteralPath $valid).Hash -ceq $originalHash) 'Verification changed the input.'
 $passed++
+$successPointer = $result.PointerPath
+$pointerHash = (Get-FileHash -LiteralPath $successPointer).Hash
+$rejectedDirectory = Join-Path $testRoot 'rejected-pointer'
+foreach ($case in @('existing', 'missing-parent', 'input-alias')) {
+    $requestedPointer = switch ($case) {
+        'existing' { $successPointer }
+        'missing-parent' { Join-Path $testRoot 'absent/marker.json' }
+        'input-alias' { Join-Path $testRoot 'absent-input.mp4' }
+    }
+    $requestedInput = if ($case -eq 'input-alias') { $requestedPointer } else { $valid }
+    $rejected = $false
+    try { & $script -InputPath $requestedInput -FfmpegPath $FfmpegPath -OutputDirectory $rejectedDirectory -ReportPointerPath $requestedPointer -TimeoutSeconds 10 | Out-Null }
+    catch { $rejected = $true }
+    Assert-Test ($rejected -and -not (Test-Path -LiteralPath $rejectedDirectory)) ('Pointer ' + $case + ' was not rejected before allocating outputs.')
+    Assert-Test ((Get-FileHash -LiteralPath $successPointer).Hash -ceq $pointerHash) 'An existing pointer was overwritten.'
+    if ($case -eq 'input-alias') { Assert-Test (-not (Test-Path -LiteralPath $requestedInput)) 'Pointer created an input file.' }
+    $passed++
+}
 
 $variable = Join-Path $testRoot 'variable-timestamps.mkv'
 & $FfmpegPath -nostdin -hide_banner -loglevel error -f lavfi -i 'color=c=blue:s=64x64:r=10:d=1' -vf 'settb=1/1000,setpts=if(eq(mod(N\,2)\,0)\,N\,N-0.8)*100' -fps_mode passthrough -enc_time_base 1/1000 -c:v libx264 -pix_fmt yuv420p $variable
@@ -39,7 +68,7 @@ $broken = Join-Path $testRoot 'truncated.mp4'
 $bytes = [IO.File]::ReadAllBytes($valid)
 [IO.File]::WriteAllBytes($broken, [byte[]]$bytes[0..([int]($bytes.Length / 2))])
 $brokenHash = (Get-FileHash -LiteralPath $broken).Hash
-$result = Invoke-Verification $broken
+$result = Invoke-Verification $broken -Pointer
 Assert-Test ($result.ExitCode -ne 0 -and $result.Report.status -eq 'failed') 'Truncated video was accepted.'
 Assert-Test ((Get-FileHash -LiteralPath $broken).Hash -ceq $brokenHash) 'Failure replaced the original video.'
 $passed++

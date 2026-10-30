@@ -3,11 +3,31 @@ param(
     [Parameter(Mandatory = $true)][string]$InputPath,
     [Parameter(Mandatory = $true)][string]$FfmpegPath,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$ReportPointerPath,
     [ValidateRange(1, 3600)][int]$TimeoutSeconds = 180
 )
 
 $ErrorActionPreference = 'Stop'
 $utf8 = [Text.UTF8Encoding]::new($false)
+$pointerPath = $null
+if ($ReportPointerPath) {
+    $pointerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ReportPointerPath)
+    foreach ($protectedPath in @($InputPath, $FfmpegPath)) {
+        if ([string]::Equals($pointerPath, $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($protectedPath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Report pointer must not replace the input or decoder path.'
+        }
+    }
+    $current = $pointerPath
+    while ($current) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Report pointer paths must not follow links.' }
+        }
+        $current = [IO.Path]::GetDirectoryName($current)
+    }
+    if (Test-Path -LiteralPath $pointerPath) { throw 'Report pointer already exists; use a new path for this verification.' }
+    if (-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($pointerPath))) { throw 'Report pointer parent directory must already exist.' }
+}
 $resultDirectory = Join-Path $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory) ('recording-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($resultDirectory)
 $reportPath = Join-Path $resultDirectory 'verification.json'
@@ -130,6 +150,20 @@ try {
     $temporary = Join-Path $resultDirectory 'verification.pending.json'
     [IO.File]::WriteAllText($temporary, ($report | ConvertTo-Json -Depth 8), $utf8)
     [IO.File]::Move($temporary, $reportPath)
+    if ($pointerPath) {
+        $pointer = [ordered]@{
+            protocol = 'maestro.harmonyos.recording-report-pointer'; schemaVersion = 1
+            reportPath = $reportPath
+            reportSha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        $pendingPointer = Join-Path ([IO.Path]::GetDirectoryName($pointerPath)) ('.' + [guid]::NewGuid().ToString('N') + '.pending')
+        try {
+            $pointerBytes = $utf8.GetBytes(($pointer | ConvertTo-Json -Depth 4))
+            $pointerStream = [IO.File]::Open($pendingPointer, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try { $pointerStream.Write($pointerBytes, 0, $pointerBytes.Length); $pointerStream.Flush($true) } finally { $pointerStream.Dispose() }
+            [IO.File]::Move($pendingPointer, $pointerPath)
+        } finally { if ([IO.File]::Exists($pendingPointer)) { [IO.File]::Delete($pendingPointer) } }
+    }
     Write-Output ('Recording verification: ' + $report.status + '; report: ' + $reportPath)
 }
 exit $verificationExit
