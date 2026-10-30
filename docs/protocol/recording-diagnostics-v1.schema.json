@@ -177,6 +177,7 @@
         "export_media",
         "stat",
         "receive",
+        "stat_after_receive",
         "validate",
         "archive",
         "copy",
@@ -225,7 +226,8 @@
         "emission_incomplete",
         "terminal_missing_or_conflicting",
         "output_reused",
-        "video_unavailable"
+        "video_unavailable",
+        "remote_after_conflict"
       ]
     },
     "limits": {
@@ -580,6 +582,9 @@
         "receivedBytes": {
           "$ref": "#/$defs/nonnegativeInteger"
         },
+        "remoteAfterBytes": {
+          "$ref": "#/$defs/nonnegativeInteger"
+        },
         "copiedBytes": {
           "$ref": "#/$defs/nonnegativeInteger"
         },
@@ -725,6 +730,36 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "stage": { "const": "stat_after_receive" } },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "fields": {
+                "required": ["attempt"],
+                "properties": { "result": { "enum": ["begin", "returned", "failed", "observed"] } },
+                "allOf": [{
+                  "if": { "properties": { "result": { "const": "observed" } }, "required": ["result"] },
+                  "then": { "required": ["expectedBytes", "remoteAfterBytes"] }
+                }]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "fields": { "required": ["remoteAfterBytes"] } },
+            "required": ["fields"]
+          },
+          "then": {
+            "properties": {
+              "stage": { "const": "stat_after_receive" },
+              "fields": { "properties": { "result": { "const": "observed" } } }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -992,10 +1027,13 @@
           ]
         },
         "remoteAfterBytes": {
-          "type": "null"
+          "anyOf": [
+            { "$ref": "#/$defs/nonnegativeInteger" },
+            { "type": "null" }
+          ]
         },
         "remoteAfterObservation": {
-          "const": "not_observed"
+          "enum": ["not_observed", "observed"]
         },
         "eventSequences": {
           "type": "array",
@@ -1005,7 +1043,15 @@
             "$ref": "#/$defs/positiveInteger"
           }
         }
-      }
+      },
+      "allOf": [{
+        "if": {
+          "properties": { "remoteAfterObservation": { "const": "observed" } },
+          "required": ["remoteAfterObservation"]
+        },
+        "then": { "properties": { "remoteAfterBytes": { "$ref": "#/$defs/nonnegativeInteger" } } },
+        "else": { "properties": { "remoteAfterBytes": { "type": "null" } } }
+      }]
     },
     "observations": {
       "type": "object",
@@ -1362,6 +1408,7 @@
             "terminal_missing_or_conflicting",
             "output_reused",
             "video_unavailable",
+            "remote_after_conflict",
             "log_unavailable",
             "truncated_log_line",
             "invalid_log_record",

@@ -4,14 +4,18 @@
 
 | Schema | 校验对象 |
 | --- | --- |
-| [retry-trace-v1.schema.json](retry-trace-v1.schema.json) | `retry-trace.jsonl` 的每一行，分别校验 |
-| [retry-summary-v1.schema.json](retry-summary-v1.schema.json) | 一次顶层 Flow 的重试观察汇总 |
+| [retry-trace-v2.schema.json](retry-trace-v2.schema.json) | 当前 `retry-trace.jsonl` 的每一行，分别校验；保留[旧 v1](retry-trace-v1.schema.json) |
+| [retry-summary-v2.schema.json](retry-summary-v2.schema.json) | 当前一次顶层 Flow 的重试观察汇总；保留[旧 v1](retry-summary-v1.schema.json) |
 | [validation-plan-input-v1.schema.json](validation-plan-input-v1.schema.json) | 用户编写的验证计划 |
 | [validation-plan-v1.schema.json](validation-plan-v1.schema.json) | 冻结后的 `plan.json` |
 | [validation-summary-v1.schema.json](validation-summary-v1.schema.json) | 执行与审核过程中更新的 `validation-summary.json` |
 | [validation-review-v1.schema.json](validation-review-v1.schema.json) | 人工审核输入 |
 
 ## Retry trace
+
+当前写入独立 trace/summary v2；agent v1/v2 与原证据索引不变。每个步骤的 `sourceIdentity` 对应本次输入登记中规范化的原始绝对文件路径，开始、结束和中断必须一致；生成步骤为 null。`sourcePath` 仍指向按内容哈希保存的归档，同内容的 A.yaml、B.yaml 可以共用归档，但由各自 identity 区分实际执行来源。
+
+覆盖核验同时检查输入登记、冻结源码、归档字节、原始身份、内容哈希和命令索引。v2 缺少身份时拒绝，不回退到内容猜测。旧 v1 仍可读取，但只有本次登记来源能按内容哈希唯一定位时才能计入必测覆盖；同内容的多个登记文件无法区分，不据此认定覆盖完成。旧文件和旧 Schema 不会被改写。
 
 首行 `traceStarted` 带 `protocol`、`schemaVersion`、`runId`、`attemptId`、`flowExecutionId`、`flowPath` 和 `flowSha256`。后续事件带 `flowExecutionId`、连续 `sequence` 与单调计时 `elapsedNanos`；首行不占事件序号。`eventCount` 包括 `flowFinished` 和末尾 `traceCompleted`，不包括首行。
 

@@ -40,6 +40,61 @@ async function review(context, intervention = 'none') {
   return { finished, reviewed: await reviewPlan({ summaryPath: context.summaryPath, reviewPath: file }) };
 }
 
+async function sourceIdentityScenario(t, { version = 2, actual = 'A', required = 'B', registered = ['A', 'B'],
+  relocated = false, alterEvent = () => {} } = {}) {
+  let children;
+  const context = await setup(t, { repeat: 1 }, async (plan, root) => {
+    const unit = plan.units[0];
+    if (relocated) {
+      const moved = path.join(root, 'relocated sources');
+      await fs.rename(unit.sourceRoot, moved);
+      unit.sourceRoot = moved; unit.entry = path.join(moved, 'flow.yaml');
+      unit.requiredTopLevelFlows[0].path = unit.entry;
+    }
+    const directory = path.join(unit.sourceRoot, 'children'); await fs.mkdir(directory);
+    children = { A: path.join(directory, 'A.yaml'), B: path.join(directory, 'B.yaml') };
+    const source = 'appId: org.example.fixture\n---\n- assertVisible: Child\n';
+    for (const file of Object.values(children)) await fs.writeFile(file, source);
+    unit.requiredTopLevelFlows[0].requiredSteps = [{ path: children[required], commandIndex: 0, role: 'assertion' }];
+  });
+  const result = await execute(context, [], 0, async generated => {
+    const resultPath = generated.matrix.runs[0].runResultPath, base = path.dirname(resultPath);
+    const inputPath = path.join(base, 'input.json'), input = (await readJson(inputPath)).value;
+    const files = input.request.sources[0].files;
+    const main = files.find(file => file.path === context.plan.units[0].entry);
+    main.dependencies = registered.map(name => files.find(file => file.path === children[name]));
+    input.request.sources[0].files = [main];
+    await json(inputPath, input);
+    const sourceHash = await hashFile(children[actual]), sourcePath = 'sources/' + sourceHash + '.yaml';
+    await fs.copyFile(children[actual], path.join(base, sourcePath));
+    const tracePath = path.join(base, 'flows', 'flow-0', 'retry-trace.jsonl');
+    const events = (await fs.readFile(tracePath, 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+    events[0].schemaVersion = version;
+    for (const event of events) if (['stepStarted', 'stepFinished', 'stepInterrupted'].includes(event.event)) {
+      event.sourcePath = sourcePath; event.sourceSha256 = sourceHash;
+      if (version === 2) event.sourceIdentity = children[actual];
+      alterEvent(event, children);
+    }
+    await fs.writeFile(tracePath, events.map(event => JSON.stringify(event)).join('\n') + '\n');
+    const summaryPath = path.join(base, 'flows', 'flow-0', 'retry-summary.json'), summary = (await readJson(summaryPath)).value;
+    summary.schemaVersion = version; summary.traceSha256 = await hashFile(tracePath); await json(summaryPath, summary);
+    const indexPath = path.join(base, 'evidence-index.json'), index = (await readJson(indexPath)).value;
+    for (const entry of index.data.entries) {
+      if (entry.stepId !== null) entry.source.flow = sourcePath;
+      for (const evidence of entry.evidence) if (evidence.state === 'available') evidence.sha256 = await hashFile(path.join(base, evidence.path));
+    }
+    await json(indexPath, index);
+    const result = (await readJson(resultPath)).value;
+    result.data.input.sha256 = await hashFile(inputPath); await json(resultPath, result);
+    await json(path.join(base, 'state.json'), { data: result.data });
+    await json(path.join(base, 'registration.json'), { sha256: result.data.input.sha256, data: result.data });
+    const manifestPath = path.join(base, 'agent-manifest.json'), manifest = (await readJson(manifestPath)).value;
+    for (const file of manifest.files) file.sha256 = await hashFile(path.join(base, file.path));
+    await json(manifestPath, manifest);
+  });
+  return { context, result };
+}
+
 const implementationRoles = ['maestro-cli', 'maestro-client', 'maestro-orchestra', 'maestro-orchestra-models'];
 async function formalFixture(t, versioned = false) {
   return setup(t, { repeat: 1 }, async (plan, root) => {
@@ -303,6 +358,61 @@ test('raw skipped assertion is not required scenario coverage', async t => {
   const context = await setup(t, { repeat: 1 }); const result = await execute(context, ['skip']);
   assert.equal(result.state.slots[0].coverageComplete, false); assert.equal(result.state.slots[0].retryComplete, true);
   assert.equal((await review(context)).reviewed.qualified, false);
+});
+
+test('version 2 coverage distinguishes byte-identical registered source identities', async t => {
+  for (const actual of ['A', 'B']) await t.test('actual ' + actual + ', required B', async t => {
+    const { context, result } = await sourceIdentityScenario(t, { actual });
+    assert.equal(result.state.slots[0].status, 'passed');
+    assert.equal(result.state.slots[0].retryComplete, true, result.state.slots[0].reason);
+    assert.equal(result.state.slots[0].coverageComplete, actual === 'B');
+    assert.equal((await review(context)).reviewed.qualified, actual === 'B');
+  });
+});
+
+test('version 1 coverage uses only a unique registered frozen identity and never guesses from equal bytes', async t => {
+  for (const scenario of [
+    { name: 'A cannot cover frozen B', actual: 'A', registered: ['A'], expected: false },
+    { name: 'both registered identities are ambiguous', actual: 'B', registered: ['A', 'B'], expected: false },
+    { name: 'unique registered B remains compatible', actual: 'B', registered: ['B'], expected: true },
+  ]) await t.test(scenario.name, async t => {
+    const { context, result } = await sourceIdentityScenario(t, { version: 1, ...scenario });
+    assert.equal(result.state.slots[0].retryComplete, true, result.state.slots[0].reason);
+    assert.equal(result.state.slots[0].coverageComplete, scenario.expected);
+    assert.equal((await review(context)).reviewed.qualified, scenario.expected);
+  });
+});
+
+test('version 2 source identity rejects missing invalid unregistered and changing origins', async t => {
+  const mutations = [
+    ['missing', event => { delete event.sourceIdentity; }],
+    ['null YAML identity', event => { event.sourceIdentity = null; }],
+    ['array identity', event => { event.sourceIdentity = [event.sourceIdentity]; }],
+    ['relative identity', event => { event.sourceIdentity = 'children/B.yaml'; }],
+    ['foreign identity', event => { event.sourceIdentity += '.unregistered'; }],
+    ['registered identity has different bytes', (event, children) => { event.sourceIdentity = path.join(path.dirname(path.dirname(children.A)), 'flow.yaml'); }],
+    ['identity changed at finish', (event, children) => { if (event.event === 'stepFinished') event.sourceIdentity = children.A; }],
+  ];
+  for (const [name, alterEvent] of mutations) await t.test(name, async t => {
+    const { context, result } = await sourceIdentityScenario(t, { actual: 'B', alterEvent });
+    assert.equal(result.state.slots[0].retryComplete, false);
+    assert.equal(result.state.slots[0].coverageComplete, false);
+    assert.equal((await review(context)).reviewed.qualified, false);
+  });
+  await t.test('frozen A is not registered for this attempt', async t => {
+    const { context, result } = await sourceIdentityScenario(t, { actual: 'B', registered: ['B'], alterEvent: (event, children) => { event.sourceIdentity = children.A; } });
+    assert.equal(result.state.slots[0].retryComplete, false);
+    assert.equal(result.state.slots[0].coverageComplete, false);
+    assert.equal((await review(context)).reviewed.qualified, false);
+  });
+});
+
+test('new plans under relocated source roots preserve explicit identity despite content-addressed archives', async t => {
+  for (const version of [1, 2]) await t.test('trace version ' + version, async t => {
+    const { context, result } = await sourceIdentityScenario(t, { version, actual: 'B', registered: version === 1 ? ['B'] : ['A', 'B'], relocated: true });
+    assert.equal(result.state.slots[0].coverageComplete, true, result.state.slots[0].reason);
+    assert.equal((await review(context)).reviewed.qualified, true);
+  });
 });
 
 test('trace verifies attempt context, sequence, terminal state and unique v1 step identity', () => {

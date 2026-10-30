@@ -2109,10 +2109,10 @@ index 0000000..f892702
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..593584e
+index 0000000..e10a746
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,395 @@
+@@ -0,0 +1,400 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -2140,6 +2140,9 @@ index 0000000..593584e
 +
 +/** Optional observer of the real CLI executor. It never runs commands itself. */
 +class HarmonyOsCliAgentReport private constructor(private val attempt: AgentAttempt, private val sourceHashes: Map<String, String>) {
++    private data class RegisteredSource(val identity: String, val sha256: String)
++    private data class ArchivedSource(val registered: RegisteredSource, val relativePath: String)
++    private val registeredSources = sourceHashes.mapValues { (identity, hash) -> RegisteredSource(identity, hash) }
 +    val directory: Path get() = attempt.directory
 +    private var failure: Throwable? = null
 +    private var reportingFailure: Throwable? = null
@@ -2232,22 +2235,22 @@ index 0000000..593584e
 +        private var indexed = false
 +        private val sourceIndices = collectCommands(commands).mapNotNull { it.sourceInfo }.groupBy { it.path }.values
 +            .flatMap { infos -> infos.distinctBy { it.startOffset }.sortedBy { it.startOffset }.mapIndexed { index, info -> sourceKey(info) to index } }.toMap()
-+        private val archivedSources = mutableMapOf<String, String>()
++        private val archivedSources = mutableMapOf<String, ArchivedSource>()
 +
 +        init {
 +            observedFlows++
 +            collectCommands(commands).mapNotNull { it.sourceInfo }.forEach { info ->
 +                val path = info.path ?: return@forEach
 +                if (path !in archivedSources) {
-+                    val expected = sourceHashes[Path.of(path).toAbsolutePath().normalize().toString()]
++                    val registered = registeredSources[Path.of(path).toAbsolutePath().normalize().toString()]
 +                    val hash = sha256(info.source.toByteArray(Charsets.UTF_8))
-+                    if (expected != hash) throw AgentProtocolException(AgentError("invalid_input", "ATTEMPT_CONFLICT",
++                    if (registered == null || registered.sha256 != hash) throw AgentProtocolException(AgentError("invalid_input", "ATTEMPT_CONFLICT",
 +                        "A Flow source changed after registration or was not present in the registered input."))
 +                    val relative = "sources/$hash.yaml"
 +                    val target = directory.resolve(relative)
 +                    Files.createDirectories(target.parent)
 +                    if (!Files.exists(target)) Files.writeString(target, info.source)
-+                    archivedSources[path] = relative
++                    archivedSources[path] = ArchivedSource(registered, relative)
 +                }
 +            }
 +        }
@@ -2263,12 +2266,14 @@ index 0000000..593584e
 +            val commandName = cmd.asCommand()?.javaClass?.simpleName ?: "UnknownCommand"
 +            val mutating = commandName !in READ_ONLY_COMMANDS
 +            val info = cmd.sourceInfo
-+            val sourcePath = info?.path?.let { archivedSources[it] }
++            val source = info?.path?.let { archivedSources[it] }
++            val sourcePath = source?.relativePath
 +            val index = info?.let { sourceIndices[sourceKey(it)] } ?: commandIndex
 +            val id = attempt.startStep(sourcePath, index, commandName, mutating)
 +            active.getOrPut(cmd) { ArrayDeque() }.addLast(id)
 +            stepSources[id] = mapOf("sourcePath" to sourcePath,
-+                "sourceSha256" to info?.path?.let { sourceHashes[Path.of(it).toAbsolutePath().normalize().toString()] },
++                "sourceIdentity" to source?.registered?.identity,
++                "sourceSha256" to source?.registered?.sha256,
 +                "commandIndex" to index, "commandName" to commandName, "sourceOffset" to info?.startOffset,
 +                "sourceOrigin" to if (info == null) "generated" else "yaml",
 +                "commandOptional" to (cmd.asCommand()?.optional == true),
@@ -3004,10 +3009,10 @@ index 0000000..b5470de
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt
 new file mode 100644
-index 0000000..688bf76
+index 0000000..359825a
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRetryTrace.kt
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,256 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -3041,7 +3046,7 @@ index 0000000..688bf76
 +    private val mapper = jacksonObjectMapper()
 +    val flowExecutionId: String = UUID.randomUUID().toString()
 +    private val identity = linkedMapOf<String, Any?>(
-+        "protocol" to "maestro.harmonyos.retry-trace", "schemaVersion" to 1,
++        "protocol" to "maestro.harmonyos.retry-trace", "schemaVersion" to 2,
 +        "runId" to runId, "attemptId" to attemptId, "flowExecutionId" to flowExecutionId,
 +        "flowPath" to flowPath, "flowSha256" to flowSha256,
 +    )
@@ -3088,6 +3093,13 @@ index 0000000..688bf76
 +    }
 +
 +    fun stepStarted(id: String, context: ExecutionContext, fields: Map<String, Any?>, event: ExecutionEvent) = record {
++        check(fields.containsKey("sourceIdentity")) { "Step source identity is missing." }
++        val sourceIdentity = fields["sourceIdentity"]
++        check(when (fields["sourceOrigin"]) {
++            "generated" -> sourceIdentity == null && fields["sourcePath"] == null && fields["sourceSha256"] == null
++            "yaml" -> sourceIdentity is String && sourceIdentity.isNotBlank() && Path.of(sourceIdentity).isAbsolute
++            else -> false
++        }) { "Step source identity does not match its origin." }
 +        check(context.executionSequence == steps.size) { "Execution sequence is missing or duplicated." }
 +        check(stepIds.add(id)) { "An existing step ID was reused." }
 +        context.parentExecutionSequence?.let { check(steps[it]?.ended == false) { "Parent command is not active." } }
@@ -5613,10 +5625,10 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..33f9a76
+index 0000000..54eb6b9
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,517 @@
+@@ -0,0 +1,594 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -6112,6 +6124,83 @@ index 0000000..33f9a76
 +        assertThat(starts.map { it["stepId"].asText() }.distinct()).hasSize(2)
 +        assertThat(starts.map { it["sourcePath"].asText() }.distinct()).hasSize(1)
 +        assertThat(mapper.readTree(report.directory.resolve("result.json").toFile())["data"]["status"].asText()).isEqualTo("passed")
++    }
++
++    @Test
++    fun `same content subflows retain distinct registered identities on every real step`() {
++        val main = directory.resolve("identity-main.yaml")
++        val first = directory.resolve("identity-a.yaml")
++        val second = directory.resolve("identity-b.yaml")
++        val content = "appId: org.example.fixture\n---\n- back\n"
++        Files.writeString(first, content)
++        Files.writeString(second, content)
++        Files.writeString(main, "appId: org.example.fixture\n---\n- runFlow: identity-a.yaml\n- runFlow: identity-b.yaml\n")
++        val report = HarmonyOsCliAgentReport.create(directory.resolve("identity-agent"), null, null, 1,
++            "fixture-device", setOf(main.toFile()), emptyMap())
++        val commands = YamlCommandReader.readCommands(main)
++        val children = commands.mapNotNull { it.runFlowCommand }.map { flow ->
++            flow.commands.first { it.backPressCommand != null }
++        }
++        assertThat(children.map { it.sourceInfo!!.path }).containsExactly(first.toString(), second.toString()).inOrder()
++        val bundle = Files.createDirectories(report.directory.resolve("flows/identity"))
++        val observer = report.flow(main.toFile(), bundle, commands)
++        var manifest = ArtifactManifest()
++        observer.onExecutionTraceReady(ExecutionTraceArtifacts({ name, _ -> bundle.resolve(name).toFile() }, {
++            manifest = ArtifactManifest(listOf("retry-trace.jsonl", "retry-summary.json").map { name ->
++                ArtifactEntry(ArtifactKind.MAESTRO_LOG, ArtifactFormat.TXT, name, sizeBytes = Files.size(bundle.resolve(name)))
++            })
++        }, { manifest }))
++        var sequence = 0L
++        fun event() = ExecutionEvent(sequence++, sequence * 100)
++        // Include a repeated A step and a generated command: neither can borrow B's identity.
++        val executed = listOf(children[0], children[1], children[0], MaestroCommand(backPressCommand = BackPressCommand()))
++        executed.forEachIndexed { index, command ->
++            val context = ExecutionContext(index, null, emptyList(), null, "body", emptyList())
++            observer.starting(command)
++            observer.onCommandExecutionStarted(command, context, 0, event())
++            observer.onCommandExecutionFinished(command, context, CommandOutcome.Completed, 1, 2, event())
++        }
++        val ending = event()
++        observer.onExecutionTraceEnd(ExecutionTraceEnd(ending, sequence, sequence + 1, executed.lastIndex, 0, 0, true, null))
++        observer.finished(Orchestra.FlowResult(true, FlowDebugOutput(), ArtifactManifest()))
++        report.finish(true)
++
++        val events = Files.readAllLines(bundle.resolve("retry-trace.jsonl")).map { mapper.readTree(it) }
++        val starts = events.filter { it["event"].asText() == "stepStarted" }
++        assertThat(events.first()["schemaVersion"].asInt()).isEqualTo(2)
++        assertThat(mapper.readTree(bundle.resolve("retry-summary.json").toFile())["state"].asText()).isEqualTo("complete")
++        val expected = listOf(first, second, first).map { it.toAbsolutePath().normalize().toString() }
++        assertThat(starts.take(3).map { it["sourceIdentity"].asText() }).containsExactlyElementsIn(expected).inOrder()
++        assertThat(starts.take(3).map { it["sourcePath"].asText() }.distinct()).hasSize(1)
++        assertThat(starts.take(3).map { it["sourceSha256"].asText() }.distinct()).hasSize(1)
++        assertThat(starts.take(3).map { it["commandIndex"].asInt() }.distinct()).hasSize(1)
++        assertThat(starts.last()["sourceIdentity"].isNull).isTrue()
++        assertThat(starts.last()["sourceOrigin"].asText()).isEqualTo("generated")
++        val entries = mapper.readTree(report.directory.resolve("evidence-index.json").toFile())["data"]["entries"]
++        starts.forEach { start ->
++            val terminal = events.single { it["event"].asText() == "stepFinished" && it["stepId"] == start["stepId"] }
++            assertThat(terminal["sourceIdentity"]).isEqualTo(start["sourceIdentity"])
++            val entry = entries.single { it["stepId"] == start["stepId"] }
++            if (!entry["source"].isNull) {
++                assertThat(entry["source"]["flow"]).isEqualTo(start["sourcePath"])
++                assertThat(entry["source"].has("sourceIdentity")).isFalse()
++            }
++        }
++    }
++
++    @Test
++    fun `same bytes at an unregistered path cannot acquire a registered source identity`() {
++        val (report, source) = create()
++        val alias = directory.resolve("unregistered-copy.yaml")
++        Files.copy(source, alias)
++        try {
++            val failure = assertThrows<AgentProtocolException> {
++                report.flow(source.toFile(), directory.resolve("unregistered-flow"), YamlCommandReader.readCommands(alias))
++            }
++            assertThat(failure.message).contains("not present in the registered input")
++        } finally {
++            report.finish(false, IllegalStateException("unregistered source rejected"))
++        }
 +    }
 +
 +    @Test
@@ -6955,10 +7044,10 @@ index 0000000..d1e3f7a
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt
 new file mode 100644
-index 0000000..7e8da31
+index 0000000..cfe659a
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRetryTraceTest.kt
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,181 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7004,7 +7093,9 @@ index 0000000..7e8da31
 +        fun context(index: Int, retry: List<RetryExecutionFrame> = emptyList()) =
 +            ExecutionContext(index, if (retry.isEmpty()) null else 0, retry, null, "body", emptyList())
 +        fun start(index: Int, retry: List<RetryExecutionFrame> = emptyList()) = context(index, retry).also {
-+            trace.stepStarted("step-$index", it, mapOf("sourcePath" to "sources/a.yaml", "commandIndex" to 1), event())
++            trace.stepStarted("step-$index", it, mapOf("sourcePath" to "sources/a.yaml",
++                "sourceIdentity" to directory.resolve("a.yaml").toAbsolutePath().normalize().toString(),
++                "sourceOrigin" to "yaml", "commandIndex" to 1), event())
 +        }
 +        fun finish(context: ExecutionContext, outcome: String = "Completed") =
 +            trace.stepFinished("step-" + context.executionSequence, context, outcome, null, event())
@@ -7038,11 +7129,19 @@ index 0000000..7e8da31
 +        fixture.seal(2)
 +
 +        val summary = fixture.summary()
++        assertThat(summary["schemaVersion"].asInt()).isEqualTo(2)
++        assertThat(fixture.events().first()["schemaVersion"].asInt()).isEqualTo(2)
 +        assertThat(summary["state"].asText()).isEqualTo("complete")
 +        assertThat(summary["firstPassStatus"].asText()).isEqualTo("not_passed")
 +        assertThat(summary["optionalRetryUsed"].asBoolean()).isTrue()
 +        val steps = fixture.events().filter { it["event"].asText() == "stepStarted" }.drop(1)
 +        assertThat(steps.map { it["sourcePath"].asText() }.distinct()).hasSize(1)
++        assertThat(steps.map { it["sourceIdentity"].asText() }.distinct()).containsExactly(
++            directory.resolve("a.yaml").toAbsolutePath().normalize().toString())
++        fixture.events().filter { it["event"].asText() in setOf("stepFinished", "stepInterrupted") }.forEach { terminal ->
++            val start = fixture.events().single { it["event"].asText() == "stepStarted" && it["stepId"] == terminal["stepId"] }
++            assertThat(terminal["sourceIdentity"]).isEqualTo(start["sourceIdentity"])
++        }
 +        assertThat(steps.map { it["stepId"].asText() }).containsExactly("step-1", "step-2").inOrder()
 +        assertThat(steps.map { it["retryContext"][0]["tryNo"].asInt() }).containsExactly(1, 2).inOrder()
 +        assertThat(steps.map { it["retryContext"][0]["retryCommandStepId"].asText() }).containsExactly("step-0", "step-0")
@@ -7115,6 +7214,19 @@ index 0000000..7e8da31
 +        assertThat(fixture.summary()["firstPassStatus"].asText()).isEqualTo("not_passed")
 +        val interrupted = fixture.events().single { it["event"].asText() == "stepInterrupted" }
 +        assertThat(interrupted["outcome"].isNull).isTrue()
++        assertThat(interrupted["sourceIdentity"].asText()).isEqualTo(
++            directory.resolve("a.yaml").toAbsolutePath().normalize().toString())
++    }
++
++    @Test
++    fun `v2 source identity cannot silently fall back to content identity`() {
++        val fixture = Fixture()
++        fixture.trace.stepStarted("step-0", fixture.context(0),
++            mapOf("sourcePath" to "sources/a.yaml", "sourceOrigin" to "yaml", "commandIndex" to 1), fixture.event())
++        fixture.trace.seal(true)
++        assertThat(fixture.summary()["schemaVersion"].asInt()).isEqualTo(2)
++        assertThat(fixture.summary()["state"].asText()).isEqualTo("incomplete")
++        assertThat(fixture.events().any { it["event"].asText() == "stepStarted" }).isFalse()
 +    }
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
@@ -8528,10 +8640,10 @@ index 0000000..a950816
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt
 new file mode 100644
-index 0000000..7e966ea
+index 0000000..87d6255
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,228 @@
 +package maestro.harmonyos.driver
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -8554,7 +8666,7 @@ index 0000000..7e966ea
 +) {
 +    enum class Stage {
 +        CREATED, SERVICE, PROCESSES, CAPTURES, QUERY, START, READY, STOP, CAPTURE_ENDED,
-+        EXPORT, EXPORT_SCRATCH, EXPORT_MEDIA, STAT, RECEIVE, VALIDATE, ARCHIVE, COPY, FLUSH, DELETE,
++        EXPORT, EXPORT_SCRATCH, EXPORT_MEDIA, STAT, RECEIVE, STAT_AFTER_RECEIVE, VALIDATE, ARCHIVE, COPY, FLUSH, DELETE,
 +        MEDIA_RETAINED, MEDIA_REMOVED, LIMIT_REACHED, RESOURCE_FAILURE,
 +        CLEANUP_REMOTE, CLEANUP_LOCAL, CLEANUP_TEMP, CLEANUP_RESOURCE, CLEANUP, CLOSE, ABORT, TRUNCATED,
 +    }
@@ -8567,6 +8679,7 @@ index 0000000..7e966ea
 +        val attempt: Int? = null,
 +        val expectedBytes: Long? = null,
 +        val receivedBytes: Long? = null,
++        val remoteAfterBytes: Long? = null,
 +        val copiedBytes: Long? = null,
 +        val count: Int? = null,
 +        val pids: Set<Int>? = null,
@@ -8692,6 +8805,7 @@ index 0000000..7e966ea
 +        fields.attempt?.let { values["attempt"] = it }
 +        fields.expectedBytes?.let { values["expectedBytes"] = it }
 +        fields.receivedBytes?.let { values["receivedBytes"] = it }
++        fields.remoteAfterBytes?.let { values["remoteAfterBytes"] = it }
 +        fields.copiedBytes?.let { values["copiedBytes"] = it }
 +        fields.count?.let { values["count"] = it }
 +        fields.pids?.let { values["pids"] = smallestPids(it); values["pidsTruncated"] = it.size > MAX_PIDS }
@@ -8760,10 +8874,10 @@ index 0000000..7e966ea
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
 new file mode 100644
-index 0000000..603a3e0
+index 0000000..91b14bb
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorder.kt
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,542 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
@@ -9083,9 +9197,25 @@ index 0000000..603a3e0
 +            diagnostics.step(Stage.RECEIVE, Fields(attempt = attempt, expectedBytes = size)) { receiveFile(remotePath, path, budget.remaining()) }
 +            val received = if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) Files.size(path) else null
 +            diagnostics.event(Stage.RECEIVE, Result.OBSERVED, Fields(attempt = attempt, expectedBytes = size, receivedBytes = received))
-+            if (received != size) {
-+                throw HdcException("Recording transfer did not produce the expected file size")
++            val transferFailure = if (received != size) HdcException("Recording transfer did not produce the expected file size") else null
++            val remoteAfter = try {
++                diagnostics.step(Stage.STAT_AFTER_RECEIVE, Fields(attempt = attempt, expectedBytes = size)) {
++                    val afterOutput = command(listOf("stat", "-c", "%s", remotePath), budget).trim()
++                    afterOutput.toLongOrNull()?.takeIf { it >= 0 }
++                        ?: throw HdcException("Invalid recording size returned by post-transfer stat: $afterOutput")
++                }
++            } catch (error: Throwable) {
++                // A failed follow-up observation must not replace an already known short transfer.
++                if (transferFailure != null) {
++                    transferFailure.addSuppressed(error)
++                    throw transferFailure
++                }
++                throw error
 +            }
++            diagnostics.event(Stage.STAT_AFTER_RECEIVE, Result.OBSERVED,
++                Fields(attempt = attempt, expectedBytes = size, remoteAfterBytes = remoteAfter))
++            transferFailure?.let { throw it }
++            if (remoteAfter != size) throw HdcException("Recording export changed size during transfer")
 +            return try {
 +                diagnostics.step(Stage.VALIDATE, Fields(attempt = attempt, receivedBytes = size)) { Mp4RecordingValidator.validate(path, config.recordingMaxBytes) }
 +                validatedSize = size
@@ -12155,10 +12285,10 @@ index 0000000..8eafe89
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
 new file mode 100644
-index 0000000..fcc887d
+index 0000000..b18ff31
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSSystemScreenRecorderTest.kt
-@@ -0,0 +1,1109 @@
+@@ -0,0 +1,1183 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -12203,13 +12333,16 @@ index 0000000..fcc887d
 +            "start" to "begin", "start" to "acknowledged", "ready" to "observed",
 +            "stop" to "begin", "stop" to "acknowledged", "capture_ended" to "observed",
 +            "query" to "present", "export" to "begin", "stat" to "observed",
-+            "receive" to "observed", "validate" to "returned", "flush" to "returned",
++            "receive" to "observed", "stat_after_receive" to "observed", "validate" to "returned", "flush" to "returned",
 +            "delete" to "acknowledged", "media_removed" to "observed", "cleanup" to "returned", "close" to "returned",
 +        ).inOrder()
 +        val stat = events.single { it["stage"].asText() == "stat" && it["fields"]["result"].asText() == "observed" }
 +        val received = events.single { it["stage"].asText() == "receive" && it["fields"]["result"].asText() == "observed" }
 +        assertThat(stat["fields"]["expectedBytes"].asLong()).isEqualTo(device.video.size.toLong())
 +        assertThat(received["fields"]["receivedBytes"].asLong()).isEqualTo(device.video.size.toLong())
++        val after = events.single { it["stage"].asText() == "stat_after_receive" && it["fields"]["result"].asText() == "observed" }
++        assertThat(after["fields"]["remoteAfterBytes"].asLong()).isEqualTo(device.video.size.toLong())
++        assertThat(after["fields"]["attempt"].asInt()).isEqualTo(received["fields"]["attempt"].asInt())
 +        assertThat(events.map { it["seq"].asInt() }).containsExactlyElementsIn(1..events.size).inOrder()
 +        assertThat(events.map { it["recordingId"].asText() }.toSet()).containsExactly(device.fileName!!.removePrefix("maestro-recording-").removeSuffix(".mp4"))
 +        assertThat(events.last()["fields"]["expectedEventCount"].asInt()).isEqualTo(events.size)
@@ -12222,7 +12355,7 @@ index 0000000..fcc887d
 +            ["fields"]["mediaUri"].asText()).isEqualTo(device.uri)
 +        assertThat(device.commands.map { it.first() }).containsExactly(
 +            "bm", "ps", "hidumper", "mediatool", "aa", "ps", "hidumper",
-+            "ps", "hidumper", "aa", "hidumper", "mediatool", "rm", "mediatool", "stat", "mediatool", "mediatool", "rm",
++            "ps", "hidumper", "aa", "hidumper", "mediatool", "rm", "mediatool", "stat", "stat", "mediatool", "mediatool", "rm",
 +        ).inOrder()
 +    }
 +
@@ -13156,6 +13289,77 @@ index 0000000..fcc887d
 +        assertThat(terminal["fields"]["errorKind"].asText()).isEqualTo("io")
 +        assertThat(device.stops).isEqualTo(1)
 +        assertThat(device.deletes).isEmpty()
++    }
++
++    @Test fun `post transfer observation failures retain media before validation or output`(): Unit = TempFileHandler().use { files ->
++        for (persistent in listOf(false, true)) {
++            for (scenario in listOf("grow", "shrink", "empty", "query-failed", "short-query-failed", "receive-failed", "budget")) {
++                val directory = files.createTempDirectory("recording-after-$scenario-$persistent").toPath()
++                val id = UUID.randomUUID().toString()
++                val journal = if (persistent) HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), id, UUID.randomUUID().toString()) else null
++                journal.use {
++                    val resources = journal?.enableRecordingResources()
++                    val original = IOException("post-transfer fixture failure")
++                    val device = Device().apply {
++                        sessionScratch = persistent
++                        if (scenario == "short-query-failed") receivedVideo = video.copyOf(video.size / 2)
++                        if (scenario == "receive-failed") receiveFailure = original
++                        response = { arguments ->
++                            if (arguments.first() == "stat" && receives > 0) when (scenario) {
++                                "grow" -> (video.size + 1).toString()
++                                "shrink" -> (video.size - 1).toString()
++                                "empty" -> "0"
++                                "query-failed", "short-query-failed" -> throw original
++                                else -> null
++                            } else null
++                        }
++                    }
++                    val sink = RecordingSink()
++                    val diagnostics = mutableListOf<String>()
++                    val recorder = HarmonyOSSystemScreenRecorder(id, device, { remote, local, timeout ->
++                        device.receive(remote, local, timeout)
++                        if (scenario == "budget") Thread.sleep(260)
++                    }, config().copy(recordingStopTimeout = Duration.ofMillis(if (scenario == "budget") 200 else 3000)), journal,
++                        { name, resourceId, contextId -> HarmonyOSRecordingDiagnostics(name, resourceId, contextId, emitLine = diagnostics::add) })
++                    val recording = recorder.start(sink)
++                    val failure = assertThrows(Exception::class.java) { recording.close() }
++                    assertThat(assertThrows(Exception::class.java) { recording.close() }).isSameInstanceAs(failure)
++                    when (scenario) {
++                        "query-failed", "receive-failed" -> assertThat(failure).isSameInstanceAs(original)
++                        "short-query-failed" -> {
++                            assertThat(failure.message).contains("expected file size")
++                            assertThat(failure.suppressed.toList()).contains(original)
++                        }
++                        "budget" -> assertThat(failure).isInstanceOf(HdcTimeoutException::class.java)
++                        else -> assertThat(failure.message).contains("changed size during transfer")
++                    }
++                    assertThat(device.stops).isEqualTo(1)
++                    assertThat(device.receives).isEqualTo(1)
++                    assertThat(device.deletes).isEmpty()
++                    assertThat(sink.bytes.size).isEqualTo(0)
++                    assertThat(sink.flushCalls).isEqualTo(0)
++                    val stats = device.commands.filter { it.first() == "stat" }
++                    assertThat(stats.size).isEqualTo(if (scenario in setOf("receive-failed", "budget")) 1 else 2)
++                    assertThat(stats.map { it.last() }.toSet()).hasSize(1)
++                    val events = diagnostics.map { jacksonObjectMapper().readTree(it.removePrefix(HarmonyOSRecordingDiagnostics.PREFIX)) }
++                    assertThat(events.none { it["stage"].asText() in setOf("validate", "archive", "copy", "flush", "delete") }).isTrue()
++                    val observed = events.filter { it["stage"].asText() == "stat_after_receive" && it["fields"]["result"].asText() == "observed" }
++                    if (scenario in setOf("grow", "shrink", "empty")) {
++                        val expected = when (scenario) { "grow" -> device.video.size + 1; "shrink" -> device.video.size - 1; else -> 0 }
++                        assertThat(observed).hasSize(1)
++                        assertThat(observed.single()["fields"]["remoteAfterBytes"].asInt()).isEqualTo(expected)
++                    } else assertThat(observed).isEmpty()
++                    if (scenario == "receive-failed") assertThat(events.none { it["stage"].asText() == "stat_after_receive" }).isTrue()
++                    resources?.let {
++                        val resource = jacksonObjectMapper().readTree(it.path.toFile())["resources"][0]
++                        assertThat(resource["captureEnded"].asBoolean()).isTrue()
++                        assertThat(resource["archiveName"].isNull).isTrue()
++                        assertThat(resource["mediaRemoved"].asBoolean()).isFalse()
++                        assertThat(resource["clean"].asBoolean()).isFalse()
++                    }
++                }
++            }
++        }
 +    }
 +
 +    private fun config() = HarmonyOSDriverConfig(

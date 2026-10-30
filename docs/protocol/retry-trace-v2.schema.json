@@ -1,0 +1,721 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:retry-trace:2",
+  "title": "Retry trace v2: one JSONL record",
+  "$comment": "Structure only. This schema does not establish cross-document identity, original file hashes, event completeness, command execution, or qualification. See retry-and-validation.md. Version 2 binds each YAML step to its registered original source path through sourceIdentity; content-addressed sourcePath remains an artifact reference.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "protocol",
+        "schemaVersion",
+        "runId",
+        "attemptId",
+        "flowExecutionId",
+        "flowPath",
+        "flowSha256"
+      ],
+      "properties": {
+        "event": {
+          "const": "traceStarted"
+        },
+        "protocol": {
+          "const": "maestro.harmonyos.retry-trace"
+        },
+        "schemaVersion": {
+          "const": 2
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "flowExecutionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "flowPath": {
+          "type": "string",
+          "minLength": 1
+        },
+        "flowSha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/step"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event"
+          ],
+          "properties": {
+            "event": {
+              "const": "stepStarted"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/step"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "stepFinished"
+            },
+            "outcome": {
+              "enum": [
+                "Completed",
+                "Failed",
+                "Warned",
+                "Skipped"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/step"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "stepInterrupted"
+            },
+            "outcome": {
+              "type": "null"
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/retry"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "tryNo",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "retryBlockStarted"
+            },
+            "tryNo": {
+              "type": "null"
+            },
+            "outcome": {
+              "type": "null"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/retry"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "tryNo",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "retryTryStarted"
+            },
+            "tryNo": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "outcome": {
+              "type": "null"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/retry"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "tryNo",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "retryTryFinished"
+            },
+            "tryNo": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "outcome": {
+              "enum": [
+                "completed",
+                "failed",
+                "interrupted"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/retry"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "tryNo",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "retryScheduled"
+            },
+            "tryNo": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "outcome": {
+              "type": "null"
+            },
+            "error": {
+              "type": "null"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/retry"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "tryNo",
+            "outcome",
+            "error"
+          ],
+          "properties": {
+            "event": {
+              "const": "retryBlockFinished"
+            },
+            "tryNo": {
+              "type": "null"
+            },
+            "outcome": {
+              "enum": [
+                "completed",
+                "failed",
+                "interrupted"
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/engine"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "success",
+            "error",
+            "expectedEventCount",
+            "lastExecutionSequence"
+          ],
+          "properties": {
+            "event": {
+              "const": "flowFinished"
+            },
+            "success": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error": {
+              "$ref": "#/$defs/error"
+            },
+            "expectedEventCount": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "lastExecutionSequence": {
+              "type": "integer",
+              "minimum": -1
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/engine"
+        },
+        {
+          "type": "object",
+          "required": [
+            "event",
+            "expectedEventCount"
+          ],
+          "properties": {
+            "event": {
+              "const": "traceCompleted"
+            },
+            "expectedEventCount": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  ],
+  "$defs": {
+    "retryFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retryInvocationId",
+        "retryCommandStepId",
+        "tryNo"
+      ],
+      "properties": {
+        "retryInvocationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "retryCommandStepId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "tryNo": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "class",
+            "message"
+          ],
+          "properties": {
+            "class": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "elapsedNanos",
+        "flowExecutionId",
+        "stepId",
+        "executionSequence",
+        "parentExecutionSequence",
+        "sourcePath",
+        "sourceIdentity",
+        "sourceSha256",
+        "commandIndex",
+        "commandName",
+        "sourceOffset",
+        "sourceOrigin",
+        "commandOptional",
+        "selectorOptional",
+        "retryContext",
+        "flowScopeOwner",
+        "phase",
+        "optionalAncestorSequences"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedNanos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flowExecutionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "stepId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "executionSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parentExecutionSequence": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourcePath": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceSha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commandIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "commandName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceOffset": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceOrigin": {
+          "enum": [
+            "yaml",
+            "generated"
+          ]
+        },
+        "commandOptional": {
+          "type": "boolean"
+        },
+        "selectorOptional": {
+          "type": "boolean"
+        },
+        "retryContext": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/retryFrame"
+          }
+        },
+        "flowScopeOwner": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "enum": [
+            "setup",
+            "body",
+            "onFlowStart",
+            "onFlowComplete"
+          ]
+        },
+        "optionalAncestorSequences": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "uniqueItems": true
+        },
+        "sourceIdentity": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Normalized absolute source path from the registered input; null only for generated steps."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "sourceOrigin": {
+                "const": "yaml"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sourceIdentity": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "sourceOrigin": {
+                "const": "generated"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "sourceIdentity": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "retry": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "elapsedNanos",
+        "flowExecutionId",
+        "retryInvocationId",
+        "retryCommandStepId",
+        "executionSequence",
+        "parentRetryInvocationId",
+        "parentTryNo",
+        "retryContext",
+        "maxRetries",
+        "optional"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedNanos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flowExecutionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "retryInvocationId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "retryCommandStepId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "executionSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "parentRetryInvocationId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parentTryNo": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryContext": {
+          "type": "array",
+          "minItems": 0,
+          "items": {
+            "$ref": "#/$defs/retryFrame"
+          }
+        },
+        "maxRetries": {
+          "type": "integer",
+          "maximum": 3,
+          "description": "Observed upstream value; only the upper bound is clamped. A negative YAML value may produce a block with no tries, and the execution verifier rejects that block for qualification."
+        },
+        "optional": {
+          "type": "boolean"
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "required": [
+        "sequence",
+        "elapsedNanos",
+        "flowExecutionId"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedNanos": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flowExecutionId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        }
+      }
+    }
+  }
+}

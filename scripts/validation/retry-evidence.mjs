@@ -5,7 +5,7 @@ import { artifact, digestPattern, hash, hashFile, key, readBytes, readJson, requ
 
 /** Replays observations only; it never executes or retries a command. */
 export function verifyTrace(summary, events, evidenceSteps, frozenSourceHashes) {
-  requireValue(summary.protocol === 'maestro.harmonyos.retry-trace' && summary.schemaVersion === 1 && summary.state === 'complete' &&
+  requireValue(summary.protocol === 'maestro.harmonyos.retry-trace' && [1, 2].includes(summary.schemaVersion) && summary.state === 'complete' &&
     summary.traceCompleted === true && uuid.test(summary.flowExecutionId), 'Retry summary is incomplete or unsupported.');
   const [header, ...records] = events;
   requireValue(header?.event === 'traceStarted' && ['protocol', 'schemaVersion', 'runId', 'attemptId', 'flowExecutionId', 'flowPath', 'flowSha256']
@@ -40,12 +40,16 @@ export function verifyTrace(summary, events, evidenceSteps, frozenSourceHashes) 
       if (event.sourcePath === null) requireValue(entry.source === null && event.sourceOrigin === 'generated', 'Generated step source differs.');
       else requireValue(entry.source?.flow === event.sourcePath && entry.source.commandIndex === event.commandIndex &&
         entry.source.commandName === event.commandName && digestPattern.test(event.sourceSha256) && frozenSourceHashes.has(event.sourceSha256), 'Step source differs from the frozen sources or v1 evidence.');
+      if (summary.schemaVersion === 2) requireValue(Object.hasOwn(event, 'sourceIdentity') &&
+        (event.sourcePath === null ? event.sourceIdentity === null : event.sourceOrigin === 'yaml' &&
+          typeof event.sourceIdentity === 'string' && path.isAbsolute(event.sourceIdentity)), 'Version 2 step source identity is missing or invalid.');
       steps.set(event.executionSequence, { event, ended: false, outcome: null }); ids.add(event.stepId);
     } else if (['stepFinished', 'stepInterrupted'].includes(event.event)) {
       const step = steps.get(event.executionSequence);
       requireValue(step && !step.ended && step.event.stepId === event.stepId, 'Step terminal event has no matching start.');
       for (const field of ['sourcePath', 'sourceSha256', 'commandIndex', 'commandName', 'sourceOffset', 'sourceOrigin', 'retryContext',
-        'parentExecutionSequence', 'flowScopeOwner', 'phase', 'commandOptional', 'selectorOptional', 'optionalAncestorSequences']) {
+        'parentExecutionSequence', 'flowScopeOwner', 'phase', 'commandOptional', 'selectorOptional', 'optionalAncestorSequences',
+        ...(summary.schemaVersion === 2 ? ['sourceIdentity'] : [])]) {
         requireValue(isDeepStrictEqual(step.event[field], event[field]), 'Step context changed during execution.');
       }
       frames(event.retryContext);
@@ -114,16 +118,19 @@ export async function verifyAttemptInput(result, index, agentRoot, unit, profile
   requireValue(input.kind === 'flow' && input.deviceId === data.deviceId && input.request, 'Registered input is not this device Flow invocation.');
   const registered = input.request;
   const registeredSources = new Map();
-  for (const source of registered.sources ?? []) for (const file of source.files ?? []) {
-    requireValue(typeof file.content === 'string' && hash(Buffer.from(file.content, 'utf8')) === file.sha256, 'Registered Flow content differs from its hash.');
-    if (file.path && file.sha256) registeredSources.set(key(file.path), file.sha256);
-    for (const dependency of file.dependencies ?? []) {
-      requireValue(hash(Buffer.from(dependency.content, 'utf8')) === dependency.sha256, 'Registered dependency content differs from its hash.');
-      registeredSources.set(key(dependency.path), dependency.sha256);
-    }
-  }
   const frozen = new Map(unit.sources.map(file => [key(file.path), file.sha256]));
-  for (const [file, digest] of registeredSources) requireValue(frozen.get(file) === digest, 'Executed input was not present in the frozen sources.');
+  function register(source) {
+    requireValue(typeof source.path === 'string' && typeof source.content === 'string' && typeof source.sha256 === 'string' &&
+      digestPattern.test(source.sha256) && hash(Buffer.from(source.content, 'utf8')) === source.sha256, 'Registered Flow content differs from its hash.');
+    const identity = key(source.path);
+    requireValue(frozen.get(identity) === source.sha256, 'Executed input was not present in the frozen sources.');
+    requireValue(!registeredSources.has(identity) || registeredSources.get(identity) === source.sha256, 'Registered source identity has conflicting bytes.');
+    registeredSources.set(identity, source.sha256);
+  }
+  for (const source of registered.sources ?? []) for (const file of source.files ?? []) {
+    register(file);
+    for (const dependency of file.dependencies ?? []) register(dependency);
+  }
   for (const flow of unit.requiredTopLevelFlows) requireValue(registeredSources.get(key(flow.path)) === flow.sha256, 'Required Flow was not registered for this attempt.');
   const configuration = registered.configuration;
   requireValue(configuration?.ability === profile.abilityName && (configuration.module ?? null) === profile.moduleName &&
@@ -131,11 +138,11 @@ export async function verifyAttemptInput(result, index, agentRoot, unit, profile
   for (const [name, digest] of Object.entries(profile.environmentHashes)) {
     requireValue(typeof configuration.environment[name] === 'string' && hash(Buffer.from(configuration.environment[name])) === digest, 'Registered parameter differs from the frozen value.');
   }
-  return { evidence, base, data };
+  return { evidence, base, data, registeredSources };
 }
 
 export async function inspectAttempt(result, index, agentRoot, unit, profile, verified = null) {
-  const { evidence, base, data } = verified ?? await verifyAttemptInput(result, index, agentRoot, unit, profile);
+  const { evidence, base, data, registeredSources } = verified ?? await verifyAttemptInput(result, index, agentRoot, unit, profile);
   const stepEntries = new Map(index.data.entries.filter(entry => entry.stepId !== null).map(entry => [entry.stepId, entry]));
   const references = new Map();
   for (const entry of index.data.entries) for (const item of entry.evidence) if (item.state === 'available') {
@@ -146,7 +153,11 @@ export async function inspectAttempt(result, index, agentRoot, unit, profile, ve
   const summaries = [...references.values()].filter(item => item.kind === 'log' && path.posix.basename(item.path) === 'retry-summary.json');
   requireValue(summaries.length > 0, 'No retained retry summaries were found in this attempt evidence.');
   const observedFlows = [], allStepIds = new Set(), flowIds = new Set();
-  const sourceHashes = new Set(unit.sources.map(file => file.sha256));
+  const sourceHashes = new Set(registeredSources.values()), identitiesByHash = new Map();
+  for (const [identity, digest] of registeredSources) {
+    if (!identitiesByHash.has(digest)) identitiesByHash.set(digest, []);
+    identitiesByHash.get(digest).push(identity);
+  }
   let coverageComplete = true, retryUsed = false;
   for (const reference of summaries) {
     const summaryPath = await artifact(base, reference.path), summary = (await readJson(summaryPath)).value;
@@ -164,11 +175,23 @@ export async function inspectAttempt(result, index, agentRoot, unit, profile, ve
     requireValue(text.endsWith('\n'), 'Retry trace is truncated.');
     const parsed = text.trimEnd().split('\n').map(line => JSON.parse(line));
     const checked = verifyTrace(summary, parsed, stepEntries, sourceHashes);
+    const sourceIdentities = new Map();
     for (const step of checked.steps) if (step.event.sourcePath !== null) {
       requireValue(await hashFile(await artifact(base, step.event.sourcePath)) === step.event.sourceSha256, 'Archived step source differs.');
+      if (summary.schemaVersion === 2) {
+        const identity = key(step.event.sourceIdentity);
+        requireValue(registeredSources.get(identity) === step.event.sourceSha256, 'Step source identity differs from the registered frozen source.');
+        sourceIdentities.set(step.event.executionSequence, identity);
+      } else {
+        // Version 1 archives are content-addressed. Equal bytes from two registered
+        // paths cannot establish which source actually supplied this command.
+        const identities = identitiesByHash.get(step.event.sourceSha256);
+        if (identities?.length === 1) sourceIdentities.set(step.event.executionSequence, identities[0]);
+      }
     }
     for (const id of checked.stepIds) { requireValue(!allStepIds.has(id), 'An evidence step is shared by distinct Flow executions.'); allStepIds.add(id); }
     const covered = expected.requiredSteps.every(required => checked.steps.some(step => step.outcome === 'Completed' &&
+      sourceIdentities.get(step.event.executionSequence) === key(required.sourcePath) &&
       step.event.sourceSha256 === required.sourceSha256 && step.event.commandIndex === required.commandIndex &&
       step.event.commandOptional === false && step.event.selectorOptional === false && step.event.optionalAncestorSequences.length === 0 &&
       (required.role !== 'assertion' || /^Assert/.test(step.event.commandName))));

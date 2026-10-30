@@ -128,6 +128,8 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 
 分母始终是计划槽位数。`minimumRate` 使用十进制字符串，最小成功次数按向上取整计算。缺 trace、trace 截断、身份或哈希不匹配时，首次成功记 `unknown`，不从最终 passed 推断首次成功。optional retry 只要实际进入第二次，也不算首次成功；可选步骤只出现 Warned 不会单独推翻原始最终结果，但不能充当必测覆盖。
 
+必测步骤还要匹配具体源码文件，不能仅凭相同内容和命令索引认定覆盖。当前 retry trace v2 保存输入登记中的原始文件身份，因此同内容的 A.yaml、B.yaml 可分别核对。旧 v1 只有在本次登记来源唯一时才能计入覆盖；同内容的多个来源无法区分时，保留未完成。格式与兼容规则见[Retry 协议](protocol/retry-and-validation.md)。
+
 一次正常失败仍占分母，也允许其必测路径未完成。失败轮的证据必须完整；成功轮只有完成自己的必测路径才计入 `unattendedPassCount`。无法确认清理完成、取消或未知结果会停止同设备后续轮次及后续 unit。
 
 数字阈值达到不改写原退出码。当前执行入口要求人工复核；刚跑完时 `manualIntervention=unknown`、`qualified=false`，所以返回 1。复核可以更新资格结论，但不会把之前失败的矩阵或入口退出码改成成功。自动化系统应分别展示原执行退出码和最终审核结论。

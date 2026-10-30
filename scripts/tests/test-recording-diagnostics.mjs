@@ -51,6 +51,14 @@ function recording(baseDir, ordinal = 0) {
   return { contextId, recordingId, resourceId, binding, events, relative, outputPath, videoBytes };
 }
 
+function exportEvents(fixture, stages, ordinal = 0) {
+  const seed = fixture.recordings[ordinal].events[0];
+  const all = [['created', { result: 'observed' }], ...stages,
+    ['close', { result: fixture.status === 'failed' ? 'failed' : 'returned', terminal: true,
+      expectedEventCount: stages.length + 2, truncated: false, droppedEvents: 0, emissionFailures: 0 }]];
+  return all.map(([stage, fields], index) => ({ ...seed, seq: index + 1, elapsedMs: index * 10, stage, fields }));
+}
+
 function logText(bindings, events, name = 'fixture') {
   const prefix = `01:02:03.000 [main] INFO ${name} - `;
   return ['ordinary log line', ...bindings.map(value => prefix + bindingPrefix + JSON.stringify(value)),
@@ -215,6 +223,135 @@ test('export attempts retain observed sizes and durations without inventing an a
   assert.deepEqual(recording.observations.mediaRemoved, []);
   assert.equal(recording.stageDurations.find(stage => stage.seq === 8).elapsedMs, 3);
 });
+
+test('one after-receive observation retains its size and timing across duplicate source logs', async () => {
+  const fixture = await makeFixture({ duplicateLogs: true, edit(f) {
+    f.events = exportEvents(f, [
+      ['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }],
+      ['receive', { result: 'observed', attempt: 1, expectedBytes: 10, receivedBytes: 10 }],
+      ['stat_after_receive', { result: 'begin', attempt: 1 }],
+      ['stat_after_receive', { result: 'returned', attempt: 1, stageElapsedMs: 3 }],
+      ['stat_after_receive', { result: 'observed', attempt: 1, expectedBytes: 10, remoteAfterBytes: 10 }],
+    ]);
+  } });
+  const before = await sourceSnapshot(fixture), report = await collect(fixture), actual = report.recordings[0];
+  assert.equal(report.status, 'complete');
+  assert.deepEqual(actual.exportAttempts, [{ attempt: 1, remoteBeforeBytes: 10, receivedBytes: 10,
+    remoteAfterBytes: 10, remoteAfterObservation: 'observed', eventSequences: [2, 3, 4, 5, 6] }]);
+  assert.deepEqual(actual.stageDurations, [{ seq: 5, stage: 'stat_after_receive', result: 'returned', elapsedMs: 3 }]);
+  assert.equal(actual.events[5].sources.length, 2);
+  assert.deepEqual(await sourceSnapshot(fixture), before);
+});
+
+for (const afterStat of [false, true]) test(`${afterStat ? 'after-receive stat' : 'receive'} failure does not invent a later size`, async () => {
+  const fixture = await makeFixture({ edit(f) {
+    f.status = 'failed'; f.error = { kind: 'internal', code: 'INTERNAL_ERROR', message: 'Original transfer failure.' };
+    f.cleanup = { state: 'unknown', errors: [{ kind: 'environment', code: 'DEVICE_RECOVERY_REQUIRED', message: 'Retained resource.' }] };
+    f.events = exportEvents(f, [
+      ['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }],
+      ...(afterStat ? [
+        ['receive', { result: 'observed', attempt: 1, expectedBytes: 10, receivedBytes: 10 }],
+        ['stat_after_receive', { result: 'begin', attempt: 1 }],
+        ['stat_after_receive', { result: 'failed', attempt: 1, errorKind: 'io', stageElapsedMs: 4 }],
+      ] : [['receive', { result: 'failed', attempt: 1, errorKind: 'io' }]]),
+    ]);
+  } });
+  const before = await sourceSnapshot(fixture), report = await collect(fixture), actual = report.recordings[0];
+  assert.equal(report.status, 'complete');
+  assert.equal(actual.exportAttempts[0].remoteAfterBytes, null);
+  assert.equal(actual.exportAttempts[0].remoteAfterObservation, 'not_observed');
+  assert.equal(actual.exportAttempts[0].receivedBytes, afterStat ? 10 : null);
+  assert.equal(actual.events.some(event => event.stage === 'stat_after_receive'), afterStat);
+  assert.deepEqual(report.execution, { status: fixture.status, error: fixture.error, cleanup: fixture.cleanup });
+  assert.deepEqual(await sourceSnapshot(fixture), before);
+});
+
+test('later sizes stay with their own export attempt and recording context', async () => {
+  const fixture = await makeFixture({ count: 2, edit(f) {
+    f.events = [
+      ...exportEvents(f, [
+        ['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }],
+        ['stat_after_receive', { result: 'observed', attempt: 1, expectedBytes: 10, remoteAfterBytes: 11 }],
+        ['stat', { result: 'observed', attempt: 2, expectedBytes: 20 }],
+        ['stat_after_receive', { result: 'observed', attempt: 2, expectedBytes: 20, remoteAfterBytes: 20 }],
+        ['stat', { result: 'observed', attempt: 3, expectedBytes: 30 }],
+      ]),
+      ...exportEvents(f, [['stat_after_receive', { result: 'observed', attempt: 1, expectedBytes: 40, remoteAfterBytes: 0 }]], 1),
+    ];
+  } });
+  const report = await collect(fixture);
+  assert.equal(report.status, 'complete');
+  assert.deepEqual(report.recordings[0].exportAttempts.map(value => [value.attempt, value.remoteAfterBytes, value.remoteAfterObservation]),
+    [[1, 11, 'observed'], [2, 20, 'observed'], [3, null, 'not_observed']]);
+  assert.deepEqual(report.recordings[1].exportAttempts.map(value => [value.attempt, value.remoteAfterBytes, value.remoteAfterObservation]),
+    [[1, 0, 'observed']]);
+});
+
+test('a changed remote size is retained as an observation without rewriting the original failure', async () => {
+  const fixture = await makeFixture({ edit(f) {
+    f.status = 'failed'; f.error = { kind: 'internal', code: 'INTERNAL_ERROR', message: 'Recording export was not complete.' };
+    f.events = exportEvents(f, [
+      ['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }],
+      ['receive', { result: 'observed', attempt: 1, expectedBytes: 10, receivedBytes: 8 }],
+      ['stat_after_receive', { result: 'observed', attempt: 1, expectedBytes: 10, remoteAfterBytes: 12 }],
+    ]);
+  } });
+  const report = await collect(fixture), actual = report.recordings[0].exportAttempts[0];
+  assert.equal(report.status, 'complete');
+  assert.equal(actual.remoteAfterBytes, 12);
+  assert.equal(actual.remoteAfterObservation, 'observed');
+  assert.deepEqual(report.execution.error, fixture.error);
+  assert.equal(report.execution.status, 'failed');
+  assert.equal(report.videoValidation, 'not_performed');
+  assert.equal(report.resourceHandoff, 'not_assessed');
+});
+
+for (const variant of ['repeated equal size', 'repeated different size', 'same identity different payload', 'conflicting expected size']) {
+  test(`${variant} cannot be collapsed into a unique after-receive observation`, async () => {
+    const fixture = await makeFixture({ edit(f) {
+      const stages = [
+        ['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }],
+        ['stat_after_receive', { result: 'observed', attempt: 1,
+          expectedBytes: variant === 'conflicting expected size' ? 9 : 10, remoteAfterBytes: 10 }],
+      ];
+      if (variant.startsWith('repeated')) stages.push(['stat_after_receive', { result: 'observed', attempt: 1,
+        expectedBytes: 10, remoteAfterBytes: variant === 'repeated different size' ? 11 : 10 }]);
+      f.events = exportEvents(f, stages);
+      if (variant === 'same identity different payload') {
+        const conflict = structuredClone(f.events[2]); conflict.fields.remoteAfterBytes = 11; f.events.push(conflict);
+      }
+    } });
+    const report = await collect(fixture), actual = report.recordings[0];
+    incomplete(report);
+    assert.equal(actual.status, 'incomplete');
+    assert.ok(actual.issueCodes.includes('remote_after_conflict'));
+    assert.equal(actual.exportAttempts[0].remoteAfterBytes, null);
+    assert.equal(actual.exportAttempts[0].remoteAfterObservation, 'not_observed');
+    assert.ok(actual.events.some(event => event.stage === 'stat_after_receive'));
+    assert.equal(actual.exportAttempts[0].remoteBeforeBytes, 10);
+  });
+}
+
+for (const variant of ['missing attempt', 'missing expected size', 'missing after size', 'negative after size', 'wrong stage', 'wrong result']) {
+  test(`${variant} cannot produce a valid after-receive observation`, async () => {
+    const fixture = await makeFixture({ edit(f) {
+      const fields = { result: 'observed', attempt: 1, expectedBytes: 10, remoteAfterBytes: 10 };
+      let stage = 'stat_after_receive';
+      if (variant === 'missing attempt') delete fields.attempt;
+      if (variant === 'missing expected size') delete fields.expectedBytes;
+      if (variant === 'missing after size') delete fields.remoteAfterBytes;
+      if (variant === 'negative after size') fields.remoteAfterBytes = -1;
+      if (variant === 'wrong stage') stage = 'receive';
+      if (variant === 'wrong result') fields.result = 'returned';
+      f.events = exportEvents(f, [['stat', { result: 'observed', attempt: 1, expectedBytes: 10 }], [stage, fields]]);
+    } });
+    const report = await collect(fixture);
+    incomplete(report);
+    assert.ok(report.issues.some(issue => issue.code === 'invalid_log_record'));
+    assert.equal(report.recordings[0].exportAttempts[0].remoteAfterBytes, null);
+    assert.equal(report.recordings[0].exportAttempts[0].remoteAfterObservation, 'not_observed');
+  });
+}
 
 test('archive metadata is an observation and only compares to the uniquely indexed video', async () => {
   const fixture = await makeFixture({ edit(f) {

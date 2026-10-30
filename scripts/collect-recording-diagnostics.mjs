@@ -13,9 +13,9 @@ const HASH = /^[0-9a-f]{64}$/;
 const ID = /^[0-9a-f]{32}$/;
 const PREFIX = 'HARMONYOS_RECORDING_DIAGNOSTIC ';
 const BINDING = 'MAESTRO_RECORDING_OUTPUT ';
-const STAGES = new Set(('created service processes captures query start ready stop capture_ended export export_scratch export_media stat receive validate archive copy flush delete media_retained media_removed limit_reached resource_failure cleanup_remote cleanup_local cleanup_temp cleanup_resource cleanup close abort truncated').split(' '));
+const STAGES = new Set(('created service processes captures query start ready stop capture_ended export export_scratch export_media stat receive stat_after_receive validate archive copy flush delete media_retained media_removed limit_reached resource_failure cleanup_remote cleanup_local cleanup_temp cleanup_resource cleanup close abort truncated').split(' '));
 const RESULTS = new Set('begin returned acknowledged observed absent present invalid incomplete failed skipped'.split(' '));
-const FIELD_KEYS = new Set(('result stageElapsedMs attempt expectedBytes receivedBytes copiedBytes archiveBytes archiveSha256 archiveMetadataUnavailable count pids pidsTruncated retentionRequested persistent priorFailure cleanupErrors mediaUri uriUnavailable mediaUriPreviouslyObserved errorKind truncated droppedEvents emissionFailures terminal expectedEventCount').split(' '));
+const FIELD_KEYS = new Set(('result stageElapsedMs attempt expectedBytes receivedBytes remoteAfterBytes copiedBytes archiveBytes archiveSha256 archiveMetadataUnavailable count pids pidsTruncated retentionRequested persistent priorFailure cleanupErrors mediaUri uriUnavailable mediaUriPreviouslyObserved errorKind truncated droppedEvents emissionFailures terminal expectedEventCount').split(' '));
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
@@ -123,7 +123,7 @@ function validEvent(event) {
   if (Object.hasOwn(event, 'resourceId')) requireValue(event.resourceId.replaceAll('-', '') === event.recordingId, 'Recording ID does not match its durable resource ID.');
   const fields = event.fields;
   requireValue(Object.keys(fields).every(key => FIELD_KEYS.has(key)) && RESULTS.has(fields.result), 'Unknown diagnostic fields or result.');
-  for (const key of ['stageElapsedMs', 'attempt', 'expectedBytes', 'receivedBytes', 'copiedBytes', 'archiveBytes', 'count', 'cleanupErrors', 'droppedEvents', 'emissionFailures', 'expectedEventCount']) {
+  for (const key of ['stageElapsedMs', 'attempt', 'expectedBytes', 'receivedBytes', 'remoteAfterBytes', 'copiedBytes', 'archiveBytes', 'count', 'cleanupErrors', 'droppedEvents', 'emissionFailures', 'expectedEventCount']) {
     if (Object.hasOwn(fields, key)) requireValue(integer(fields[key]) && (!['attempt', 'expectedEventCount'].includes(key) || fields[key] > 0), 'Invalid diagnostic number.');
   }
   for (const key of ['pidsTruncated', 'retentionRequested', 'persistent', 'priorFailure', 'archiveMetadataUnavailable', 'uriUnavailable', 'mediaUriPreviouslyObserved', 'truncated', 'terminal']) {
@@ -134,6 +134,11 @@ function validEvent(event) {
   if (Object.hasOwn(fields, 'archiveSha256')) requireValue(matches(HASH, fields.archiveSha256), 'Invalid archive observation hash.');
   if (event.stage === 'archive' && fields.result === 'observed') requireValue(fields.archiveMetadataUnavailable === true ||
     (integer(fields.archiveBytes) && matches(HASH, fields.archiveSha256)), 'Archive observation lacks size/hash or an explicit unavailable marker.');
+  if (event.stage === 'stat_after_receive') {
+    requireValue(integer(fields.attempt) && fields.attempt > 0 && ['begin', 'returned', 'failed', 'observed'].includes(fields.result), 'Invalid after-receive stat stage.');
+    if (fields.result === 'observed') requireValue(integer(fields.expectedBytes) && integer(fields.remoteAfterBytes), 'After-receive stat observation lacks sizes.');
+  }
+  if (Object.hasOwn(fields, 'remoteAfterBytes')) requireValue(event.stage === 'stat_after_receive' && fields.result === 'observed', 'After-receive size is not an observed stat.');
   if (Object.hasOwn(fields, 'mediaUri')) requireValue(typeof fields.mediaUri === 'string' && fields.mediaUri.length <= 512 &&
     new RegExp(`^file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-${event.recordingId}\\.mp4$`).test(fields.mediaUri), 'Media URI does not identify this recording.');
   if (fields.terminal === true) requireValue(['close', 'abort'].includes(event.stage) && ['returned', 'failed'].includes(fields.result) &&
@@ -284,10 +289,13 @@ export async function collectRecordingDiagnostics({ resultPath, outputDirectory,
           } else {
             validEvent(value);
             const key = `${value.contextId}/${value.recordingId}`;
-            const group = groups.get(key) ?? { contextId: value.contextId, recordingId: value.recordingId, eventMap: new Map(), issueCodes: [] };
+            const group = groups.get(key) ?? { contextId: value.contextId, recordingId: value.recordingId, eventMap: new Map(), afterStatConflicts: new Set(), issueCodes: [] };
             const previous = group.eventMap.get(value.seq);
             if (previous) {
-              if (previous.payload !== payload) { group.issueCodes.push('event_conflict'); issues('event_conflict', 'Same event identity has different JSON bytes.', value.contextId, source); }
+              if (previous.payload !== payload) {
+                group.issueCodes.push('event_conflict'); issues('event_conflict', 'Same event identity has different JSON bytes.', value.contextId, source);
+                for (const event of [previous.event, value]) if (event.stage === 'stat_after_receive') group.afterStatConflicts.add(event.fields.attempt);
+              }
               else previous.event.sources.push(source);
             } else group.eventMap.set(value.seq, { payload, event: { ...value, resourceId: value.resourceId ?? null, sources: [source] } });
             groups.set(key, group);
@@ -352,8 +360,14 @@ export async function collectRecordingDiagnostics({ resultPath, outputDirectory,
       const attempts = [...new Set(ordered.map(event => event.fields.attempt).filter(value => value !== undefined))].sort((a, b) => a - b).map(attempt => {
         const selected = ordered.filter(event => event.fields.attempt === attempt);
         const observed = (stage, key) => selected.filter(event => event.stage === stage && event.fields.result === 'observed' && event.fields[key] !== undefined).at(-1)?.fields[key] ?? null;
+        const after = selected.filter(event => event.stage === 'stat_after_receive' && event.fields.result === 'observed');
+        const inconsistentBefore = after.length === 1 && selected.some(event => ['stat', 'receive'].includes(event.stage) &&
+          event.fields.result === 'observed' && event.fields.expectedBytes !== undefined && event.fields.expectedBytes !== after[0].fields.expectedBytes);
+        const afterConflict = after.length > 1 || group.afterStatConflicts.has(attempt) || inconsistentBefore;
+        if (afterConflict) problem('remote_after_conflict', 'After-receive stat has duplicate or conflicting observations for this export attempt.');
+        const remoteAfterBytes = after.length === 1 && !afterConflict ? after[0].fields.remoteAfterBytes : null;
         return { attempt, remoteBeforeBytes: observed('stat', 'expectedBytes'), receivedBytes: observed('receive', 'receivedBytes'),
-          remoteAfterBytes: null, remoteAfterObservation: 'not_observed', eventSequences: selected.map(event => event.seq) };
+          remoteAfterBytes, remoteAfterObservation: remoteAfterBytes === null ? 'not_observed' : 'observed', eventSequences: selected.map(event => event.seq) };
       });
       report.recordings.push({ contextId: group.contextId, recordingId: group.recordingId, resourceId: resources.length === 1 ? resources[0] : null,
         status: group.issueCodes.length ? 'incomplete' : 'complete', video, bindingSources: binding?.sources ?? [], events: ordered,

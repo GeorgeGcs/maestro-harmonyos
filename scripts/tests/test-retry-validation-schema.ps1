@@ -7,8 +7,9 @@ $schemas = Join-Path $project 'docs/protocol'
 $script:checks = 0
 $script:realDocuments = 0
 function Copy-Value($Value) { return $Value | ConvertTo-Json -Depth 100 | ConvertFrom-Json -AsHashtable }
-function Assert-Schema($Name, $Value, [bool]$Expected, $Label) {
-    $actual = Test-Json -Json ($Value | ConvertTo-Json -Depth 100 -Compress) -SchemaFile (Join-Path $schemas ($Name + '-v1.schema.json')) -ErrorAction SilentlyContinue
+function Assert-Schema($Name, $Value, [bool]$Expected, $Label, [int]$Version = 1) {
+    if ($Name -eq 'retry-summary' -and $Value.schemaVersion -eq 2) { $Version = 2 }
+    $actual = Test-Json -Json ($Value | ConvertTo-Json -Depth 100 -Compress) -SchemaFile (Join-Path $schemas ($Name + '-v' + $Version + '.schema.json')) -ErrorAction SilentlyContinue
     if ($actual -ne $Expected) { throw ('Schema expectation failed: ' + $Label) }
     $script:checks++
 }
@@ -56,6 +57,24 @@ Assert-Schema 'retry-summary' $incomplete $true 'initial incomplete summary'
 $bad=Copy-Value $incomplete; $bad.firstPassStatus='passed'; Assert-Schema 'retry-summary' $bad $false 'incomplete cannot claim first pass'
 $bad=Copy-Value $retrySummary; $bad.traceSha256=$null; Assert-Schema 'retry-summary' $bad $false 'complete requires trace hash'
 $bad=Copy-Value $retrySummary; $bad.outcomeCounts.Fallback=1; Assert-Schema 'retry-summary' $bad $false 'unknown raw outcome'
+
+foreach ($event in $events) {
+    $v2 = Copy-Value $event
+    if ($v2.event -eq 'traceStarted') { $v2.schemaVersion = 2 }
+    if ($v2.event -in @('stepStarted','stepFinished','stepInterrupted')) { $v2.sourceIdentity = $null }
+    Assert-Schema 'retry-trace' $v2 $true ('v2 synthetic ' + $v2.event) 2
+}
+$v2Summary = Copy-Value $retrySummary; $v2Summary.schemaVersion = 2
+Assert-Schema 'retry-summary' $v2Summary $true 'v2 summary'
+$v2Step = Copy-Value $events[1]; $v2Step.sourceIdentity=$null
+$bad=Copy-Value $v2Step; $bad.Remove('sourceIdentity'); Assert-Schema 'retry-trace' $bad $false 'v2 identity cannot be omitted' 2
+$bad=Copy-Value $v2Step; $bad.sourceIdentity='C:\fixture\flow.yaml'; Assert-Schema 'retry-trace' $bad $false 'generated step has no original source' 2
+$v2Step.sourceOrigin='yaml'; $v2Step.sourcePath=('sources/'+$sha+'.yaml'); $v2Step.sourceSha256=$sha
+$v2Step.sourceOffset=0; $v2Step.sourceIdentity='C:\fixture\flow.yaml'
+Assert-Schema 'retry-trace' $v2Step $true 'v2 YAML source identity' 2
+$bad=Copy-Value $v2Step; $bad.sourceIdentity=$null; Assert-Schema 'retry-trace' $bad $false 'v2 YAML identity is required' 2
+$bad=Copy-Value $v2Step; $bad.sourceIdentity=@(); Assert-Schema 'retry-trace' $bad $false 'v2 identity must be a string' 2
+Assert-Schema 'retry-trace' $v2Step $false 'v2 step must not be accepted by the original v1 schema' 1
 
 $unit = @{ unitId='login'; profile='demo'; entry='flows/login.yaml'; sourceRoot='flows'; requiredTopLevelFlows=@(@{
     path='flows/login.yaml'; name='login'; requiredSteps=@(@{path='flows/login.yaml';commandIndex=1;role='assertion'}) }) }
@@ -123,8 +142,14 @@ foreach ($root in @($ValidationArtifactRoot, $RetryArtifactRoot)) {
                 Assert-Schema 'validation-plan-input' $source $true 'local source plan'; $script:realDocuments++
             }
         } elseif ($file.Name -eq 'retry-trace.jsonl') {
+            $traceVersion = $null
             foreach ($line in Get-Content -LiteralPath $file.FullName) {
-                Assert-Schema 'retry-trace' ($line | ConvertFrom-Json -AsHashtable) $true 'local trace record'; $script:realDocuments++
+                $event = $line | ConvertFrom-Json -AsHashtable
+                if ($null -eq $traceVersion) {
+                    if ($event.event -ne 'traceStarted' -or $event.schemaVersion -notin @(1,2)) { throw 'Trace must start with a supported version header.' }
+                    $traceVersion = $event.schemaVersion
+                }
+                Assert-Schema 'retry-trace' $event $true 'local trace record' $traceVersion; $script:realDocuments++
             }
         }
     }

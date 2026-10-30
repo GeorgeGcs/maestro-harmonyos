@@ -24,7 +24,11 @@ collector 只读取已有源文件，不调用 HDC、恢复、启停或删除设
 
 明确绑定在 attempt 外的 context 单独列为 `foreignContexts`，不计入当前录屏，不凭时间接近强行配对。一个 outputPath 被多个 context 绑定时，视频为 `ambiguous`，相关录屏和报告均不完整。提前启动失败的完整 `abort/failed` 轨迹，在尚未 copy/flush 成功且输出确实不存在时，可以同时为诊断 `complete`、`video.state=missing`；不能由缺少索引推断文件不存在。
 
-`observations` 和 `stageDurations` 引用已有事件序号；`exportAttempts` 只汇总已观察的导出尝试。本 producer 未提供远端拉取后的 stat，因此 `remoteAfterBytes=null`、`remoteAfterObservation=not_observed`，不从本地长度或拉取前 stat 补造它。
+`observations` 和 `stageDurations` 引用已有事件序号；`exportAttempts` 按同一 context、recording 和 attempt 汇总已观察的导出尝试。producer 的 `stat_after_receive` 阶段记录既有接收后 stat 的 begin、returned、failed，以及成功取得大小时的 observed；observed 必须包含 attempt、原接收前 expectedBytes 和实际 remoteAfterBytes。接收抛错时不会进入该阶段。
+
+只有该次尝试唯一且合法的 `stat_after_receive/observed` 才填入 `remoteAfterBytes`，同时标记 `remoteAfterObservation=observed`。旧日志、接收失败或后续 stat 失败而没有 observed 时，仍为 null / not_observed；不从本地长度、接收前 stat 或另一次尝试补造。完全相同的同序号事件出现在多个日志时合并来源，不算多次观察；不同序号重复 observed、同序号冲突或其 expectedBytes 与同次已观察的接收前大小矛盾，会记录 `remote_after_conflict`，使诊断 incomplete，并将汇总保留为 null / not_observed。原事件和来源仍在报告内。
+
+接收后大小与接收前大小不同可以是有效的失败诊断事实，照实记录；相等也不能证明内容、哈希或码流没有变化，更不能证明设备媒体可删除。Schema 兼容旧报告的 null / not_observed，并约束 observed 必须对应非负整数、not_observed 必须对应 null。
 
 每段必填的 `archiveObservations` 收集 `archive/observed` 事件的序号、attempt、归档字节数/hash 及 metadataUnavailable 标记；没有这些事件时为空数组。仅在视频唯一且已被证据索引和来源核验确认时，`indexedVideoMatch` 才比较观察到的归档大小/hash 与该视频，否则为 null。producer 未给出归档文件路径，collector 未独立读取该归档，故 `archiveFileVerification=not_performed`；匹配不能替代原归档文件核验，缺失归档元数据也不能补造。
 
