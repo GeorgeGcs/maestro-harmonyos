@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { noLinks, samePath, inside, requireValue, key } from '../validation/io.mjs';
 import { readMetadata } from './snapshot-build.mjs';
 import { validateDocument } from '../../examples/agent-client/client.mjs';
+import { isDeepStrictEqual } from 'node:util';
+import { collectMaintenanceEvidence } from '../recovery/maintenance-archive.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -23,12 +25,14 @@ function relativeFile(root, relative) {
 }
 
 /** Read-only collection. It never queries a device, changes a reservation or authorizes release. */
-export async function collectArtifacts({ ciDirectory, outputDirectory, stateRecord = null, expectedLaunchId = null, limits: overrides = {} }) {
+export async function collectArtifacts({ ciDirectory, outputDirectory, stateRecord = null, recoveryStateRecord = null, expectedLaunchId = null, limits: overrides = {} }) {
   requireValue(typeof ciDirectory === 'string' && typeof outputDirectory === 'string', 'Explicit CI and new output directories are required.');
   const source = path.resolve(ciDirectory), output = path.resolve(outputDirectory);
   requireValue(path.basename(source).startsWith('ci-') && uuid(path.basename(source).slice(3)), 'Select one exact ci-UUID invocation directory.');
   requireValue(expectedLaunchId === null || uuid(expectedLaunchId) && path.basename(source) === 'ci-' + expectedLaunchId,
     'Expected launch does not identify the selected CI directory.');
+  requireValue(recoveryStateRecord === null || (typeof recoveryStateRecord === 'string' && stateRecord === null && uuid(expectedLaunchId)),
+    'Supplemental recovery state requires an explicit launch UUID and cannot replace a hard-stop state.');
   requireValue(!samePath(source, output) && !inside(source, output) && !inside(output, source), 'Output overlaps the CI input directory.');
   requireValue(overrides && typeof overrides === 'object' && !Array.isArray(overrides), 'Invalid collector limits.');
   const budget = { ...limits };
@@ -44,7 +48,7 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
   catch (error) {
     if (stateRecord !== null) { requireValue(typeof stateRecord === 'string' && uuid(expectedLaunchId), 'An explicit state record requires the expected launch UUID.'); declared = (await readMetadata(stateRecord)).value; }
   }
-  for (const root of [declared?.agentRoot, declared?.recoveryRoot, stateRecord].filter(value => typeof value === 'string')) {
+  for (const root of [declared?.agentRoot, declared?.recoveryRoot, stateRecord, recoveryStateRecord].filter(value => typeof value === 'string')) {
     requireValue(!samePath(root, output) && !inside(root, output) && !inside(output, root), 'Output overlaps a declared input root.');
   }
   await fs.mkdir(output); // Exclusive creation; existing and interrupted archives are never overwritten.
@@ -289,8 +293,7 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
       } catch (error) { issue('video_evidence_not_collected', error.message, video?.path ?? null); }
     }
   }
-  async function recovery(record) {
-    const resolved = record.resolution;
+  async function recovery(record, resolved = record.resolution) {
     const result = report.originals.result;
     const errors = [result?.error, ...(Array.isArray(result?.cleanup?.errors) ? result.cleanup.errors : [])].filter(Boolean);
     const requiredOwners = errors.filter(error => error.code === 'DEVICE_RECOVERY_REQUIRED').map(error => error.details?.recoverySessionId);
@@ -310,9 +313,17 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
     requireValue(uuid(recoveryId) && path.basename(resolved.reportPath) === recoveryId + '.json', 'Invalid recovery receipt name.');
     await copy(resolved.reportPath, 'recovery/receipt.json');
     const receipt = await metadata(resolved.reportPath, resolved.reportSha256);
-    requireValue([1, 2].includes(receipt.schemaVersion) && receipt.deviceId === record.deviceId && receipt.sessionId === resolved.sessionId &&
+    requireValue([1, 2, 3].includes(receipt.schemaVersion) && receipt.deviceId === record.deviceId && receipt.sessionId === resolved.sessionId &&
       receipt.recoveryId === recoveryId, 'Receipt belongs to another device or owner.');
     report.recoveryEvidence = 'receipt';
+    if (receipt.schemaVersion === 3) {
+      const closure = await collectMaintenanceEvidence({ receipt, resolution: resolved, ownerDirectory: owner, deviceId: record.deviceId,
+        issue, read: async (file, relative, expected) => {
+          overlap(file); await copy(file, relative); return metadata(file, expected);
+        } });
+      if (closure.complete && unresolved.length === 0) report.recoveryEvidence = 'maintenance_receipt_and_chain';
+      return;
+    }
     if (receipt.schemaVersion === 1) { requireValue(!('recordingResources' in receipt), 'Unexpected v1 recording resources.'); return; }
     const resource = receipt.recordingResources, snapshotPath = path.join(owner, 'recoveries', recoveryId + '-recordings.json');
     requireValue(resource && samePath(resource.path, snapshotPath) && digest(resource.sha256), 'Invalid recording snapshot reference.');
@@ -360,6 +371,7 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
       requireValue(preflight.status === 'blocked' && preflight.dispatched === false, 'No matching CI result, explicit retained state, or blocked preflight.');
       report.originals.preflight = preflight;
     }
+    requireValue(recoveryStateRecord === null || copied.has(key(ciResult)), 'Supplemental recovery requires an existing CI result.');
     if (record) {
       requireValue(record.protocol === 'maestro.harmonyos.ci-device' && record.schemaVersion === 1 && record.kind === 'single' &&
         uuid(record.launchId) && uuid(record.runId) && uuid(record.attemptId) && typeof record.deviceId === 'string' && record.deviceId &&
@@ -408,7 +420,21 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
           catch (error) { issue(name + '_verification_failed', error.message, item.path); }
         } else if (name === 'inputs') issue('inputs_missing', 'The fixed input snapshot is missing.');
       }
-      try { await recovery(record); } catch (error) { issue('recovery_verification_failed', error.message); }
+      let resolution = record.resolution;
+      if (recoveryStateRecord !== null) {
+        try {
+          requireValue(copied.has(key(ciResult)), 'Supplemental recovery requires an existing immutable CI result.');
+          await copy(recoveryStateRecord, 'control/recovery-state.json');
+          const recovered = await metadata(recoveryStateRecord);
+          const originalFields = value => Object.fromEntries(Object.entries(value).filter(([name]) => !['state', 'updatedAt', 'resolution'].includes(name)));
+          requireValue(record.state !== 'released' && recovered.state === 'released' && recovered.resolution?.mode === 'recovery' &&
+            recovered.resolution?.releaseConfirmed === true && isDeepStrictEqual(originalFields(record), originalFields(recovered)),
+          'Supplemental recovery state changed the original CI invocation or execution.');
+          report.originals.recoveryState = recovered;
+          resolution = recovered.resolution;
+        } catch (error) { issue('supplemental_recovery_rejected', error.message, recoveryStateRecord); }
+      }
+      try { await recovery(record, resolution); } catch (error) { issue('recovery_verification_failed', error.message); }
     }
   } catch (error) { issue('collection_failed', error.message); }
   // Recheck all inputs after the closure is collected, not merely after each copy.
@@ -430,7 +456,7 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
     const options = {}, names = { '--ci-directory': 'ciDirectory', '--output-directory': 'outputDirectory',
-      '--state-record': 'stateRecord', '--expected-launch-id': 'expectedLaunchId' };
+      '--state-record': 'stateRecord', '--recovery-state-record': 'recoveryStateRecord', '--expected-launch-id': 'expectedLaunchId' };
     for (let i = 2; i < process.argv.length; i += 2) {
       const field = names[process.argv[i]];
       requireValue(field && typeof process.argv[i + 1] === 'string' && !Object.hasOwn(options, field), 'Use explicit, unique collector flags and values.');

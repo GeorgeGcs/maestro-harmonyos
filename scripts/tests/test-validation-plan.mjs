@@ -42,6 +42,17 @@ async function review(context, intervention = 'none') {
   return { finished, reviewed: await reviewPlan({ summaryPath: context.summaryPath, reviewPath: file }) };
 }
 
+test('maintenance verifier changes invalidate a frozen validation plan', async t => {
+  for (const name of ['verify-maintenance.mjs', 'windows-boot.mjs']) await t.test(name, async t => {
+    const context = await setup(t);
+    const file = path.join(context.project, 'scripts/recovery', name);
+    assert.ok(context.plan.toolFiles.some(item => item.path === file));
+    await checkFrozen(context.plan);
+    await fs.appendFile(file, '\n// changed after freeze');
+    await assert.rejects(checkFrozen(context.plan), /Frozen implementation/);
+  });
+});
+
 async function sourceIdentityScenario(t, { version = 2, actual = 'A', required = 'B', registered = ['A', 'B'],
   relocated = false, alterEvent = () => {} } = {}) {
   let children;

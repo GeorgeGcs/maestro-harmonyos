@@ -11,8 +11,8 @@ export function encode(value) {
 }
 
 // Synthetic evidence only. No installed CLI, device state, executable or HDC is accessed.
-export async function maintenanceFixture(root, transform = (_kind, value) => value) {
-  const deviceId = 'maintenance-fixture', ownerId = randomUUID(), maintenanceId = randomUUID(), generation = randomUUID();
+export async function maintenanceFixture(root, transform = (_kind, value) => value, { deviceId = 'maintenance-fixture' } = {}) {
+  const ownerId = randomUUID(), maintenanceId = randomUUID(), generation = randomUUID();
   const recoveryRoot = path.join(root, 'recovery'), key = sha(Buffer.from(deviceId));
   const owner = path.join(recoveryRoot, key, ownerId), evidence = path.join(owner, 'maintenance', maintenanceId);
   await fs.mkdir(evidence, { recursive: true }); await fs.mkdir(path.join(owner, 'recoveries'));

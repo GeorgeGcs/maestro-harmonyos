@@ -207,5 +207,6 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
   }
   return { sessionId: ownerId, reportPath: gate.reportPath, reportSha256: gate.reportSha256, observedAt: receipt.observedAt,
     maintenanceId: cp.maintenanceId, originalExecutionResult: 'unknown', originalPendingOperations: pending.length,
-    recordingResources: null, recordingCheckedFiles: 0, maintenanceCheckedFiles: records.size, recoveryResponseSha256: responseSha256 };
+    recordingResources: null, recordingCheckedFiles: 0, maintenanceCheckedFiles: records.size,
+    recoveryResponsePath: responsePath === null ? null : path.resolve(responsePath), recoveryResponseSha256: responseSha256 };
 }

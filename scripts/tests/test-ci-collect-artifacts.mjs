@@ -6,6 +6,8 @@ import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { collectArtifacts } from '../ci/collect-artifacts.mjs';
+import { maintenanceFixture } from './fixtures/maintenance.mjs';
+import { verifyMaintenanceRelease } from '../recovery/verify-maintenance.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const parent = path.join(repo, 'artifacts/ci-archive-tests');
@@ -13,6 +15,93 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, typeof value === 'string' ? value : JSON.stringify(value)); };
 const fileHash = async file => hash(await fs.readFile(file));
 const document = (kind, data) => ({ protocol: 'maestro.harmonyos.agent', schemaVersion: 1, kind, revision: 1, observedAt: new Date().toISOString(), data });
+
+async function withMaintenance(t) {
+  const f = await fixture(t, 'failed', 'unknown');
+  const maintenance = await maintenanceFixture(f.root, undefined, { deviceId: f.record.deviceId });
+  const checked = await verifyMaintenanceRelease(maintenance.input);
+  f.record.createdAt = maintenance.input.createdAt;
+  f.result.data.cleanup.errors.push({ code: 'DEVICE_RECOVERY_REQUIRED', details: { recoverySessionId: checked.sessionId } });
+  await f.persist();
+  const recovered = { ...f.record, state: 'released', updatedAt: '2026-10-31T02:00:00.000Z',
+    resolution: { mode: 'recovery', recoveryKind: 'ordered_restart_maintenance', releaseConfirmed: true, ...checked } };
+  const recoveryStateRecord = path.join(f.root, 'recovered-state.json');
+  await write(recoveryStateRecord, recovered);
+  return { ...f, maintenance, recovered, recoveryStateRecord,
+    options: { recoveryStateRecord, expectedLaunchId: f.record.launchId } };
+}
+
+test('archives a completed maintenance chain beside the immutable failed CI result', async t => {
+  const f = await withMaintenance(t), before = await fileHash(path.join(f.ci, 'ci-result.json'));
+  // A newer owner, changed current journal and unrelated files must not influence historical collection.
+  await write(f.maintenance.gatePath, { ownerSessionId: randomUUID() });
+  await write(f.maintenance.journalPath, { newer: true });
+  await write(path.join(f.maintenance.evidence, 'unreferenced-private.json'), { private: true });
+  const report = await f.collect(f.options);
+  assert.equal(report.status, 'complete', JSON.stringify(report.issues));
+  assert.equal(report.recoveryEvidence, 'maintenance_receipt_and_chain');
+  assert.equal(report.originals.ci.state, 'needs_inspection');
+  assert.equal(report.originals.ci.execution, 'failed');
+  assert.equal(report.originals.result.cleanup.state, 'unknown');
+  assert.equal(report.originals.recoveryState.state, 'released');
+  assert.equal(report.scope.deviceReleaseAssessment, 'not_performed');
+  assert.equal(report.files.some(file => file.source === f.maintenance.gatePath || file.source === f.maintenance.journalPath || file.source.endsWith('unreferenced-private.json')), false);
+  const archivedEvidence = report.files.filter(file => file.path.startsWith('recovery/maintenance/'));
+  const originals = (await fs.readdir(f.maintenance.evidence)).filter(name => name !== 'unreferenced-private.json');
+  assert.deepEqual(archivedEvidence.map(file => path.basename(file.source)).sort(), originals.sort());
+  assert.equal(await fileHash(path.join(f.ci, 'ci-result.json')), before);
+});
+
+for (const mode of ['missing-head', 'missing-response', 'wrong-response-owner', 'changed-journal', 'foreign-state', 'changed-execution', 'missing-response-path', 'traversal', 'limited-budget']) {
+  test(`maintenance archive preserves partials and reports incomplete for ${mode}`, async t => {
+    const f = await withMaintenance(t), before = await fileHash(path.join(f.ci, 'ci-result.json'));
+    if (mode === 'missing-head') await fs.unlink(path.join(f.maintenance.evidence, f.maintenance.response.head.path));
+    if (mode === 'missing-response') await fs.unlink(f.maintenance.input.responsePath);
+    if (mode === 'wrong-response-owner') {
+      await write(f.maintenance.input.responsePath, { ...f.maintenance.response, ownerId: randomUUID() });
+      f.recovered.resolution.recoveryResponseSha256 = await fileHash(f.maintenance.input.responsePath);
+    }
+    if (mode === 'changed-journal') {
+      const name = (await fs.readdir(f.maintenance.evidence)).find(name => name.startsWith('original-journal-'));
+      await write(path.join(f.maintenance.evidence, name), { changed: true });
+    }
+    if (mode === 'foreign-state') f.recovered.launchId = randomUUID();
+    if (mode === 'changed-execution') f.recovered.execution = 'passed';
+    if (mode === 'missing-response-path') delete f.recovered.resolution.recoveryResponsePath;
+    if (mode === 'traversal') {
+      f.maintenance.response.head.path = '../outside.json';
+      await write(f.maintenance.input.responsePath, f.maintenance.response);
+      f.recovered.resolution.recoveryResponseSha256 = await fileHash(f.maintenance.input.responsePath);
+    }
+    await write(f.recoveryStateRecord, f.recovered);
+    const report = await f.collect({ ...f.options, ...(mode === 'limited-budget' ? { limits: { files: 25 } } : {}) });
+    assert.equal(report.status, 'incomplete', mode);
+    assert.notEqual(report.recoveryEvidence, 'maintenance_receipt_and_chain');
+    assert.equal(report.originals.ci.execution, 'failed');
+    assert.ok(report.files.some(file => file.path.endsWith('unfinished.partial') && file.status === 'copied'));
+    assert.equal(await fileHash(path.join(f.ci, 'ci-result.json')), before);
+    if (!['foreign-state', 'changed-execution', 'limited-budget'].includes(mode)) {
+      assert.ok(report.files.some(file => file.source.includes('host-before-') && file.status === 'copied'));
+    }
+  });
+}
+
+test('supplemental recovery cannot override hard-stop input or omit the expected launch', async t => {
+  const f = await withMaintenance(t);
+  await assert.rejects(f.collect({ recoveryStateRecord: f.recoveryStateRecord }), /explicit launch/);
+  await assert.rejects(f.collect({ ...f.options, stateRecord: f.recoveryStateRecord }), /explicit launch/);
+});
+
+test('public archive command accepts a separate recovery state without changing the CI result', async t => {
+  const f = await withMaintenance(t);
+  const result = spawnSync(process.execPath, [path.join(repo, 'scripts/ci/collect-artifacts.mjs'),
+    '--ci-directory', f.ci, '--output-directory', f.output, '--recovery-state-record', f.recoveryStateRecord,
+    '--expected-launch-id', f.record.launchId], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  assert.equal(result.status, 0, result.stderr);
+  const report = JSON.parse(await fs.readFile(path.join(f.output, 'archive-manifest.json')));
+  assert.equal(report.recoveryEvidence, 'maintenance_receipt_and_chain');
+  assert.equal(report.originals.ci.state, 'needs_inspection');
+});
 
 async function fixture(t, status = 'passed', cleanup = 'complete') {
   const root = path.join(parent, randomUUID()), launchId = randomUUID(), runId = randomUUID(), attemptId = randomUUID();

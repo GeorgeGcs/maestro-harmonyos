@@ -177,7 +177,7 @@ pwsh -NoProfile -File scripts/ci/run-device-suite.ps1 `
 
 如果普通恢复无法确认旧有限命令的结束，可以按[设备维护流程](session-maintenance.md)完成有证据的依次重启。`RecoveryReportPath` 也接受该流程 `complete` 返回的完整 `harmonyos.reboot-recovery` JSON。此分支单独核对版本 2 占用记录、版本 3 回执及维护链，不把维护回执降级成普通 v2 恢复。核销结果记录 `recoveryKind=ordered_restart_maintenance`，原执行仍保留失败或未知。只完成 `prepare`、`resume` 或只有一份声称成功的 JSON 均不够。普通完成路径也不会用维护释放来证明原测试已经通过。
 
-维护核销仍保留原进程身份检查：身份丢失时不会仅凭重启回执跳过。现有收集器尚不支持维护版本 3 的完整归档，需单独保留维护响应与原维护证据目录，不将核销成功当成证据已经收齐。
+维护核销仍保留原进程身份检查：身份丢失时不会仅凭重启回执跳过。请保留完整维护响应文件；核销结果会记录该路径及哈希，供后续归档使用，不将核销成功当成证据已经收齐。
 
 若进程身份缺失、原进程仍存活、恢复记录损坏或恢复返回 unknown，核销失败，原占用保留。没有“强制清除”开关。录屏的第二版清理凭据还会核对不可变资源快照及保留原件，确认结束、归属和清理；缺少这些证据时仍可能持续返回 unknown，不能只确认一个提示就继续测试。
 
@@ -228,6 +228,20 @@ node scripts/ci/collect-artifacts.mjs `
 ```
 
 状态必须仍属于该次 launch，且目录、runId、attemptId、设备和控制记录相符；不能拿下一次运行的状态替代。已有 `ci-result.json` 时不接受另一份状态记录覆盖它。只有 `ci-preflight.json` 的预检阻塞也可按第一条命令收集，不会因此登记设备运行。
+
+原 `ci-result.json` 已存在、之后通过 `-ReconcileOnly` 核销占用时，可单独补充恢复后的状态文件：
+
+```powershell
+node scripts/ci/collect-artifacts.mjs `
+  --ci-directory D:\ci\outputs\ci-<launchId> `
+  --recovery-state-record D:\ci\device-state\<device-hash>.json `
+  --expected-launch-id <launchId> `
+  --output-directory D:\ci\archives\<unique-name>
+```
+
+该参数不能与 `--state-record` 同用，且必须有原 CI 结果。除 `state`、`updatedAt`、`resolution` 外，补充记录的全部字段必须与原记录一致，原执行结果、退出码、输入和运行身份均不能改变。两份记录分别保存在归档中；核销只证明当时核实了资源释放，不会把原执行改成 passed。状态文件已被下一作业覆盖时，应使用此前保存的、属于该次 launch 的恢复状态副本。
+
+维护版本 3 的归档由回执及已核对哈希的完整响应开始，只跟随该 owner/maintenance 目录内的明确引用。收集检查点、阶段链、重启观察、原日志及回执快照、调用前后日志和清理批次，不读取当前 gate、当前日志或历史工具文件，不扫描其他维护目录。缺失响应路径、引用文件或哈希不符时保留已取得材料并返回 incomplete；一个损坏文件不阻止其他可读取材料收集。元数据文件上限为 4 MiB，整组文件仍受下述归档预算限制。`maintenance_receipt_and_chain` 表示引用的维护材料收齐，不是重新执行恢复或独立批准设备接管。
 
 收集范围是选定 CI 目录、精确的 `agentRoot/runs/<runId>/<attemptId>/` 子树（含源码快照和未封存的 partial 文件）、对应控制记录，以及 `resolution` 明确绑定的回执、录屏快照和已登记原件。索引、manifest、源码内容地址和回执引用的哈希另行核对。不会扫描其他 attempt、按当前 gate 猜 owner，或复制整个会话目录。若原生错误指出 `DEVICE_RECOVERY_REQUIRED` 的 owner，却没有绑定回执，报告会列出未收集的恢复材料并返回非零；这不表示该 owner 没有保留原件。
 

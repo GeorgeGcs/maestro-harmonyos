@@ -86,6 +86,7 @@ export async function freezeSuite({ manifestPath, projectRoot, deviceId, outputD
   const configurationPresent = await fs.stat(configurationPath).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1', 'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs',
     'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
+    'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
     'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
     'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
     'scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs',

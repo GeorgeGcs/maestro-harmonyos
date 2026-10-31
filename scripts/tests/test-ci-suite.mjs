@@ -16,6 +16,7 @@ const json = async (file, value) => { await fs.mkdir(path.dirname(file), { recur
 const environment = { ...process.env, TEST_VALUE: 'fixture-value' };
 const toolNames = ['scripts/run-harmonyos.ps1', 'scripts/ci/run-device-suite.ps1', 'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs',
   'scripts/ci/read-junit.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-videos.mjs',
+  'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
   'scripts/verify-recording.ps1', 'scripts/validation/io.mjs',
   'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
   'scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs',
@@ -64,6 +65,17 @@ test('fixed CI inputs retain exact four roles, optional HAP boundary and unchang
   assert.equal(value.build.files.length, 4); assert.equal(value.installedApplicationCorrespondence, 'unverified');
   assert.equal(value.formalEligibility, false); assert.equal(value.applicationFiles.length, 0);
   assert.equal(value.profiles.suite.environmentHashes.TEST_VALUE, hash(Buffer.from(environment.TEST_VALUE)));
+});
+
+test('maintenance verifier dependencies are frozen before CI dispatch', async t => {
+  for (const name of ['verify-maintenance.mjs', 'windows-boot.mjs']) await t.test(name, async t => {
+    const context = await setup(t), frozen = await context.freeze();
+    const file = path.join(context.project, 'scripts/recovery', name);
+    const snapshot = await loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment);
+    assert.ok(snapshot.toolFiles.some(item => item.path === file));
+    await fs.appendFile(file, '\n// changed after freeze');
+    await assert.rejects(loadSuite(frozen.snapshotPath, frozen.snapshotSha256, environment));
+  });
 });
 
 test('frozen sources, implementation, metadata and environment changes are rejected before dispatch', async t => {

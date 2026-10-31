@@ -120,9 +120,10 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
     'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs', 'scripts/validation/static-flows.mjs',
     'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
     'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs',
+    'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
     'config.local.ps1', 'upstream.lock.json', 'patches/maestro/0001-harmonyos-host.patch']) {
     const file = path.resolve(projectRoot, name);
-    try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (error.code !== 'ENOENT' || ['scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java'].includes(name)) throw error; }
+    try { toolFiles.push({ path: file, sha256: await hashFile(file) }); } catch (error) { if (error.code !== 'ENOENT' || ['scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java', 'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs'].includes(name)) throw error; }
   }
   const runtime = await freezeRuntime(projectRoot, options, environment);
   for (const unit of units) {
