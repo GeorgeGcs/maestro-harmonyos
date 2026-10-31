@@ -124,7 +124,8 @@ namespace MaestroHarmonyOS {
         tools = [ordered]@{ powershell = $psBefore; script = $scriptBefore }
     }
     $encoded = $utf8.GetBytes(($observation | ConvertTo-Json -Depth 6) + "`n")
-    $staging = $destination + '.' + [Guid]::NewGuid().ToString('N') + '.pending'
+    # Keep staging in the same directory without extending an already long destination.
+    $staging = Join-Path ([IO.Path]::GetDirectoryName($destination)) ('.boot-' + [Guid]::NewGuid().ToString('N') + '.pending')
     $output = [IO.File]::Open($staging, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $output.Write($encoded, 0, $encoded.Length); $output.Flush($true) }
     finally { $output.Dispose() }

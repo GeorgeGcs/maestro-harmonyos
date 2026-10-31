@@ -32,6 +32,7 @@ VSCode 的“操作录制”记录通过插件发出的动作，不监听手机�
 | 冻结场景、核对覆盖并分开统计首次与最终成功 | [重复验证计划](docs/validation-plan.md) |
 | 接入专用 Windows CI 主机 | [CI 入口与设备占用](docs/ci.md) |
 | 检查录屏及恢复保留的媒体 | [录屏检查与恢复](docs/recording-diagnostics.md) |
+| 维护无法确认旧命令结束的设备会话 | [Windows 与手机依次重启的维护流程](docs/session-maintenance.md)，完整真机流程待验证 |
 | 排查源码构建与资源下载 | [构建复现说明](docs/build-reproducibility.md) |
 | 为项目贡献代码 | [贡献说明](CONTRIBUTING.md)、[主机测试说明](host-tests/README.md) |
 

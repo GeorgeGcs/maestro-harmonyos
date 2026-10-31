@@ -63,18 +63,19 @@ index c2ccec4..baefea6 100644
        "optional": true,
        "os": [
 diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
-index 8df1b2f..61fb3d4 100644
+index 8df1b2f..cc80a13 100644
 --- a/maestro-cli/src/main/java/maestro/cli/App.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/App.kt
-@@ -29,6 +29,7 @@ import maestro.cli.command.CheckSyntaxCommand
+@@ -29,6 +29,8 @@ import maestro.cli.command.CheckSyntaxCommand
  import maestro.cli.command.CloudCommand
  import maestro.cli.command.DownloadSamplesCommand
  import maestro.cli.command.DriverCommand
 +import maestro.cli.command.HarmonyOsBridgeCommand
++import maestro.cli.command.HarmonyOsRecoveryCommand
  import maestro.cli.command.ListCloudDevicesCommand
  import maestro.cli.command.ListDevicesCommand
  import maestro.cli.command.LoginCommand
-@@ -41,6 +42,7 @@ import maestro.cli.command.StartDeviceCommand
+@@ -41,6 +43,7 @@ import maestro.cli.command.StartDeviceCommand
  import maestro.cli.command.StudioCommand
  import maestro.cli.command.TestCommand
  import maestro.cli.insights.TestAnalysisManager
@@ -82,15 +83,16 @@ index 8df1b2f..61fb3d4 100644
  import maestro.cli.mcp.claimMcpStdout
  import maestro.cli.update.Updates
  import maestro.cli.util.ChangeLogUtils
-@@ -76,6 +78,7 @@ import kotlin.system.exitProcess
+@@ -76,6 +79,8 @@ import kotlin.system.exitProcess
          CheckSyntaxCommand::class,
          DriverCommand::class,
          McpCommand::class,
 +        HarmonyOsBridgeCommand::class,
++        HarmonyOsRecoveryCommand::class,
      ]
  )
  class App {
-@@ -88,7 +91,7 @@ class App {
+@@ -88,7 +93,7 @@ class App {
      @Option(names = ["-v", "--version"], versionHelp = true, description = ["Display CLI version"])
      var requestedVersion: Boolean? = false
  
@@ -99,7 +101,7 @@ index 8df1b2f..61fb3d4 100644
      var platform: String? = null
  
      @Option(names = ["--host"], hidden = true)
-@@ -123,6 +126,7 @@ fun main(args: Array<String>) {
+@@ -123,6 +128,7 @@ fun main(args: Array<String>) {
      // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
      // channel and break the handshake for strict clients like Claude Desktop.
      if (args.firstOrNull() == "mcp") claimMcpStdout()
@@ -136,6 +138,88 @@ index 0000000..a7b39b1
 +        return HarmonyOsBridgeServer(
 +            System.`in`, HarmonyOsBridgeStdout.output, System.err, HarmonyOsRecorderBackend(),
 +        ).run()
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
+new file mode 100644
+index 0000000..41f101c
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
+@@ -0,0 +1,76 @@
++package maestro.cli.command
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.cli.App
++import maestro.cli.session.HarmonyOsMaintenanceHostObserver
++import maestro.cli.session.HarmonyOsMaintenanceRecovery
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HdcClient
++import picocli.CommandLine
++import java.io.File
++import java.nio.file.Path
++import java.util.concurrent.Callable
++
++@CommandLine.Command(name = "harmonyos-recovery", mixinStandardHelpOptions = true,
++    description = ["Maintain a quarantined finite-command session across verified Windows and device restarts"])
++class HarmonyOsRecoveryCommand : Callable<Int> {
++    @CommandLine.ParentCommand private var parent: App? = null
++    @CommandLine.Parameters(index = "0", description = ["prepare, resume, or complete"])
++    private lateinit var action: String
++    @CommandLine.Option(names = ["--session"], required = true, description = ["Original recovery session UUID"])
++    private lateinit var ownerId: String
++    @CommandLine.Option(names = ["--powershell"], required = true, description = ["Absolute path to the Windows PowerShell executable"])
++    private lateinit var powershell: Path
++    @CommandLine.Option(names = ["--host-script"], required = true, description = ["Path to scripts/recovery/observe-windows-boot.ps1"])
++    private lateinit var hostScript: Path
++    @CommandLine.Option(names = ["--hdc"], required = true, description = ["Absolute path to the HDC executable"])
++    private lateinit var hdc: Path
++
++    override fun call(): Int {
++        val mapper = jacksonObjectMapper()
++        return try {
++            require(parent?.platform == "harmonyos") { "Use --platform harmonyos with harmonyos-recovery." }
++            val device = requireNotNull(parent?.deviceId) { "Use --device with the original HDC target." }
++            require(action in setOf("prepare", "resume", "complete")) { "Expected prepare, resume, or complete." }
++            HarmonyOsSessionSupport.validateOptions(host = parent?.host, port = parent?.port,
++                driverHostPort = parent?.driverHostPort)
++            val observer = HarmonyOsMaintenanceHostObserver(powershell, hostScript)
++            val tools = observer.tools.toMutableMap()
++            tools["hdc"] = HarmonyOsMaintenanceHostObserver.fingerprint(hdc)
++            tools["java"] = HarmonyOsMaintenanceHostObserver.fingerprint(Path.of(System.getProperty("java.home"), "bin", "java.exe"))
++            val entries = System.getProperty("java.class.path").split(File.pathSeparator).map { Path.of(it).toAbsolutePath().normalize() }
++            require(entries.isNotEmpty() && entries.all { it.fileName.toString().endsWith(".jar", true) }) {
++                "Maintenance requires the installed CLI JAR distribution."
++            }
++            require(entries.map { it.fileName.toString() }.distinct().size == entries.size) {
++                "The maintenance classpath contains duplicate JAR names."
++            }
++            for ((index, entry) in entries.withIndex()) {
++                val key = "classpath:$index:${entry.fileName}"
++                tools[key] = HarmonyOsMaintenanceHostObserver.fingerprint(entry)
++            }
++            val recovery = HarmonyOsMaintenanceRecovery(HarmonyOsSessionSupport.defaultLockDirectory(), tools,
++                observer::observe, hdcFactory = { HdcClient(tools.getValue("hdc").path) })
++            val outcome = when (action) {
++                "prepare" -> recovery.prepare(device, ownerId)
++                "resume" -> recovery.resume(device, ownerId)
++                else -> recovery.complete(device, ownerId)
++            }
++            println(mapper.writeValueAsString(outcome.toMap()))
++            System.out.flush()
++            if (System.out.checkError() || (action == "complete" && !outcome.complete)) 2 else 0
++        } catch (error: Exception) {
++            if (error is InterruptedException) Thread.currentThread().interrupt()
++            // Keep locations useful for diagnosis without printing journal contents or command tokens.
++            generateSequence<Throwable>(error) { it.cause }.take(8).forEach { cause ->
++                val location = cause.stackTrace.firstOrNull { it.className.startsWith("maestro.") }
++                System.err.println("Maintenance failure: ${cause.javaClass.simpleName}" +
++                    (location?.let { " at $it" } ?: ""))
++            }
++            println(mapper.writeValueAsString(mapOf("protocol" to "harmonyos.reboot-recovery", "schemaVersion" to 1,
++                "action" to if (::action.isInitialized) action else null, "state" to "unknown", "handoffReady" to false,
++                "error" to mapOf("code" to "MAINTENANCE_NOT_CONFIRMED", "message" to (error.message ?: error.javaClass.simpleName)))))
++            2
++        }
 +    }
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/ListDevicesCommand.kt
@@ -3426,12 +3510,833 @@ index b79b107..7a38dd6 100644
                  logger.error("${shardPrefix}Failed to complete flow", e)
                  flowStatus = FlowStatus.ERROR
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt
+new file mode 100644
+index 0000000..255737a
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt
+@@ -0,0 +1,158 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.io.FileOutputStream
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardOpenOption
++import java.security.MessageDigest
++import java.util.UUID
++
++internal data class MaintenanceReference(val path: String, val sha256: String)
++
++/** A gate points at immutable records; publishing a new head is the only mutable commit. */
++internal data class MaintenanceGate(
++    val maintenanceId: String,
++    val checkpoint: MaintenanceReference,
++    val head: MaintenanceReference,
++)
++
++internal typealias MaintenanceTool = HarmonyOsMaintenanceHostBoot.Tool
++
++internal data class MaintenanceCheckpoint(
++    val schemaVersion: Int,
++    val maintenanceId: String,
++    val deviceId: String,
++    val ownerId: String,
++    val generation: String,
++    val createdAt: String,
++    val originalGate: MaintenanceReference,
++    val originalJournal: MaintenanceReference,
++    val originalReceipt: MaintenanceReference,
++    val hostBefore: MaintenanceReference,
++    val tools: Map<String, MaintenanceTool>,
++)
++
++internal data class MaintenanceCallEvidence(
++    val hostCallId: String,
++    val phase: String,
++    val purpose: String,
++    val argumentsSha256: String,
++    val registeredJournal: MaintenanceReference,
++    val outcome: MaintenanceReference?,
++    val endedJournal: MaintenanceReference?,
++)
++
++internal data class MaintenanceStep(
++    val schemaVersion: Int,
++    val checkpointSha256: String,
++    val revision: Int,
++    val previous: MaintenanceReference?,
++    val phase: String,
++    val observedAt: String,
++    val journal: MaintenanceReference,
++    val calls: List<MaintenanceCallEvidence>,
++    val hostResume: MaintenanceReference?,
++    val phoneBefore: MaintenanceReference?,
++    val hostComplete: MaintenanceReference?,
++    val phoneAfter: MaintenanceReference?,
++    val termination: MaintenanceReference?,
++    val cleanupBatches: List<MaintenanceReference>,
++    val receipt: MaintenanceReference?,
++)
++
++/** Files are private to one owner and maintenance identifier, never overwritten. */
++internal class HarmonyOsMaintenanceEvidence(val root: Path) {
++    init { regularAncestors(root); require(Files.isDirectory(root)) }
++
++    fun save(kind: String, value: Any): MaintenanceReference = saveBytes(kind, mapper.writeValueAsBytes(value))
++
++    fun saveBytes(kind: String, bytes: ByteArray): MaintenanceReference {
++        require(kind.matches(Regex("[a-z][a-z-]{0,40}")))
++        require(bytes.isNotEmpty() && bytes.size <= MAX_BYTES)
++        val path = root.resolve("$kind-${UUID.randomUUID()}.json")
++        regularAncestors(path, missingLeaf = true)
++        Files.newByteChannel(path, setOf(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)).use { channel ->
++            val data = java.nio.ByteBuffer.wrap(bytes)
++            while (data.hasRemaining()) channel.write(data)
++            (channel as java.nio.channels.FileChannel).force(true)
++        }
++        return MaintenanceReference(path.fileName.toString(), digest(bytes))
++    }
++
++    fun bytes(reference: MaintenanceReference): ByteArray {
++        require(reference.path.matches(Regex("[a-z][a-z-]{0,40}-[0-9a-f-]{36}\\.json")))
++        require(reference.sha256.matches(Regex("[0-9a-f]{64}")))
++        val path = root.resolve(reference.path)
++        val bytes = read(path)
++        require(digest(bytes) == reference.sha256) { "Maintenance evidence fingerprint changed." }
++        return bytes
++    }
++
++    fun json(reference: MaintenanceReference): JsonNode = mapper.readTree(bytes(reference))
++
++    fun <T> document(reference: MaintenanceReference, type: Class<T>, fields: Set<String>): T {
++        val node = json(reference)
++        exactFields(node, fields)
++        return mapper.treeToValue(node, type)
++    }
++
++    companion object {
++        const val MAX_BYTES = 32 * 1024 * 1024
++        val mapper = jacksonObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
++        val checkpointFields = setOf("schemaVersion", "maintenanceId", "deviceId", "ownerId", "generation", "createdAt",
++            "originalGate", "originalJournal", "originalReceipt", "hostBefore", "tools")
++        val stepFields = setOf("schemaVersion", "checkpointSha256", "revision", "previous", "phase", "observedAt", "journal",
++            "calls", "hostResume", "phoneBefore", "hostComplete", "phoneAfter", "termination", "cleanupBatches", "receipt")
++        val phases = listOf("prepared", "host_verified", "phone_prepared", "terminated", "cleaning", "cleaned", "receipt_written", "complete")
++
++        fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes)
++            .joinToString("") { "%02x".format(it) }
++
++        fun exactFields(node: JsonNode, fields: Set<String>) {
++            require(node.isObject && node.fieldNames().asSequence().toSet() == fields) { "Unexpected maintenance document fields." }
++        }
++
++        fun regularAncestors(path: Path, missingLeaf: Boolean = false) {
++            require(path.isAbsolute && path.normalize() == path)
++            var current: Path? = if (missingLeaf && !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) path.parent else path
++            while (current != null) {
++                require(!Files.isSymbolicLink(current) && current.toRealPath() == current) { "Maintenance paths cannot follow links." }
++                current = current.parent
++            }
++        }
++
++        fun read(path: Path, limit: Long = MAX_BYTES.toLong()): ByteArray {
++            regularAncestors(path)
++            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) in 1..limit)
++            val bytes = Files.readAllBytes(path)
++            require(bytes.size.toLong() in 1..limit)
++            return bytes
++        }
++
++        fun fingerprint(path: Path): MaintenanceTool {
++            regularAncestors(path)
++            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
++            val size = Files.size(path)
++            require(size > 0)
++            val hash = MessageDigest.getInstance("SHA-256")
++            Files.newInputStream(path).use { input ->
++                val buffer = ByteArray(128 * 1024)
++                while (true) { val count = input.read(buffer); if (count < 0) break; hash.update(buffer, 0, count) }
++            }
++            require(Files.size(path) == size) { "Maintenance tool changed while being read." }
++            return MaintenanceTool(path.toString(), hash.digest().joinToString("") { "%02x".format(it) }, size)
++        }
++
++        fun uuid(value: String) {
++            require(value.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) &&
++                UUID.fromString(value).toString() == value)
++        }
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt
+new file mode 100644
+index 0000000..acee757
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt
+@@ -0,0 +1,149 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.databind.JsonNode
++import java.math.BigInteger
++import java.time.Instant
++import java.time.format.DateTimeFormatterBuilder
++import java.util.Locale
++
++/** Validates observations only. It neither observes the host nor authorizes device cleanup. */
++internal object HarmonyOsMaintenanceHostBoot {
++    data class Tool(val path: String, val sha256: String, val bytes: Long)
++    data class Observation(
++        val observedAt: String,
++        val uptimeMilliseconds: String,
++        val lastBootUpTime: String,
++        val machineIdSha256: String,
++        val powershellVersion: String,
++    )
++
++    private const val MAX_SAFE_INTEGER = 9_007_199_254_740_991L
++    private val uint64Max = BigInteger("18446744073709551615")
++    private val sha256 = Regex("[0-9a-f]{64}")
++    private val unsignedDecimal = Regex("0|[1-9][0-9]{0,19}")
++    private val version = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:\\.[0-9]+)?")
++    private val utc = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z")
++    private val utcFormatter = DateTimeFormatterBuilder().appendInstant(3).toFormatter(Locale.ROOT)
++    private val driveRoot = Regex("^[A-Za-z]:[\\\\/]")
++    private val uncRoot = Regex("^\\\\\\\\[^\\\\/]+[\\\\/][^\\\\/]+[\\\\/]")
++
++    fun parse(node: JsonNode, powershell: Tool, script: Tool): Observation {
++        validateTool(powershell)
++        validateTool(script)
++        fields(node, "protocol", "schemaVersion", "provider", "observedAt", "uptimeMilliseconds",
++            "lastBootUpTime", "machineIdSha256", "tools")
++        require(text(node, "protocol") == "maestro.harmonyos.host-boot-observation" &&
++            numberIsOne(node["schemaVersion"])) { "Unsupported host boot observation protocol/version." }
++        val provider = node["provider"]
++        fields(provider, "name", "version")
++        require(text(provider, "name") == "windows-gettickcount64-cim" && numberIsOne(provider["version"])) {
++            "Unsupported boot provider."
++        }
++        val tools = node["tools"]
++        fields(tools, "powershell", "script")
++        fingerprint(tools["powershell"], powershell, powershell = true)
++        fingerprint(tools["script"], script, powershell = false)
++        return Observation(text(node, "observedAt"), text(node, "uptimeMilliseconds"),
++            text(node, "lastBootUpTime"), text(node, "machineIdSha256"), text(tools["powershell"], "version"))
++            .also(::validateObservation)
++    }
++
++    fun requireRestarted(before: Observation, after: Observation) {
++        pair(before, after)
++        require(after.lastBootUpTime != before.lastBootUpTime) { "boot_time_unchanged" }
++        require(ticks(after.uptimeMilliseconds) < ticks(before.uptimeMilliseconds)) { "uptime_did_not_decrease" }
++    }
++
++    fun requireSameBoot(before: Observation, after: Observation) {
++        pair(before, after)
++        require(after.lastBootUpTime == before.lastBootUpTime) { "boot_time_changed" }
++        require(ticks(after.uptimeMilliseconds) >= ticks(before.uptimeMilliseconds)) { "uptime_decreased" }
++    }
++
++    private fun pair(before: Observation, after: Observation) {
++        validateObservation(before)
++        validateObservation(after)
++        require(before.machineIdSha256 == after.machineIdSha256) { "machine_mismatch" }
++        require(after.observedAt > before.observedAt) { "observation_order_not_confirmed" }
++        require(after.powershellVersion == before.powershellVersion) { "powershell_version_mismatch" }
++    }
++
++    private fun validateObservation(value: Observation) {
++        canonicalUtc(value.observedAt)
++        canonicalUtc(value.lastBootUpTime)
++        ticks(value.uptimeMilliseconds)
++        require(sha256.matches(value.machineIdSha256)) { "Invalid machineIdSha256." }
++        require(version.matches(value.powershellVersion)) { "Invalid PowerShell version." }
++    }
++
++    private fun ticks(value: String): BigInteger {
++        require(unsignedDecimal.matches(value)) { "uptimeMilliseconds must be an unsigned 64-bit decimal string." }
++        return BigInteger(value).also {
++            require(it <= uint64Max) { "uptimeMilliseconds exceeds UInt64." }
++        }
++    }
++
++    private fun canonicalUtc(value: String) {
++        require(utc.matches(value)) { "Timestamp must be canonical UTC with milliseconds." }
++        val parsed = try { Instant.parse(value) } catch (error: Exception) {
++            throw IllegalArgumentException("Invalid UTC timestamp.", error)
++        }
++        require(utcFormatter.format(parsed) == value) { "Timestamp must be canonical UTC with milliseconds." }
++    }
++
++    private fun fingerprint(node: JsonNode, expected: Tool, powershell: Boolean) {
++        if (powershell) fields(node, "path", "sha256", "bytes", "version") else fields(node, "path", "sha256", "bytes")
++        val actual = Tool(text(node, "path"), text(node, "sha256"), safeBytes(node["bytes"]))
++        validateTool(actual)
++        if (powershell) require(version.matches(text(node, "version"))) { "Invalid PowerShell version." }
++        require(normalizeWindows(actual.path) == normalizeWindows(expected.path) &&
++            actual.sha256 == expected.sha256 && actual.bytes == expected.bytes) { "Observation tool does not match its trusted freeze." }
++    }
++
++    private fun validateTool(tool: Tool) {
++        normalizeWindows(tool.path)
++        require(sha256.matches(tool.sha256)) { "Tool sha256 must be lowercase SHA-256." }
++        require(tool.bytes in 1..MAX_SAFE_INTEGER) { "Tool bytes must be a positive safe integer." }
++    }
++
++    private fun safeBytes(node: JsonNode): Long {
++        require(node.isNumber) { "Tool bytes must be a number." }
++        val value = node.doubleValue()
++        require(value.isFinite() && value >= 1 && value <= MAX_SAFE_INTEGER.toDouble() && value == value.toLong().toDouble()) {
++            "Tool bytes must be a positive safe integer."
++        }
++        return value.toLong()
++    }
++
++    // Lexical win32.normalize comparison, independent of the OS running the parser.
++    // This is a tool identity comparison, not a filesystem/symlink ownership check.
++    private fun normalizeWindows(value: String): String {
++        require(value.length <= 32767 && (driveRoot.containsMatchIn(value) || uncRoot.containsMatchIn(value)) &&
++            value.none { it.code in 0..31 || it.code == 127 } &&
++            !value.startsWith("\\\\?\\") && !value.startsWith("\\\\.\\")) { "Tool path must be an absolute Windows file path." }
++        val raw = value.replace('/', '\\')
++        val drive = driveRoot.containsMatchIn(value)
++        val basenameInput = if (drive) raw.substring(2) else raw
++        require(basenameInput.trimEnd('\\').substringAfterLast('\\').isNotEmpty()) { "Tool path has no basename." }
++        val components = raw.substring(2).split('\\').filter { it.isNotEmpty() }
++        val root = if (drive) raw.substring(0, 2) + "\\" else "\\\\${components[0]}\\${components[1]}\\"
++        val tail = if (drive) components else components.drop(2)
++        val normalized = mutableListOf<String>()
++        for (component in tail) when (component) {
++            "." -> Unit
++            ".." -> if (normalized.isNotEmpty()) { normalized.removeAt(normalized.lastIndex) }
++            else -> normalized += component
++        }
++        val trailing = if (normalized.isNotEmpty() && raw.endsWith('\\')) "\\" else ""
++        return (root + normalized.joinToString("\\") + trailing).lowercase(Locale.ROOT)
++    }
++
++    private fun numberIsOne(node: JsonNode) = node.isNumber && node.doubleValue() == 1.0
++    private fun text(node: JsonNode, name: String): String {
++        require(node[name]?.isTextual == true) { "$name must be a string." }
++        return node[name].textValue()
++    }
++    private fun fields(node: JsonNode, vararg names: String) {
++        require(node.isObject && node.fieldNames().asSequence().toSet() == names.toSet()) { "Missing or unexpected observation fields." }
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostObserver.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostObserver.kt
+new file mode 100644
+index 0000000..88d0e66
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostObserver.kt
+@@ -0,0 +1,68 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.ProcessHdcCommandRunner
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.security.MessageDigest
++import java.time.Duration
++
++/** Runs the frozen read-only Windows provider. It never restarts the host. */
++internal class HarmonyOsMaintenanceHostObserver(
++    powershell: Path,
++    script: Path,
++    private val runner: HdcCommandRunner = ProcessHdcCommandRunner(64 * 1024),
++) {
++    val tools: Map<String, HarmonyOsMaintenanceHostBoot.Tool> = mapOf(
++        "powershell" to fingerprint(powershell), "script" to fingerprint(script),
++    )
++
++    fun observe(output: Path): JsonNode {
++        require(System.getProperty("os.name").startsWith("Windows")) { "Maintenance host observations require Windows." }
++        val destination = output.toAbsolutePath().normalize()
++        require(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS)) { "Host observation must use a new file." }
++        require(destination.parent.toRealPath() == destination.parent) { "Host observation paths cannot follow links." }
++        verifyTools()
++        val result = runner.run(listOf(tools.getValue("powershell").path,
++            "-NoLogo", "-NoProfile", "-NonInteractive", "-File", tools.getValue("script").path,
++            "-OutputPath", destination.toString()), Duration.ofSeconds(20))
++        verifyTools()
++        require(result.exitCode == 0 && result.stderr.isBlank()) { "Windows boot observation failed; maintenance remains blocked." }
++        require(Files.isRegularFile(destination, LinkOption.NOFOLLOW_LINKS) && destination.toRealPath() == destination &&
++            Files.size(destination) in 1..(64 * 1024)) { "Windows boot observation is missing or invalid." }
++        val node = mapper.readTree(Files.readAllBytes(destination))
++        HarmonyOsMaintenanceHostBoot.parse(node, tools.getValue("powershell"), tools.getValue("script"))
++        return node
++    }
++
++    private fun verifyTools() {
++        tools.values.forEach { require(fingerprint(Path.of(it.path)) == it) { "A frozen host observation tool changed." } }
++    }
++
++    companion object {
++        private val mapper = jacksonObjectMapper()
++            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++
++        fun fingerprint(input: Path): HarmonyOsMaintenanceHostBoot.Tool {
++            val path = input.toAbsolutePath().normalize()
++            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path) {
++                "Maintenance tools must be regular files without linked paths."
++            }
++            val size = Files.size(path)
++            require(size > 0) { "Maintenance tools cannot be empty." }
++            val digest = MessageDigest.getInstance("SHA-256")
++            Files.newInputStream(path).use { stream ->
++                val buffer = ByteArray(64 * 1024)
++                while (true) { val count = stream.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
++            }
++            require(Files.size(path) == size) { "Maintenance tool changed during fingerprinting." }
++            return HarmonyOsMaintenanceHostBoot.Tool(path.toString(), digest.digest().joinToString("") { "%02x".format(it) }, size)
++        }
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
+new file mode 100644
+index 0000000..9859aa0
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
+@@ -0,0 +1,422 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.databind.node.ObjectNode
++import maestro.cli.harmonyos.AgentError
++import maestro.cli.harmonyos.AgentProtocolException
++import maestro.harmonyos.hdc.HarmonyOSMaintenanceTransport
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HarmonyOSUptimeObservation
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.hdc.MaintenanceCall
++import maestro.harmonyos.hdc.MaintenanceCleanupBatch
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.time.Duration
++import java.time.Instant
++import java.util.UUID
++
++internal data class MaintenanceOutcome(
++    val maintenanceId: String,
++    val deviceId: String,
++    val ownerId: String,
++    val phase: String,
++    val complete: Boolean,
++    val checkpoint: MaintenanceReference,
++    val head: MaintenanceReference,
++    val evidenceDirectory: String,
++    val receipt: RecoveryOutcome? = null,
++) {
++    fun toMap(): Map<String, Any?> = mapOf("protocol" to "harmonyos.reboot-recovery", "schemaVersion" to 1,
++        "maintenanceId" to maintenanceId, "deviceId" to deviceId, "ownerId" to ownerId,
++        "state" to if (complete) "complete" else "unknown", "cleanup" to mapOf("state" to if (complete) "complete" else "unknown"),
++        "phase" to phase, "handoffReady" to complete, "checkpoint" to checkpoint, "head" to head,
++        "evidenceDirectory" to evidenceDirectory, "receipt" to receipt?.let {
++            mapOf("path" to it.reportPath.toString(), "sha256" to it.sha256, "schemaVersion" to 3)
++        })
++}
++
++/** Explicit host-restart, then device-restart maintenance. Ordinary command results are never rewritten. */
++internal class HarmonyOsMaintenanceRecovery(
++    private val lockDirectory: Path,
++    private val tools: Map<String, MaintenanceTool>,
++    private val observeHost: (Path) -> JsonNode,
++    private val hdcFactory: () -> HdcClient,
++    private val gateWriter: (Path, LeaseGate) -> Unit = ::writeGate,
++) {
++    fun prepare(deviceId: String, ownerId: String): MaintenanceOutcome = locked(deviceId, ownerId) { directory, gate ->
++        if (gate.maintenance != null) return@locked load(directory, gate, gateWriter).also { requireSettled(it); verifyFrozen(it) }.outcome()
++        require(gate.state == "quarantined" && gate.closeFailure == null && !gate.unresolvedRecording)
++        val journalPath = checkedJournalPath(directory, gate)
++        val originalJournal = E.read(journalPath)
++        val original = mapper.readTree(originalJournal)
++        requireScope(original, gate)
++        val originalReceipt = originalReceipt(directory, gate)
++        verifyTools(tools)
++        HarmonyOSRecoveryJournal.open(journalPath).use { journal ->
++            require(journal.deviceId == deviceId && journal.ownerId == ownerId)
++            require(E.digest(E.read(journalPath)) == E.digest(originalJournal)) { "Opening the journal changed its frozen bytes." }
++            val id = UUID.randomUUID().toString()
++            val parent = ownerDirectory(directory, deviceId, ownerId).resolve("maintenance")
++            Files.createDirectories(parent); E.regularAncestors(parent)
++            val root = parent.resolve(id); Files.createDirectory(root)
++            val evidence = HarmonyOsMaintenanceEvidence(root)
++            val hostBefore = observe(evidence)
++            val checkpoint = MaintenanceCheckpoint(1, id, deviceId, ownerId, original["generation"].asText(), now(),
++                evidence.saveBytes("original-gate", E.read(gatePath(directory, deviceId))),
++                evidence.saveBytes("original-journal", originalJournal), evidence.saveBytes("original-receipt", originalReceipt),
++                hostBefore, tools.toSortedMap())
++            val reference = evidence.save("checkpoint", checkpoint)
++            val step = MaintenanceStep(1, reference.sha256, 0, null, "prepared", now(), checkpoint.originalJournal,
++                emptyList(), null, null, null, null, null, emptyList(), null)
++            verifyTools(tools)
++            val head = evidence.save("step", step)
++            gateWriter(directory, gate.copy(maintenance = MaintenanceGate(id, reference, head), requiresRecovery = true,
++                updatedAt = now(), uncertainReason = "Explicit maintenance requires host restart followed by device restart."))
++            MaintenanceOutcome(id, deviceId, ownerId, step.phase, false, reference, head, root.toString())
++        }
++    }
++
++    fun resume(deviceId: String, ownerId: String): MaintenanceOutcome = locked(deviceId, ownerId) { directory, gate ->
++        val state = load(directory, gate, gateWriter); requireSettled(state); verifyFrozen(state)
++        if (state.step.phase in setOf("phone_prepared", "receipt_written", "complete")) return@locked state.outcome()
++        require(state.step.phase in setOf("prepared", "host_verified")) { "Partial maintenance cannot be automatically resumed." }
++        HarmonyOSRecoveryJournal.open(checkedJournalPath(directory, gate)).use { journal ->
++            state.verifyCurrentJournal()
++            if (state.step.phase == "prepared") {
++                val host = observe(state.evidence)
++                HarmonyOsMaintenanceHostBoot.requireRestarted(state.host(state.checkpoint.hostBefore), state.host(host))
++                state.publish(state.step.copy(phase = "host_verified", hostResume = host))
++            } else {
++                require(state.step.calls.isEmpty()) { "A previous phone observation is not confirmed." }
++                val current = observe(state.evidence)
++                HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(requireNotNull(state.step.hostResume)), state.host(current))
++            }
++            val transport = HarmonyOSMaintenanceTransport(journal, hdcFactory())
++            val phone = transport.observeUptime(Duration.ofSeconds(5), state::beforeDispatch)
++            val observation = state.phoneEvidence(phone)
++            state.finishCall(observation)
++            verifyFrozen(state)
++            state.publish(state.step.copy(phase = "phone_prepared", phoneBefore = observation))
++        }
++        state.outcome()
++    }
++
++    fun complete(deviceId: String, ownerId: String, timeout: Duration = Duration.ofSeconds(30)): MaintenanceOutcome =
++        locked(deviceId, ownerId) { directory, gate ->
++            require(timeout > Duration.ZERO && timeout <= Duration.ofMinutes(1))
++            val state = load(directory, gate, gateWriter); requireSettled(state); verifyFrozen(state)
++            if (state.step.phase == "complete") return@locked state.outcome(completedOutcome(directory, gate))
++            require(state.step.phase in setOf("phone_prepared", "cleaned", "receipt_written")) {
++                "The phone baseline is absent, or a partial maintenance call needs diagnosis."
++            }
++            HarmonyOSRecoveryJournal.open(checkedJournalPath(directory, gate)).use { journal ->
++                state.verifyCurrentJournal()
++                if (state.step.phase == "phone_prepared") {
++                    require(state.step.calls.count { it.phase == "host_verified" } == 1 &&
++                        state.step.calls.all { it.phase in setOf("host_verified", "phone_prepared") })
++                    val host = observe(state.evidence)
++                    HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(requireNotNull(state.step.hostResume)), state.host(host))
++                    val deadline = System.nanoTime() + timeout.toNanos()
++                    fun remaining(): Duration {
++                        val left = deadline - System.nanoTime()
++                        if (left <= 0) throw HdcTimeoutException(timeout)
++                        return Duration.ofNanos(left)
++                    }
++                    state.publish(state.step.copy(hostComplete = host))
++                    val transport = HarmonyOSMaintenanceTransport(journal, hdcFactory())
++                    val phone = transport.observeUptime(minOf(Duration.ofSeconds(5), remaining()), state::beforeDispatch)
++                    val observation = state.phoneEvidence(phone)
++                    state.finishCall(observation)
++                    HarmonyOSUptimeObservation.requireRestarted(state.phone(requireNotNull(state.step.phoneBefore)), phone)
++                    val termination = state.evidence.save("termination", mapOf("schemaVersion" to 1,
++                        "deviceId" to deviceId, "ownerId" to ownerId, "checkpointSha256" to state.gate.maintenance!!.checkpoint.sha256,
++                        "hostBefore" to state.checkpoint.hostBefore, "hostResume" to state.step.hostResume,
++                        "hostComplete" to host, "phoneBefore" to state.step.phoneBefore, "phoneAfter" to observation,
++                        "disposition" to "terminated_by_ordered_host_device_restart", "originalResult" to "unknown",
++                        "operationIds" to pendingIds(state.original)))
++                    state.publish(state.step.copy(phase = "terminated", phoneAfter = observation, termination = termination))
++                    state.publish(state.step.copy(phase = "cleaning"))
++                    transport.cleanupOwnedPaths(remaining(), state::beforeDispatch) { batch ->
++                        val evidence = state.evidence.save("cleanup-batch", batch)
++                        state.finishCall(evidence)
++                        state.publish(state.step.copy(cleanupBatches = state.step.cleanupBatches + evidence))
++                    }
++                    validateCleanup(state)
++                    verifyFrozen(state)
++                    state.publish(state.step.copy(phase = "cleaned"))
++                }
++                if (state.step.phase == "cleaned") writeFinalReceipt(state)
++            }
++            // Closing the journal must finish before a gate can advertise a handoff.
++            verifyFrozen(state)
++            val receipt = validateReceipt(state)
++            state.publish(state.step.copy(phase = "complete"), clean = receipt)
++            state.outcome(receipt)
++        }
++
++    private fun observe(evidence: HarmonyOsMaintenanceEvidence): MaintenanceReference {
++        verifyTools(tools)
++        val path = evidence.root.resolve("host-observation-${UUID.randomUUID()}.json")
++        val returned = observeHost(path)
++        val bytes = E.read(path, 64 * 1024)
++        require(mapper.readTree(bytes) == returned) { "Host observation differs from its persisted original." }
++        HarmonyOsMaintenanceHostBoot.parse(returned, tools.getValue("powershell"), tools.getValue("script"))
++        verifyTools(tools)
++        return MaintenanceReference(path.fileName.toString(), E.digest(bytes))
++    }
++
++    private fun verifyFrozen(state: State) {
++        require(tools == state.checkpoint.tools) { "Maintenance tools differ from prepare." }
++        verifyTools(tools)
++    }
++
++    private fun <T> locked(deviceId: String, ownerId: String, block: (Path, LeaseGate) -> T): T {
++        E.uuid(ownerId)
++        require(deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")))
++        return HarmonyOsSessionSupport.withDeviceLock(deviceId, lockDirectory) {
++            val directory = lockDirectory.toAbsolutePath().normalize()
++            val gate = requireNotNull(readGate(directory, deviceId)) { "No durable owner is present." }
++            require(gate.ownerId == ownerId) { "Maintenance cannot take over another owner." }
++            try { block(directory, gate) } catch (error: Exception) {
++                throw AgentProtocolException(AgentError("environment", "MAINTENANCE_RECOVERY_BLOCKED",
++                    "Maintenance evidence is incomplete or incompatible; the device remains gated.",
++                    mapOf("deviceId" to deviceId, "recoverySessionId" to ownerId))).also { it.initCause(error) }
++            }
++        }
++    }
++
++    private class State(val directory: Path, var gate: LeaseGate, val evidence: HarmonyOsMaintenanceEvidence,
++                        val checkpoint: MaintenanceCheckpoint, var step: MaintenanceStep,
++                        private val gateWriter: (Path, LeaseGate) -> Unit) {
++        val original: JsonNode = evidence.json(checkpoint.originalJournal)
++        fun journalSnapshot(): MaintenanceReference = evidence.saveBytes("journal", E.read(checkedJournalPath(directory, gate)))
++        fun verifyCurrentJournal() {
++            val current = E.read(checkedJournalPath(directory, gate))
++            require(E.digest(current) == step.journal.sha256) { "Journal changed outside its recorded maintenance call." }
++            verifyJournal(original, mapper.readTree(current), step.calls, allowLastPending = false)
++        }
++        fun host(reference: MaintenanceReference) = HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference),
++            checkpoint.tools.getValue("powershell"), checkpoint.tools.getValue("script"))
++        fun phone(reference: MaintenanceReference): HarmonyOSUptimeObservation = parsePhone(evidence.json(reference), gate)
++        fun publish(next: MaintenanceStep, clean: RecoveryOutcome? = null) {
++            val linked = next.copy(revision = step.revision + 1, previous = gate.maintenance!!.head, observedAt = now())
++            val head = evidence.save("step", linked)
++            val updated = gate.copy(maintenance = gate.maintenance!!.copy(head = head), updatedAt = now(),
++                state = if (clean == null) "quarantined" else "clean", requiresRecovery = clean == null,
++                uncertainReason = if (clean == null) gate.uncertainReason else null,
++                reportPath = clean?.reportPath?.toString() ?: gate.reportPath, reportSha256 = clean?.sha256 ?: gate.reportSha256)
++            gateWriter(directory, updated)
++            gate = updated; step = linked
++        }
++        fun beforeDispatch(call: MaintenanceCall) {
++            require(step.calls.none { it.outcome == null || it.endedJournal == null }) { "An earlier maintenance call is unconfirmed." }
++            require((step.phase in setOf("host_verified", "phone_prepared") && call.purpose == "observe_uptime") ||
++                (step.phase == "cleaning" && call.purpose == "cleanup_owned_paths" && step.termination != null))
++            E.uuid(call.hostCallId); require(call.argumentsSha256.matches(Regex("[0-9a-f]{64}")))
++            val registered = journalSnapshot()
++            val binding = MaintenanceCallEvidence(call.hostCallId, step.phase, call.purpose, call.argumentsSha256, registered, null, null)
++            verifyJournal(original, evidence.json(registered), step.calls + binding, allowLastPending = true)
++            publish(step.copy(journal = registered, calls = step.calls + binding))
++        }
++        fun finishCall(outcome: MaintenanceReference) {
++            val call = step.calls.last()
++            require(call.outcome == null && call.endedJournal == null)
++            val ended = journalSnapshot()
++            val calls = step.calls.dropLast(1) + call.copy(outcome = outcome, endedJournal = ended)
++            verifyJournal(original, evidence.json(ended), calls, allowLastPending = false)
++            publish(step.copy(journal = ended, calls = calls))
++        }
++        fun phoneEvidence(value: HarmonyOSUptimeObservation): MaintenanceReference = evidence.save("phone-observation",
++            mapOf("schemaVersion" to 1, "provider" to PHONE_PROVIDER, "deviceId" to gate.deviceId, "ownerId" to gate.ownerId,
++                "hostCallId" to step.calls.last().hostCallId, "raw" to value.raw, "minutes" to value.minutes,
++                "lowerBoundMilliseconds" to value.lowerBoundMilliseconds,
++                "upperBoundMillisecondsExclusive" to value.upperBoundMillisecondsExclusive))
++        fun outcome(receipt: RecoveryOutcome? = if (gate.state == "clean") completedOutcome(directory, gate) else null) = MaintenanceOutcome(checkpoint.maintenanceId, gate.deviceId, gate.ownerId, step.phase,
++            gate.state == "clean" && receipt != null, gate.maintenance!!.checkpoint, gate.maintenance!!.head, evidence.root.toString(), receipt)
++    }
++
++    companion object {
++        private val E = HarmonyOsMaintenanceEvidence
++        private val mapper = E.mapper
++        private const val PHONE_PROVIDER = "toybox-uptime-english-floor-minute-v1"
++        private fun now() = Instant.now().toString()
++        private fun pendingIds(journal: JsonNode) = journal["operations"].filter { !it["completed"].booleanValue() }.map { it["id"].asText() }
++        private fun verifyTools(tools: Map<String, MaintenanceTool>) {
++            require(tools.keys.containsAll(setOf("powershell", "script", "hdc", "java")) && tools.keys.any { it.startsWith("classpath:") })
++            require(tools.size <= 1000 && tools.values.map { it.path }.distinct().size == tools.size)
++            tools.values.forEach { require(E.fingerprint(Path.of(it.path)) == it) { "A frozen maintenance tool changed." } }
++            val jars = tools.filterKeys { it.startsWith("classpath:") }.values
++            val parents = jars.map { Path.of(it.path).parent }.distinct()
++            require(parents.size == 1) { "Maintenance classpath must be one frozen CLI lib directory." }
++            val actual = Files.list(parents.single()).use { files -> files.filter { Files.isRegularFile(it) &&
++                it.fileName.toString().endsWith(".jar", ignoreCase = true) }.map { it.toString() }.toList().toSet() }
++            require(actual == jars.map { it.path }.toSet()) { "CLI classpath membership changed." }
++        }
++        private fun requireScope(node: JsonNode, gate: LeaseGate) {
++            require(node["version"].asInt() == 1 && node["deviceId"].asText() == gate.deviceId && node["ownerId"].asText() == gate.ownerId)
++            require(node["sealed"].isBoolean && node["sealed"].booleanValue() && node["temporaryFiles"].isArray && node["temporaryFiles"].isEmpty)
++            require(node["operations"].isArray && node["operations"].all { it["completed"].booleanValue() || it["recoverable"].booleanValue() })
++            require(pendingIds(node).isNotEmpty()) { "Maintenance is only for pending finite commands." }
++            require(node["hostCalls"].isArray && node["hostCalls"].all { it["returned"].isBoolean && it["returned"].booleanValue() && it["stopped"].isBoolean && it["stopped"].booleanValue() })
++            require(gate.closeFailure == null && !gate.unresolvedRecording &&
++                Files.notExists(Path.of(gate.journalPath).resolveSibling("recording-resources.json"), LinkOption.NOFOLLOW_LINKS))
++        }
++        private fun originalReceipt(directory: Path, gate: LeaseGate): ByteArray {
++            val path = Path.of(requireNotNull(gate.reportPath)).toAbsolutePath().normalize()
++            require(path.parent == ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries"))
++            val bytes = E.read(path, 4 * 1024 * 1024); require(E.digest(bytes) == gate.reportSha256)
++            val node = mapper.readTree(bytes)
++            E.exactFields(node, setOf("schemaVersion", "recoveryId", "deviceId", "sessionId", "observedAt", "reason", "previousState",
++                "previousReportPath", "previousReportSha256", "requiresRecovery", "uncertainReason", "unresolvedRecording", "closeFailure",
++                "state", "operations", "pendingOperations", "temporaryFiles", "issues"))
++            require(node["schemaVersion"].asInt() == 1 && node["deviceId"].asText() == gate.deviceId && node["sessionId"].asText() == gate.ownerId &&
++                node["state"].asText() == "unknown" && node["unresolvedRecording"].isBoolean && !node["unresolvedRecording"].booleanValue() && node["closeFailure"].isNull)
++            val journal = mapper.readTree(E.read(checkedJournalPath(directory, gate)))
++            require(node["operations"].isIntegralNumber && node["operations"].asInt() == journal["operations"].size() &&
++                node["pendingOperations"].isIntegralNumber && node["pendingOperations"].asInt() == pendingIds(journal).size &&
++                node["temporaryFiles"].isIntegralNumber && node["temporaryFiles"].asInt() == 0)
++            E.uuid(node["recoveryId"].asText()); require(path.fileName.toString() == node["recoveryId"].asText() + ".json")
++            return bytes
++        }
++        private fun verifyJournal(original: JsonNode, current: JsonNode, calls: List<MaintenanceCallEvidence>, allowLastPending: Boolean) {
++            val left = original.deepCopy<ObjectNode>().apply { remove("hostCalls") }
++            val right = current.deepCopy<ObjectNode>().apply { remove("hostCalls") }
++            require(left == right) { "Maintenance changed original command results or resource ownership." }
++            val initial = original["hostCalls"].toList()
++            val all = current["hostCalls"].toList()
++            require(all.take(initial.size) == initial && all.size == initial.size + calls.size)
++            require(calls.map { it.hostCallId }.distinct().size == calls.size)
++            all.drop(initial.size).zip(calls).forEachIndexed { index, (call, bound) ->
++                require(call["id"].asText() == bound.hostCallId)
++                if (!(allowLastPending && index == calls.lastIndex)) require(call["returned"].booleanValue() && call["stopped"].booleanValue())
++            }
++        }
++        private fun parsePhone(node: JsonNode, gate: LeaseGate): HarmonyOSUptimeObservation {
++            E.exactFields(node, setOf("schemaVersion", "provider", "deviceId", "ownerId", "hostCallId", "raw", "minutes", "lowerBoundMilliseconds", "upperBoundMillisecondsExclusive"))
++            require(node["schemaVersion"].asInt() == 1 && node["provider"].asText() == PHONE_PROVIDER && node["deviceId"].asText() == gate.deviceId && node["ownerId"].asText() == gate.ownerId)
++            E.uuid(node["hostCallId"].asText())
++            val parsed = HarmonyOSUptimeObservation.parse(node["raw"].asText())
++            require(node["minutes"].asText() == parsed.minutes && node["lowerBoundMilliseconds"].asText() == parsed.lowerBoundMilliseconds &&
++                node["upperBoundMillisecondsExclusive"].asText() == parsed.upperBoundMillisecondsExclusive)
++            return parsed
++        }
++        private fun load(directory: Path, gate: LeaseGate, gateWriter: (Path, LeaseGate) -> Unit = ::writeGate): State {
++            val management = requireNotNull(gate.maintenance) { "Prepare is required before maintenance can proceed." }
++            val evidence = HarmonyOsMaintenanceEvidence(ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("maintenance").resolve(management.maintenanceId))
++            val checkpoint = evidence.document(management.checkpoint, MaintenanceCheckpoint::class.java, E.checkpointFields)
++            require(checkpoint.schemaVersion == 1 && checkpoint.maintenanceId == management.maintenanceId && checkpoint.deviceId == gate.deviceId && checkpoint.ownerId == gate.ownerId)
++            val step = evidence.document(management.head, MaintenanceStep::class.java, E.stepFields)
++            val state = State(directory, gate, evidence, checkpoint, step, gateWriter)
++            requireScope(state.original, gate)
++            require(checkpoint.generation == state.original["generation"].asText())
++            require(E.digest(originalReceipt(directory, gate.copy(reportPath = evidence.json(checkpoint.originalGate)["reportPath"].asText(),
++                reportSha256 = evidence.json(checkpoint.originalGate)["reportSha256"].asText()))) == checkpoint.originalReceipt.sha256)
++            evidence.bytes(checkpoint.originalGate); evidence.bytes(checkpoint.originalReceipt)
++            state.host(checkpoint.hostBefore)
++            var cursor = step; var seen = 0
++            while (true) {
++                require(++seen <= 10000 && cursor.schemaVersion == 1 && cursor.checkpointSha256 == management.checkpoint.sha256 && cursor.phase in E.phases)
++                evidence.bytes(cursor.journal)
++                if (cursor.previous == null) { require(cursor.revision == 0 && cursor.phase == "prepared"); break }
++                val previous = evidence.document(requireNotNull(cursor.previous), MaintenanceStep::class.java, E.stepFields)
++                require(cursor.revision == previous.revision + 1 && E.phases.indexOf(cursor.phase) >= E.phases.indexOf(previous.phase))
++                cursor = previous
++            }
++            step.calls.forEachIndexed { index, call ->
++                E.uuid(call.hostCallId)
++                require(call.phase in setOf("host_verified", "phone_prepared", "cleaning") && call.argumentsSha256.matches(Regex("[0-9a-f]{64}")))
++                verifyJournal(state.original, evidence.json(call.registeredJournal), step.calls.take(index + 1), true)
++                require((call.outcome == null) == (call.endedJournal == null))
++                if (call.endedJournal != null) {
++                    verifyJournal(state.original, evidence.json(call.endedJournal), step.calls.take(index + 1), false)
++                    evidence.bytes(requireNotNull(call.outcome))
++                }
++            }
++            state.verifyCurrentJournal()
++            return state
++        }
++        private fun requireSettled(state: State) {
++            require(state.step.calls.all { it.outcome != null && it.endedJournal != null }) { "A dispatched maintenance call has no durable outcome." }
++        }
++        private fun validateTermination(state: State) {
++            val step = state.step
++            val hostResume = requireNotNull(step.hostResume)
++            HarmonyOsMaintenanceHostBoot.requireRestarted(state.host(state.checkpoint.hostBefore), state.host(hostResume))
++            HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(hostResume), state.host(requireNotNull(step.hostComplete)))
++            HarmonyOSUptimeObservation.requireRestarted(state.phone(requireNotNull(step.phoneBefore)), state.phone(requireNotNull(step.phoneAfter)))
++            val expected = mapper.valueToTree<JsonNode>(mapOf("schemaVersion" to 1, "deviceId" to state.gate.deviceId,
++                "ownerId" to state.gate.ownerId, "checkpointSha256" to state.gate.maintenance!!.checkpoint.sha256,
++                "hostBefore" to state.checkpoint.hostBefore, "hostResume" to step.hostResume, "hostComplete" to step.hostComplete,
++                "phoneBefore" to step.phoneBefore, "phoneAfter" to step.phoneAfter,
++                "disposition" to "terminated_by_ordered_host_device_restart", "originalResult" to "unknown", "operationIds" to pendingIds(state.original)))
++            require(state.evidence.json(requireNotNull(step.termination)) == expected)
++            for ((phase, reference) in listOf("host_verified" to step.phoneBefore, "phone_prepared" to step.phoneAfter)) {
++                val call = state.step.calls.single { it.phase == phase && it.outcome == reference }
++                require(call.purpose == "observe_uptime" && call.outcome == reference &&
++                    state.evidence.json(requireNotNull(reference))["hostCallId"].asText() == call.hostCallId &&
++                    call.argumentsSha256 == E.digest(mapper.writeValueAsBytes(listOf("uptime"))))
++            }
++        }
++        private fun validateCleanup(state: State) {
++            validateTermination(state)
++            val root = state.original["remoteRoot"].asText()
++            val expected = state.original["operations"].flatMap { val path = "$root/${it["id"].asText()}"; listOf("$path/done", "$path/done.pending", path) } + listOf("$root/files", root)
++            val batches = state.step.cleanupBatches.mapIndexed { index, reference ->
++                val node = state.evidence.json(reference); E.exactFields(node, setOf("index", "paths", "hostCallId"))
++                val batch = mapper.treeToValue(node, MaintenanceCleanupBatch::class.java)
++                require(batch.index == index)
++                val call = state.step.calls.single { it.hostCallId == batch.hostCallId }
++                require(call.phase == "cleaning" && call.purpose == "cleanup_owned_paths" && call.outcome == reference && call.endedJournal != null)
++                batch
++            }
++            require(batches.flatMap { it.paths } == expected && batches.size == state.step.calls.count { it.phase == "cleaning" })
++        }
++        private fun receiptPath(state: State): Path = ownerDirectory(state.directory, state.gate.deviceId, state.gate.ownerId)
++            .resolve("recoveries").resolve("${state.checkpoint.maintenanceId}.json")
++        private fun receiptPayload(state: State, cleanedHead: MaintenanceReference): Map<String, Any?> = linkedMapOf(
++            "schemaVersion" to 3, "recoveryId" to state.checkpoint.maintenanceId, "deviceId" to state.gate.deviceId,
++            "observedAt" to state.evidence.json(cleanedHead)["observedAt"].asText(),
++            "sessionId" to state.gate.ownerId, "reason" to "ordered_restart_maintenance", "state" to "complete",
++            "originalExecutionResult" to "unknown", "operations" to state.original["operations"].size(),
++            "originalPendingOperations" to pendingIds(state.original).size, "pendingOperations" to 0, "temporaryFiles" to 0,
++            "issues" to emptyList<Any>(), "maintenanceId" to state.checkpoint.maintenanceId,
++            "checkpoint" to state.gate.maintenance!!.checkpoint, "evidenceHead" to cleanedHead,
++            "termination" to state.step.termination, "originalJournal" to state.checkpoint.originalJournal,
++            "finalJournal" to state.step.journal, "originalReceipt" to state.checkpoint.originalReceipt,
++            "cleanupBatches" to state.step.cleanupBatches)
++        private fun writeFinalReceipt(state: State) {
++            requireSettled(state); validateCleanup(state)
++            val path = receiptPath(state)
++            val payload = receiptPayload(state, state.gate.maintenance!!.head)
++            val bytes = mapper.writeValueAsBytes(payload)
++            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) require(E.read(path).contentEquals(bytes)) { "A different maintenance receipt already exists." }
++            else writeLeaseFile(path, bytes, replace = false)
++            // The canonical receipt location permits recovery of a failed following gate write.
++            val reference = state.evidence.saveBytes("receipt", bytes)
++            state.publish(state.step.copy(phase = "receipt_written", receipt = reference))
++        }
++        private fun validateReceipt(state: State): RecoveryOutcome {
++            requireSettled(state); validateCleanup(state)
++            val reference = requireNotNull(state.step.receipt)
++            val node = state.evidence.json(reference)
++            val cleanedRef = mapper.treeToValue(node["evidenceHead"], MaintenanceReference::class.java)
++            val cleaned = state.evidence.document(cleanedRef, MaintenanceStep::class.java, E.stepFields)
++            require(cleaned.phase == "cleaned" && cleaned.journal == state.step.journal && cleaned.calls == state.step.calls &&
++                cleaned.cleanupBatches == state.step.cleanupBatches && cleaned.termination == state.step.termination)
++            require(node == mapper.valueToTree<JsonNode>(receiptPayload(state, cleanedRef)))
++            val path = receiptPath(state); val bytes = E.read(path)
++            require(E.digest(bytes) == reference.sha256 && mapper.readTree(bytes) == node)
++            @Suppress("UNCHECKED_CAST") val report = mapper.convertValue(node, Map::class.java) as Map<String, Any?>
++            return RecoveryOutcome(state.gate.deviceId, state.gate.ownerId, true, path, reference.sha256, report)
++        }
++        fun completedOutcome(directory: Path, gate: LeaseGate): RecoveryOutcome {
++            require(gate.state == "clean" && !gate.requiresRecovery)
++            val state = load(directory, gate)
++            require(state.step.phase == "complete")
++            return validateReceipt(state).also { require(gate.reportPath == it.reportPath.toString() && gate.reportSha256 == it.sha256) }
++        }
++    }
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..3232cc5
+index 0000000..8b1757f
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,491 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -3627,6 +4532,8 @@ index 0000000..3232cc5
 +            if (gate.ownerId != ownerId) throw AgentProtocolException(AgentError(
 +                "invalid_input", "RECOVERY_SESSION_MISMATCH", "The requested session is not the current durable device owner.",
 +                mapOf("recoverySessionId" to gate.ownerId)))
++            if (gate.maintenance != null) throw recoveryRequired(gate,
++                "This owner is in maintenance recovery. Use the maintenance entry point; ordinary recovery cannot change it.")
 +            if (gate.state == "clean") return@withDeviceLock existingReceipt(directory, gate)
 +            val journalPath = checkedJournalPath(directory, gate)
 +            val journal = try { HarmonyOSRecoveryJournal.open(journalPath) } catch (error: Exception) {
@@ -3707,7 +4614,7 @@ index 0000000..3232cc5
 +    return resources.resolvesFailure(id, fingerprint)
 +}
 +
-+private data class LeaseGate(
++internal data class LeaseGate(
 +    val deviceId: String,
 +    val ownerId: String,
 +    val state: String,
@@ -3719,6 +4626,7 @@ index 0000000..3232cc5
 +    val requiresRecovery: Boolean = false,
 +    val uncertainReason: String? = null,
 +    val unresolvedRecording: Boolean = false,
++    val maintenance: MaintenanceGate? = null,
 +)
 +
 +private val leaseMapper = jacksonObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -3730,11 +4638,11 @@ index 0000000..3232cc5
 +    }
 +}
 +
-+private fun gatePath(directory: Path, deviceId: String): Path = directory.resolve("${HarmonyOsSessionSupport.lockName(deviceId)}.owner.json")
-+private fun ownerDirectory(directory: Path, deviceId: String, ownerId: String): Path =
++internal fun gatePath(directory: Path, deviceId: String): Path = directory.resolve("${HarmonyOsSessionSupport.lockName(deviceId)}.owner.json")
++internal fun ownerDirectory(directory: Path, deviceId: String, ownerId: String): Path =
 +    directory.resolve(HarmonyOsSessionSupport.lockName(deviceId)).resolve(ownerId)
 +
-+private fun readGate(directory: Path, deviceId: String): LeaseGate? {
++internal fun readGate(directory: Path, deviceId: String): LeaseGate? {
 +    val path = gatePath(directory, deviceId)
 +    if (Files.notExists(path, LinkOption.NOFOLLOW_LINKS)) {
 +        if (Files.exists(directory.resolve(HarmonyOsSessionSupport.lockName(deviceId)), LinkOption.NOFOLLOW_LINKS)) {
@@ -3746,9 +4654,11 @@ index 0000000..3232cc5
 +        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) <= 1024 * 1024)
 +        require(path.toRealPath() == path)
 +        val node = leaseMapper.readTree(path.toFile())
-+        require(node.isObject && node.path("schemaVersion").isIntegralNumber && node.path("schemaVersion").intValue() == 1)
++        require(node.isObject && node.path("schemaVersion").isIntegralNumber && node.path("schemaVersion").intValue() in 1..2)
++        val maintenanceVersion = node["schemaVersion"].intValue() == 2
 +        require(node.fieldNames().asSequence().toSet() == setOf("schemaVersion", "deviceId", "ownerSessionId", "state", "journalPath",
-+            "updatedAt", "closeFailure", "reportPath", "reportSha256", "requiresRecovery", "uncertainReason", "unresolvedRecording"))
++            "updatedAt", "closeFailure", "reportPath", "reportSha256", "requiresRecovery", "uncertainReason", "unresolvedRecording") +
++            if (maintenanceVersion) setOf("maintenance") else emptySet<String>())
 +        fun text(name: String): String = node.get(name).also { require(it != null && it.isTextual && it.asText().isNotBlank()) }.asText()
 +        require(text("deviceId") == deviceId)
 +        val ownerId = HarmonyOsAgentProtocol.uuid(text("ownerSessionId"), "ownerSessionId")
@@ -3770,27 +4680,43 @@ index 0000000..3232cc5
 +        require(node["unresolvedRecording"].isBoolean)
 +        val unresolvedRecording = node["unresolvedRecording"].booleanValue()
 +        require(state != "clean" || (!requiresRecovery && closeFailure == null && !unresolvedRecording))
++        val maintenance = if (maintenanceVersion) {
++            require(state != "active" && closeFailure == null && !unresolvedRecording)
++            val value = node["maintenance"]
++            HarmonyOsMaintenanceEvidence.exactFields(value, setOf("maintenanceId", "checkpoint", "head"))
++            for (name in listOf("checkpoint", "head")) {
++                val reference = value[name]
++                HarmonyOsMaintenanceEvidence.exactFields(reference, setOf("path", "sha256"))
++                require(reference["path"].isTextual && reference["sha256"].isTextual &&
++                    reference["path"].asText().matches(Regex("[a-z][a-z-]{0,40}-[0-9a-f-]{36}\\.json")) &&
++                    reference["sha256"].asText().matches(Regex("[0-9a-f]{64}")))
++            }
++            require(value["maintenanceId"].isTextual)
++            HarmonyOsMaintenanceEvidence.uuid(value["maintenanceId"].asText())
++            leaseMapper.treeToValue(value, MaintenanceGate::class.java)
++        } else null
 +        return LeaseGate(deviceId, ownerId, state, text("journalPath"), time, closeFailure, reportPath, reportHash,
-+            requiresRecovery, uncertainReason, unresolvedRecording)
++            requiresRecovery, uncertainReason, unresolvedRecording, maintenance)
 +            .also { checkedJournalPath(directory, it) }
 +    } catch (error: Exception) {
 +        throw invalidMetadata("The durable device gate is missing required or trustworthy metadata.", null, error)
 +    }
 +}
 +
-+private fun checkedJournalPath(directory: Path, gate: LeaseGate): Path {
++internal fun checkedJournalPath(directory: Path, gate: LeaseGate): Path {
 +    val expected = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recovery-journal.json")
 +    require(Path.of(gate.journalPath).toAbsolutePath().normalize() == expected) { "Unexpected journal location." }
 +    require(expected.parent.toRealPath() == expected.parent && !Files.isSymbolicLink(expected)) { "Recovery journal cannot follow links." }
 +    return expected
 +}
 +
-+private fun writeGate(directory: Path, gate: LeaseGate) {
-+    val payload = mapOf("schemaVersion" to 1, "deviceId" to gate.deviceId, "ownerSessionId" to gate.ownerId,
++internal fun writeGate(directory: Path, gate: LeaseGate) {
++    val payload = mapOf("schemaVersion" to if (gate.maintenance == null) 1 else 2, "deviceId" to gate.deviceId, "ownerSessionId" to gate.ownerId,
 +        "state" to gate.state, "journalPath" to gate.journalPath, "updatedAt" to gate.updatedAt,
 +        "closeFailure" to gate.closeFailure, "reportPath" to gate.reportPath, "reportSha256" to gate.reportSha256,
 +        "requiresRecovery" to gate.requiresRecovery, "uncertainReason" to gate.uncertainReason,
-+        "unresolvedRecording" to gate.unresolvedRecording)
++        "unresolvedRecording" to gate.unresolvedRecording) +
++        if (gate.maintenance == null) emptyMap() else mapOf("maintenance" to gate.maintenance)
 +    writeLeaseFile(gatePath(directory, gate.deviceId), leaseMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(payload))
 +}
 +
@@ -3823,6 +4749,7 @@ index 0000000..3232cc5
 +}
 +
 +private fun existingReceipt(directory: Path, gate: LeaseGate): RecoveryOutcome {
++    if (gate.maintenance != null) return HarmonyOsMaintenanceRecovery.completedOutcome(directory, gate)
 +    try {
 +        val receipts = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries")
 +        val path = Path.of(requireNotNull(gate.reportPath)).toAbsolutePath().normalize()
@@ -3891,7 +4818,7 @@ index 0000000..3232cc5
 +
 +private fun digest(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 +
-+private fun writeLeaseFile(path: Path, bytes: ByteArray, replace: Boolean = true) {
++internal fun writeLeaseFile(path: Path, bytes: ByteArray, replace: Boolean = true) {
 +    require(path.parent.toRealPath() == path.parent && !Files.isSymbolicLink(path)) { "Lease metadata cannot follow symbolic links." }
 +    val staging = path.resolveSibling(".${path.fileName}.${UUID.randomUUID()}.pending")
 +    try {
@@ -8525,6 +9452,603 @@ index c956fee..1743497 100644
      @Test
      fun `will delete old files`() {
          // Create directory structure, and an old test directory
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostBootTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostBootTest.kt
+new file mode 100644
+index 0000000..c8dfcae
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostBootTest.kt
+@@ -0,0 +1,186 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.databind.node.ObjectNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.cli.session.HarmonyOsMaintenanceHostBoot.Observation
++import maestro.cli.session.HarmonyOsMaintenanceHostBoot.Tool
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++
++class HarmonyOsMaintenanceHostBootTest {
++    private val mapper = jacksonObjectMapper()
++    private val powershell = Tool("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "a".repeat(64), 100)
++    private val script = Tool("D:\\checkout\\scripts\\recovery\\observe-windows-boot.ps1", "b".repeat(64), 200)
++    private fun fixture(): ObjectNode = mapper.valueToTree(mapOf(
++        "protocol" to "maestro.harmonyos.host-boot-observation", "schemaVersion" to 1,
++        "provider" to mapOf("name" to "windows-gettickcount64-cim", "version" to 1),
++        "observedAt" to "2026-10-30T01:00:00.000Z", "uptimeMilliseconds" to "9007199254740993",
++        "lastBootUpTime" to "2026-10-20T00:00:00.000Z", "machineIdSha256" to "c".repeat(64),
++        "tools" to mapOf(
++            "powershell" to mapOf("path" to powershell.path, "sha256" to powershell.sha256, "bytes" to powershell.bytes, "version" to "5.1.26100.1"),
++            "script" to mapOf("path" to script.path, "sha256" to script.sha256, "bytes" to script.bytes)),
++    ))
++    private fun parse(node: JsonNode = fixture()) = HarmonyOsMaintenanceHostBoot.parse(node, powershell, script)
++    private fun later(value: Observation = parse()) = value.copy(observedAt = "2026-10-30T02:00:00.000Z")
++    private fun tool(node: ObjectNode, name: String) = node["tools"][name] as ObjectNode
++
++    @Test fun `UInt64 values remain exact above double precision and at the maximum`() {
++        for (tick in listOf("0", "9007199254740993", "18446744073709551615")) {
++            val node = fixture().put("uptimeMilliseconds", tick)
++            assertThat(parse(node).uptimeMilliseconds).isEqualTo(tick)
++        }
++        val node = fixture()
++        val saved = parse(node)
++        node.put("uptimeMilliseconds", "1")
++        assertThat(saved.uptimeMilliseconds).isEqualTo("9007199254740993")
++    }
++
++    @Test fun `invalid unsigned encodings numbers and overflow are rejected`() {
++        for (value in listOf(null, 0, 9007199254740992L, "", "00", "01", "-1", "+1", "1.0", "1e3", " 1", "1 ",
++            "18446744073709551616", "9".repeat(100), listOf("1"))) {
++            val node = fixture().set<ObjectNode>("uptimeMilliseconds", mapper.valueToTree(value))
++            assertThrows<IllegalArgumentException> { parse(node) }
++        }
++    }
++
++    @Test fun `missing and unknown fields are rejected at every object level`() {
++        val mutations: List<(ObjectNode) -> Unit> = listOf(
++            { it.remove("observedAt"); Unit }, { it.put("handoffReady", true); Unit },
++            { (it["provider"] as ObjectNode).put("extra", true); Unit },
++            { (it["tools"] as ObjectNode).put("extra", true); Unit },
++            { tool(it, "powershell").remove("version"); Unit },
++            { tool(it, "script").put("version", "7.5.0"); Unit },
++        )
++        for (mutate in mutations) {
++            val node = fixture(); mutate(node)
++            assertThrows<IllegalArgumentException> { parse(node) }
++        }
++    }
++
++    @Test fun `protocol provider and version require the documented values and types`() {
++        val mutations: List<(ObjectNode) -> Unit> = listOf(
++            { it.put("protocol", "other"); Unit }, { it.put("schemaVersion", 2); Unit }, { it.put("schemaVersion", "1"); Unit },
++            { (it["provider"] as ObjectNode).put("name", "other"); Unit },
++            { (it["provider"] as ObjectNode).put("version", 2); Unit },
++            { (it["provider"] as ObjectNode).put("version", "1"); Unit },
++            { it.set<ObjectNode>("provider", mapper.createArrayNode()); Unit },
++        )
++        for (mutate in mutations) { val node = fixture(); mutate(node); assertThrows<IllegalArgumentException> { parse(node) } }
++    }
++
++    @Test fun `UTC timestamps require exact valid millisecond Z form`() {
++        for (field in listOf("observedAt", "lastBootUpTime")) {
++            for (value in listOf("2026-02-30T00:00:00.000Z", "2026-10-30T01:00:00+00:00", "2026-10-30T01:00:00Z",
++                "2026-10-30T01:00:00.0000Z", "2026-10-30T01:00:00.000z", "2026-10-30T24:00:00.000Z", "2016-12-31T23:59:60.000Z")) {
++                assertThrows<IllegalArgumentException> { parse(fixture().put(field, value)) }
++            }
++            assertThrows<IllegalArgumentException> { parse(fixture().putNull(field)) }
++        }
++        assertThat(parse(fixture().put("observedAt", "0000-01-01T00:00:00.000Z")).observedAt).startsWith("0000")
++    }
++
++    @Test fun `hashes and PowerShell versions have strict textual forms`() {
++        for (hash in listOf("", "C".repeat(64), "c".repeat(63))) {
++            assertThrows<IllegalArgumentException> { parse(fixture().put("machineIdSha256", hash)) }
++        }
++        assertThrows<IllegalArgumentException> { parse(fixture().set<ObjectNode>("machineIdSha256", mapper.valueToTree(listOf("c".repeat(64))))) }
++        for (value in listOf("", "7.5", "7.5.0-preview", "7.5.0.1.2", " 7.5.0")) {
++            val node = fixture(); tool(node, "powershell").put("version", value)
++            assertThrows<IllegalArgumentException> { parse(node) }
++        }
++        val node = fixture(); tool(node, "powershell").put("version", "7.5.0")
++        assertThat(parse(node).powershellVersion).isEqualTo("7.5.0")
++    }
++
++    @Test fun `both tools must match independently frozen paths hashes and sizes`() {
++        for (name in listOf("powershell", "script")) {
++            for (field in listOf("path", "sha256", "bytes")) {
++                val node = fixture(); val target = tool(node, name)
++                when (field) {
++                    "path" -> target.put(field, "C:\\other\\tool.exe")
++                    "sha256" -> target.put(field, "d".repeat(64))
++                    else -> target.put(field, 101)
++                }
++                assertThrows<IllegalArgumentException> { parse(node) }
++            }
++        }
++        for (invalid in listOf(script.copy(path = "relative.ps1"), script.copy(sha256 = "wrong"), script.copy(bytes = 0),
++            script.copy(bytes = 9_007_199_254_740_992L))) {
++            assertThrows<IllegalArgumentException> { HarmonyOsMaintenanceHostBoot.parse(fixture(), powershell, invalid) }
++        }
++    }
++
++    @Test fun `Windows path comparison matches drive UNC slash case and dot normalization`() {
++        val node = fixture()
++        tool(node, "script").put("path", "d:/CHECKOUT/scripts/other/../recovery/observe-windows-boot.ps1")
++        parse(node)
++        val unc = script.copy(path = "\\\\server\\share\\dir\\observe.ps1")
++        tool(node, "script").put("path", "\\\\SERVER/share/dir/./observe.ps1")
++        HarmonyOsMaintenanceHostBoot.parse(node, powershell, unc)
++        for (invalid in listOf("relative.ps1", "\\rooted.ps1", "C:relative.ps1", "C:\\", "\\\\?\\C:\\script.ps1", "\\\\.\\pipe\\tool",
++            "C:\\bad\u0000.ps1", "C:\\bad\n.ps1", "C:\\bad\u007f.ps1", "C:\\" + "a".repeat(32768))) {
++            val changed = fixture(); tool(changed, "script").put("path", invalid)
++            assertThrows<IllegalArgumentException> { HarmonyOsMaintenanceHostBoot.parse(changed, powershell, script.copy(path = invalid)) }
++        }
++        val trailing = fixture(); tool(trailing, "script").put("path", script.path + "\\")
++        assertThrows<IllegalArgumentException> { parse(trailing) }
++    }
++
++    @Test fun `tool byte counts obey JavaScript safe integer boundaries`() {
++        for (value in listOf(0, -1, 1.5, 9_007_199_254_740_992L, "200", listOf(200))) {
++            val node = fixture(); tool(node, "script").set<ObjectNode>("bytes", mapper.valueToTree(value))
++            assertThrows<IllegalArgumentException> { parse(node) }
++        }
++        val node = fixture(); tool(node, "script").put("bytes", 9_007_199_254_740_991L)
++        HarmonyOsMaintenanceHostBoot.parse(node, powershell, script.copy(bytes = 9_007_199_254_740_991L))
++        val integralDouble = fixture(); tool(integralDouble, "script").put("bytes", 200.0)
++        parse(integralDouble)
++    }
++
++    @Test fun `restart compares UInt64 without rounding adjacent values`() {
++        val before = parse()
++        HarmonyOsMaintenanceHostBoot.requireRestarted(before, later().copy(uptimeMilliseconds = "9007199254740992", lastBootUpTime = "2026-10-30T01:30:00.000Z"))
++        HarmonyOsMaintenanceHostBoot.requireRestarted(before.copy(uptimeMilliseconds = "18446744073709551615"),
++            later().copy(uptimeMilliseconds = "18446744073709551614", lastBootUpTime = "2026-10-30T01:30:00.000Z"))
++    }
++
++    @Test fun `restart requires both a changed boot time and decreasing uptime`() {
++        val before = parse()
++        assertThrows<IllegalArgumentException> { HarmonyOsMaintenanceHostBoot.requireRestarted(before, later().copy(uptimeMilliseconds = "1")) }
++        for (tick in listOf(before.uptimeMilliseconds, "9007199254740994")) {
++            assertThrows<IllegalArgumentException> {
++                HarmonyOsMaintenanceHostBoot.requireRestarted(before, later().copy(uptimeMilliseconds = tick, lastBootUpTime = "2026-10-30T01:30:00.000Z"))
++            }
++        }
++    }
++
++    @Test fun `same boot accepts equal or greater UInt64 uptime and rejects changes`() {
++        val before = parse()
++        for (tick in listOf(before.uptimeMilliseconds, "9007199254740994", "18446744073709551615")) {
++            HarmonyOsMaintenanceHostBoot.requireSameBoot(before, later().copy(uptimeMilliseconds = tick))
++        }
++        assertThrows<IllegalArgumentException> { HarmonyOsMaintenanceHostBoot.requireSameBoot(before, later().copy(uptimeMilliseconds = "9007199254740992")) }
++        assertThrows<IllegalArgumentException> { HarmonyOsMaintenanceHostBoot.requireSameBoot(before, later().copy(lastBootUpTime = "2026-10-30T01:30:00.000Z")) }
++    }
++
++    @Test fun `both comparisons require same host forward observations and same PowerShell version`() {
++        val comparisons = listOf(HarmonyOsMaintenanceHostBoot::requireRestarted, HarmonyOsMaintenanceHostBoot::requireSameBoot)
++        for (compare in comparisons) {
++            for (after in listOf(later().copy(machineIdSha256 = "d".repeat(64)), parse(), parse().copy(observedAt = "2026-10-29T23:59:59.999Z"),
++                later().copy(powershellVersion = "7.5.0"))) {
++                assertThrows<IllegalArgumentException> { compare(parse(), after) }
++            }
++        }
++    }
++
++    @Test fun `directly constructed invalid observations cannot bypass pair validation`() {
++        val comparisons = listOf(HarmonyOsMaintenanceHostBoot::requireRestarted, HarmonyOsMaintenanceHostBoot::requireSameBoot)
++        for (compare in comparisons) for (invalid in listOf(later().copy(uptimeMilliseconds = "-1"),
++            later().copy(uptimeMilliseconds = "18446744073709551616"), later().copy(observedAt = "tomorrow"),
++            later().copy(lastBootUpTime = "invalid"), later().copy(machineIdSha256 = "bad"), later().copy(powershellVersion = "bad"))) {
++            assertThrows<IllegalArgumentException> { compare(parse(), invalid) }
++        }
++    }
++}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostObserverTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostObserverTest.kt
+new file mode 100644
+index 0000000..c62e2ea
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceHostObserverTest.kt
+@@ -0,0 +1,115 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import org.junit.jupiter.api.condition.EnabledOnOs
++import org.junit.jupiter.api.condition.OS
++import org.junit.jupiter.api.io.TempDir
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++
++@EnabledOnOs(OS.WINDOWS)
++class HarmonyOsMaintenanceHostObserverTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++
++    private fun tools(): Pair<Path, Path> =
++        Files.writeString(directory.resolve("powershell.exe"), "fixture native file") to
++            Files.writeString(directory.resolve("observe.ps1"), "fixture script")
++
++    private fun evidence(observer: HarmonyOsMaintenanceHostObserver): String = mapper.writeValueAsString(mapOf(
++        "protocol" to "maestro.harmonyos.host-boot-observation", "schemaVersion" to 1,
++        "provider" to mapOf("name" to "windows-gettickcount64-cim", "version" to 1),
++        "observedAt" to "2026-10-30T01:00:00.000Z", "uptimeMilliseconds" to "9007199254740993",
++        "lastBootUpTime" to "2026-10-20T00:00:00.000Z", "machineIdSha256" to "c".repeat(64),
++        "tools" to observer.tools.mapValues { (name, tool) ->
++            mapOf("path" to tool.path, "sha256" to tool.sha256, "bytes" to tool.bytes) +
++                if (name == "powershell") mapOf("version" to "7.5.0") else emptyMap()
++        },
++    ))
++
++    @Test fun `provider runs with a bounded timeout and exact output argument`() {
++        val (powershell, script) = tools()
++        val output = directory.resolve("observation.json")
++        lateinit var observer: HarmonyOsMaintenanceHostObserver
++        observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { command, timeout ->
++            assertThat(command).containsExactly(powershell.toString(), "-NoLogo", "-NoProfile", "-NonInteractive",
++                "-File", script.toString(), "-OutputPath", output.toString()).inOrder()
++            assertThat(timeout).isEqualTo(Duration.ofSeconds(20))
++            Files.writeString(output, evidence(observer))
++            HdcCommandResult(0, "", "")
++        })
++        val node = observer.observe(output)
++        assertThat(node["uptimeMilliseconds"].asText()).isEqualTo("9007199254740993")
++        assertThat(mapper.readTree(Files.readAllBytes(output))).isEqualTo(node)
++    }
++
++    @Test fun `changed frozen tool prevents dispatch`() {
++        val (powershell, script) = tools()
++        var calls = 0
++        val observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { _, _ ->
++            calls++; HdcCommandResult(0, "", "")
++        })
++        Files.writeString(script, "changed")
++        assertThrows<IllegalArgumentException> { observer.observe(directory.resolve("new.json")) }
++        assertThat(calls).isEqualTo(0)
++    }
++
++    @Test fun `tool change during collection rejects a valid looking observation`() {
++        val (powershell, script) = tools()
++        val output = directory.resolve("new.json")
++        lateinit var observer: HarmonyOsMaintenanceHostObserver
++        observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { _, _ ->
++            Files.writeString(output, evidence(observer))
++            Files.writeString(script, "changed")
++            HdcCommandResult(0, "", "")
++        })
++        assertThrows<IllegalArgumentException> { observer.observe(output) }
++        assertThat(Files.exists(output)).isTrue()
++    }
++
++    @Test fun `duplicate keys and trailing json cannot become boot evidence`() {
++        val (powershell, script) = tools()
++        for (duplicate in listOf(true, false)) {
++            val output = directory.resolve("bad-$duplicate.json")
++            lateinit var observer: HarmonyOsMaintenanceHostObserver
++            observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { _, _ ->
++                val valid = evidence(observer)
++                val malformed = if (duplicate) "{\"schemaVersion\":1," + valid.substring(1) else valid + " {}"
++                Files.writeString(output, malformed)
++                HdcCommandResult(0, "", "")
++            })
++            assertThrows<Exception> { observer.observe(output) }
++        }
++    }
++
++    @Test fun `existing observation is preserved without dispatch`() {
++        val (powershell, script) = tools()
++        val output = Files.writeString(directory.resolve("existing.json"), "keep original")
++        var calls = 0
++        val observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { _, _ ->
++            calls++; HdcCommandResult(0, "", "")
++        })
++        assertThrows<IllegalArgumentException> { observer.observe(output) }
++        assertThat(calls).isEqualTo(0)
++        assertThat(Files.readString(output)).isEqualTo("keep original")
++    }
++
++    @Test fun `nonzero or diagnostic provider result cannot authorize evidence`() {
++        val (powershell, script) = tools()
++        for (code in listOf(0, 1)) {
++            val output = directory.resolve("failed-$code.json")
++            lateinit var observer: HarmonyOsMaintenanceHostObserver
++            observer = HarmonyOsMaintenanceHostObserver(powershell, script, HdcCommandRunner { _, _ ->
++                Files.writeString(output, evidence(observer))
++                HdcCommandResult(code, "", if (code == 0) "provider warning" else "")
++            })
++            assertThrows<IllegalArgumentException> { observer.observe(output) }
++        }
++    }
++}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
+new file mode 100644
+index 0000000..d9fa540
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
+@@ -0,0 +1,278 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.databind.node.ObjectNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.cli.harmonyos.AgentProtocolException
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcException
++import maestro.utils.TempFileHandler
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import org.junit.jupiter.api.condition.EnabledOnOs
++import org.junit.jupiter.api.condition.OS
++import java.io.IOException
++import java.nio.file.Files
++import java.nio.file.Path
++import java.nio.file.StandardOpenOption
++import java.util.UUID
++
++/** Synthetic host/device observations; uses the real journal, lease and maintenance transport, never HDC. */
++@EnabledOnOs(OS.WINDOWS)
++class HarmonyOsMaintenanceRecoveryTest {
++    private val mapper = jacksonObjectMapper()
++    private val device = "maintenance-fixture-device"
++    private val oldBoot = "2026-10-20T00:00:00.000Z"
++    private val newBoot = "2026-10-30T00:00:00.000Z"
++    private val beforePhone = " 23:02:14 up 4 days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\n"
++    private val afterPhone = " 23:10:14 up 1 min,  0 users,  load average: 0.18, 0.26, 0.44\n"
++
++    private inner class Fixture(val root: Path, recording: Boolean = false) {
++        val owner = UUID.randomUUID().toString()
++        val tools: Map<String, MaintenanceTool>
++        val originalReceipt: Path
++        val originalReceiptBytes: ByteArray
++        val originalJournalBytes: ByteArray
++        var hostObservations = 0
++        var deviceCalls = 0
++        var cleanupCalls = 0
++        var unchangedHost = false
++        var secondHostRestart = false
++        var unchangedPhone = false
++        var failPhone = false
++        var wrongCleanup = false
++        var rejectReceiptGateOnce = false
++        var rejectCleanGateOnce = false
++        val journalPath: Path get() = ownerDirectory(root, device, owner).resolve("recovery-journal.json")
++        init {
++            val toolsRoot = Files.createDirectory(root.resolve("fixture-tools"))
++            val lib = Files.createDirectory(toolsRoot.resolve("lib"))
++            tools = listOf("powershell" to toolsRoot.resolve("pwsh.exe"), "script" to toolsRoot.resolve("observe.ps1"),
++                "hdc" to toolsRoot.resolve("fake-hdc.exe"), "java" to toolsRoot.resolve("java.exe"),
++                "classpath:0:fixture.jar" to lib.resolve("fixture.jar")).associate { (key, path) ->
++                Files.writeString(path, "host-fixture-$key", StandardOpenOption.CREATE_NEW)
++                key to HarmonyOsMaintenanceEvidence.fingerprint(path)
++            }
++            HarmonyOsSessionSupport.withDeviceLock(device, root) {
++                val lease = HarmonyOsSessionLease.begin(device, owner, root, requiresRecordingCleanup = recording)
++                val lost = HdcClient("fake-original", HdcCommandRunner { _, _ -> HdcCommandResult(0, "missing original proof", "") })
++                    .withRecoveryJournal(lease.journal)
++                assertThrows<HdcException> { lost.shell(device, listOf("uitest", "dumpLayout")) }
++                HarmonyOsRecoverySupport.noteUncertainCleanup(owner, "Synthetic original proof loss")
++                assertThrows<AgentProtocolException> { lease.finish(null, noHdc()) }
++            }
++            originalReceipt = Path.of(gate()["reportPath"].asText())
++            originalReceiptBytes = Files.readAllBytes(originalReceipt)
++            originalJournalBytes = Files.readAllBytes(journalPath)
++        }
++        fun gate(): JsonNode = mapper.readTree(gatePath(root, device).toFile())
++        fun head(): JsonNode {
++            val management = gate()["maintenance"]
++            val evidence = ownerDirectory(root, device, owner).resolve("maintenance").resolve(management["maintenanceId"].asText())
++            return mapper.readTree(evidence.resolve(management["head"]["path"].asText()).toFile())
++        }
++        fun observe(path: Path): JsonNode {
++            val index = hostObservations++
++            val boot = if (index == 0 || unchangedHost) oldBoot else if (index >= 2 && secondHostRestart) "2026-10-30T01:00:00.000Z" else newBoot
++            val ticks = if (index == 0) "900000000" else if (unchangedHost) "900000001" else (1000 + index * 100).toString()
++            val node: JsonNode = mapper.valueToTree(mapOf("protocol" to "maestro.harmonyos.host-boot-observation", "schemaVersion" to 1,
++                "provider" to mapOf("name" to "windows-gettickcount64-cim", "version" to 1),
++                "observedAt" to "2026-10-30T0${index + 2}:00:00.000Z", "uptimeMilliseconds" to ticks,
++                "lastBootUpTime" to boot, "machineIdSha256" to "a".repeat(64),
++                "tools" to mapOf("powershell" to (mapper.convertValue(tools.getValue("powershell"), Map::class.java) + mapOf("version" to "7.5.0")),
++                    "script" to tools.getValue("script"))))
++            Files.write(path, mapper.writeValueAsBytes(node), StandardOpenOption.CREATE_NEW)
++            // The production observer returns the persisted JSON, including its parsed number types.
++            return mapper.readTree(Files.readAllBytes(path))
++        }
++        fun hdc() = HdcClient("fake-maintenance", HdcCommandRunner { command, _ ->
++            deviceCalls++
++            assertThat(command.take(4)).containsExactly("fake-maintenance", "-t", device, "shell").inOrder()
++            // Binding must already be the committed gate head when transport is reached.
++            val bound = head()["calls"].last()
++            assertThat(bound["outcome"].isNull).isTrue()
++            assertThat(bound["endedJournal"].isNull).isTrue()
++            val registered = mapper.readTree(journalPath.toFile())["hostCalls"].last()
++            assertThat(registered["id"].asText()).isEqualTo(bound["hostCallId"].asText())
++            assertThat(registered["returned"].asBoolean()).isFalse()
++            if (command.last() == "'uptime'") {
++                assertThat(bound["purpose"].asText()).isEqualTo("observe_uptime")
++                if (failPhone) throw HdcException("Synthetic failed phone query")
++                HdcCommandResult(0, if (deviceCalls == 1 || unchangedPhone) beforePhone else afterPhone, "")
++            } else {
++                cleanupCalls++
++                assertThat(bound["purpose"].asText()).isEqualTo("cleanup_owned_paths")
++                assertThat(head()["termination"].isNull).isFalse()
++                val shell = command.last().removePrefix("'sh' '-c' '").removeSuffix("'").replace("'\"'\"'", "'")
++                assertThat(shell).doesNotContain("rm -r")
++                assertThat(shell).doesNotContain("*")
++                val nonce = Regex("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").findAll(shell).last().value
++                HdcCommandResult(0, if (wrongCleanup) "wrong-confirmation" else nonce, "")
++            }
++        })
++        fun recovery() = HarmonyOsMaintenanceRecovery(root, tools, ::observe, ::hdc) { directory, gate ->
++            val reference = gate.maintenance?.head
++            val phase = reference?.let { mapper.readTree(ownerDirectory(root, device, owner).resolve("maintenance")
++                .resolve(gate.maintenance!!.maintenanceId).resolve(it.path).toFile())["phase"].asText() }
++            if (rejectReceiptGateOnce && phase == "receipt_written") {
++                rejectReceiptGateOnce = false; throw IOException("Synthetic receipt gate publication failure")
++            }
++            if (rejectCleanGateOnce && gate.state == "clean") {
++                rejectCleanGateOnce = false; throw IOException("Synthetic clean gate publication failure")
++            }
++            writeGate(directory, gate)
++        }
++        fun assertOriginalPreserved() {
++            assertThat(Files.readAllBytes(originalReceipt)).isEqualTo(originalReceiptBytes)
++            val before = mapper.readTree(originalJournalBytes).deepCopy<ObjectNode>().apply { remove("hostCalls") }
++            val after = mapper.readTree(journalPath.toFile()).deepCopy<ObjectNode>().apply { remove("hostCalls") }
++            assertThat(after).isEqualTo(before)
++            assertThat(after["operations"].single()["completed"].asBoolean()).isFalse()
++            assertThat(after["operations"].single()["markerRemoved"].asBoolean()).isFalse()
++        }
++    }
++
++    @Test fun `ordered restart chain releases only through verified receipt three without rewriting original failure`() = fixture { f ->
++        val recovery = f.recovery()
++        assertThat(recovery.prepare(device, f.owner).phase).isEqualTo("prepared")
++        assertThat(f.gate()["schemaVersion"].asInt()).isEqualTo(2)
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThrows<AgentProtocolException> { HarmonyOsRecoverySupport.recover(device, f.owner, noHdc(), f.root) }
++        assertThat(HarmonyOsSessionLease.requiresRecovery(device, f.root)).isTrue()
++        assertThat(recovery.resume(device, f.owner).phase).isEqualTo("phone_prepared")
++        val savedHead = f.gate()["maintenance"]["head"]
++        assertThat(recovery.resume(device, f.owner).phase).isEqualTo("phone_prepared")
++        assertThat(f.gate()["maintenance"]["head"]).isEqualTo(savedHead)
++        assertThat(f.deviceCalls).isEqualTo(1)
++        val completed = recovery.complete(device, f.owner)
++        assertThat(completed.complete).isTrue()
++        assertThat(completed.receipt!!.report["schemaVersion"]).isEqualTo(3)
++        assertThat(completed.receipt.report["originalExecutionResult"]).isEqualTo("unknown")
++        assertThat(completed.receipt.report["originalPendingOperations"]).isEqualTo(1)
++        assertThat(f.cleanupCalls).isEqualTo(1)
++        assertThat(f.deviceCalls).isEqualTo(3)
++        f.assertOriginalPreserved()
++        assertThat(recovery.complete(device, f.owner).receipt!!.sha256).isEqualTo(completed.receipt.sha256)
++        assertThat(recovery.resume(device, f.owner).complete).isTrue()
++        assertThat(f.deviceCalls).isEqualTo(3)
++        assertThat(HarmonyOsSessionLease.requiresRecovery(device, f.root)).isFalse()
++        HarmonyOsSessionSupport.withDeviceLock(device, f.root) {
++            HarmonyOsSessionLease.begin(device, UUID.randomUUID().toString(), f.root).finish(null, noHdc())
++        }
++    }
++
++    @Test fun `unconfirmed host restart cannot dispatch phone observation`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); f.unchangedHost = true
++        assertThrows<AgentProtocolException> { recovery.resume(device, f.owner) }
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThat(f.head()["phase"].asText()).isEqualTo("prepared")
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `a second host restart before complete cannot dispatch or clean`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); recovery.resume(device, f.owner)
++        f.secondHostRestart = true
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.deviceCalls).isEqualTo(1)
++        assertThat(f.cleanupCalls).isEqualTo(0)
++        assertThat(HarmonyOsSessionLease.requiresRecovery(device, f.root)).isTrue()
++    }
++
++    @Test fun `early complete preserves confirmed observation and later device restart can complete`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); recovery.resume(device, f.owner)
++        f.unchangedPhone = true
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.deviceCalls).isEqualTo(2)
++        assertThat(f.cleanupCalls).isEqualTo(0)
++        f.unchangedPhone = false
++        assertThat(recovery.complete(device, f.owner).complete).isTrue()
++        assertThat(f.deviceCalls).isEqualTo(4)
++        assertThat(f.head()["calls"].count { it["phase"].asText() == "phone_prepared" }).isEqualTo(2)
++        assertThat(f.cleanupCalls).isEqualTo(1)
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `unconfirmed maintenance call prevents all retry dispatch and ordinary recovery`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); f.failPhone = true
++        assertThrows<AgentProtocolException> { recovery.resume(device, f.owner) }
++        assertThat(f.head()["calls"].single()["outcome"].isNull).isTrue()
++        assertThrows<AgentProtocolException> { recovery.resume(device, f.owner) }
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThrows<AgentProtocolException> { HarmonyOsRecoverySupport.recover(device, f.owner, noHdc(), f.root) }
++        assertThat(f.deviceCalls).isEqualTo(1)
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `wrong cleanup acknowledgement cannot produce a release receipt`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); recovery.resume(device, f.owner); f.wrongCleanup = true
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.head()["phase"].asText()).isEqualTo("cleaning")
++        assertThat(f.head()["cleanupBatches"].size()).isEqualTo(0)
++        assertThat(f.gate()["state"].asText()).isEqualTo("quarantined")
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.cleanupCalls).isEqualTo(1)
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `written receipt survives failed gate publication and retry never repeats device cleanup`() = fixture { f ->
++        val recovery = f.recovery(); val prepared = recovery.prepare(device, f.owner); recovery.resume(device, f.owner)
++        f.rejectReceiptGateOnce = true
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.head()["phase"].asText()).isEqualTo("cleaned")
++        val receipt = ownerDirectory(f.root, device, f.owner).resolve("recoveries").resolve("${prepared.maintenanceId}.json")
++        val bytes = Files.readAllBytes(receipt)
++        assertThat(f.gate()["state"].asText()).isEqualTo("quarantined")
++        val completed = recovery.complete(device, f.owner)
++        assertThat(completed.complete).isTrue()
++        assertThat(Files.readAllBytes(receipt)).isEqualTo(bytes)
++        assertThat(f.cleanupCalls).isEqualTo(1)
++        assertThat(f.deviceCalls).isEqualTo(3)
++    }
++
++    @Test fun `verified receipt written stage retries only the final clean gate`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); recovery.resume(device, f.owner)
++        f.rejectCleanGateOnce = true
++        assertThrows<AgentProtocolException> { recovery.complete(device, f.owner) }
++        assertThat(f.head()["phase"].asText()).isEqualTo("receipt_written")
++        assertThat(recovery.complete(device, f.owner).complete).isTrue()
++        assertThat(f.deviceCalls).isEqualTo(3)
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `changed tools or extra classpath member stop before dispatch`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner)
++        Files.writeString(Path.of(f.tools.getValue("classpath:0:fixture.jar").path).parent.resolve("extra.JAR"), "unexpected")
++        assertThrows<AgentProtocolException> { recovery.resume(device, f.owner) }
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThat(f.hostObservations).isEqualTo(1)
++    }
++
++    @Test fun `recording resource owner is ineligible for first maintenance implementation`() = fixture(recording = true) { f ->
++        val before = Files.readAllBytes(gatePath(f.root, device))
++        assertThrows<AgentProtocolException> { f.recovery().prepare(device, f.owner) }
++        assertThat(Files.readAllBytes(gatePath(f.root, device))).isEqualTo(before)
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThat(f.hostObservations).isEqualTo(0)
++    }
++
++    @Test fun `tampered referenced evidence cannot make a clean gate available`() = fixture { f ->
++        val recovery = f.recovery(); recovery.prepare(device, f.owner); recovery.resume(device, f.owner)
++        val done = recovery.complete(device, f.owner)
++        val checkpoint = mapper.readTree(Path.of(done.evidenceDirectory).resolve(done.checkpoint.path).toFile())
++        val original = Path.of(done.evidenceDirectory).resolve(checkpoint["originalJournal"]["path"].asText())
++        Files.writeString(original, "{}")
++        assertThrows<Exception> { HarmonyOsSessionLease.requiresRecovery(device, f.root) }
++        assertThrows<AgentProtocolException> {
++            HarmonyOsSessionSupport.withDeviceLock(device, f.root) { HarmonyOsSessionLease.begin(device, UUID.randomUUID().toString(), f.root) }
++        }
++        assertThat(f.deviceCalls).isEqualTo(3)
++    }
++
++    private fun noHdc() = HdcClient("forbidden", HdcCommandRunner { _, _ -> error("No HDC call is permitted") })
++    private fun fixture(recording: Boolean = false, block: (Fixture) -> Unit) = TempFileHandler().use { files ->
++        block(Fixture(files.createTempDirectory("maintenance-recovery-test").toPath(), recording))
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
 new file mode 100644
 index 0000000..94193ae
@@ -10412,6 +11936,160 @@ index 0000000..e7ac48d
 +        val RETRY_BUDGET_NANOS = TimeUnit.MILLISECONDS.toNanos(200)
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt
+new file mode 100644
+index 0000000..c2a147a
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt
+@@ -0,0 +1,148 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++
++data class MaintenanceCall(val hostCallId: String, val purpose: String, val argumentsSha256: String)
++data class MaintenanceCleanupBatch(val index: Int, val paths: List<String>, val hostCallId: String)
++
++/**
++ * Fixed maintenance operations only. The caller must hold the same device lease and this
++ * journal's owner lock, and durably bind every call to its checkpoint/phase before dispatch.
++ * Cleanup additionally requires an already verified, durable reboot termination proof.
++ * This class cannot release a gate or turn an original pending command into completion.
++ */
++class HarmonyOSMaintenanceTransport(private val journal: HarmonyOSRecoveryJournal, private val hdc: HdcClient) {
++    fun observeUptime(timeout: Duration, beforeDispatch: (MaintenanceCall) -> Unit): HarmonyOSUptimeObservation = synchronized(journal) {
++        val deadline = Deadline(timeout)
++        val inventory = journal.maintenanceInventory()
++        val result = query(listOf("uptime"), "observe_uptime", deadline, beforeDispatch).first
++        check(journal.maintenanceInventory() == inventory) { "Maintenance scope changed." }
++        if (result.stderr.isNotEmpty()) throw HdcException("The device uptime query returned diagnostics.")
++        val observation = try { HarmonyOSUptimeObservation.parse(result.stdout) } catch (failure: IllegalArgumentException) {
++            throw HdcException("The device did not return a valid uptime observation.", failure)
++        }
++        deadline.remaining()
++        observation
++    }
++
++    fun observeBoot(timeout: Duration, beforeDispatch: (MaintenanceCall) -> Unit): String = synchronized(journal) {
++        val deadline = Deadline(timeout)
++        val inventory = journal.maintenanceInventory()
++        val result = query(listOf("cat", "/proc/sys/kernel/random/boot_id"), "observe_boot", deadline, beforeDispatch).first
++        check(journal.maintenanceInventory() == inventory) { "Maintenance scope changed." }
++        val value = result.stdout.removeSuffix("\n").removeSuffix("\r")
++        if (result.stderr.isNotEmpty() || result.stdout.length > 38 ||
++            !UUID_PATTERN.matches(value) || value == NIL_UUID || UUID.fromString(value).toString() != value ||
++            result.stdout !in listOf(value, "$value\n", "$value\r\n")) {
++            throw HdcException("The device did not return one canonical non-nil boot UUID.")
++        }
++        deadline.remaining()
++        value
++    }
++
++    /** Each callback confirms only its listed paths; the original v1 journal flags stay unchanged. */
++    fun cleanupOwnedPaths(timeout: Duration, beforeDispatch: (MaintenanceCall) -> Unit,
++                          onConfirmedBatch: (MaintenanceCleanupBatch) -> Unit): Unit = synchronized(journal) {
++        val deadline = Deadline(timeout)
++        val inventory = journal.maintenanceInventory()
++        val root = inventory.remoteRoot
++        val files = "$root/files"
++        val prefix = "[ ! -L ${quote(root)} ] && [ ! -L ${quote(files)} ] || exit 121; "
++        val steps = inventory.operationIds.chunked(20).map { ids ->
++            val directories = ids.map { "$root/$it" }
++            val script = "for __maestro_cleanup_dir in ${directories.joinToString(" ", transform = ::quote)}; do " +
++                "if [ -e \"\$__maestro_cleanup_dir\" ] || [ -L \"\$__maestro_cleanup_dir\" ]; then " +
++                "[ -d \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] && " +
++                "[ ! -L \"\$__maestro_cleanup_dir/done\" ] && [ ! -L \"\$__maestro_cleanup_dir/done.pending\" ] && " +
++                "rm -f \"\$__maestro_cleanup_dir/done\" \"\$__maestro_cleanup_dir/done.pending\" && " +
++                "rmdir \"\$__maestro_cleanup_dir\" || exit 121; fi; " +
++                "[ ! -e \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] || exit 121; done; "
++            CleanupStep(script, directories.flatMap { listOf("$it/done", "$it/done.pending", it) })
++        } + CleanupStep(
++            "if [ -e ${quote(files)} ] || [ -L ${quote(files)} ]; then " +
++                "[ -d ${quote(files)} ] && [ ! -L ${quote(files)} ] && rmdir ${quote(files)} || exit 121; fi; " +
++                "if [ -e ${quote(root)} ] || [ -L ${quote(root)} ]; then " +
++                "[ -d ${quote(root)} ] && [ ! -L ${quote(root)} ] && rmdir ${quote(root)} || exit 121; fi; " +
++                "[ ! -e ${quote(root)} ] && [ ! -L ${quote(root)} ] || exit 121; ", listOf(files, root))
++        val batch = mutableListOf<CleanupStep>()
++        var index = 0
++        fun arguments(steps: List<CleanupStep>, nonce: String) = listOf("sh", "-c",
++            prefix + steps.joinToString("") { it.script } + "printf '%s' ${quote(nonce)}")
++        fun bytes(steps: List<CleanupStep>) = arguments(steps, NIL_UUID)
++            .joinToString(" ", transform = ::quote).toByteArray(Charsets.UTF_8).size
++        fun flush() {
++            if (batch.isEmpty()) return
++            check(journal.maintenanceInventory() == inventory) { "Maintenance scope changed." }
++            val nonce = UUID.randomUUID().toString()
++            val (result, callId) = query(arguments(batch, nonce), "cleanup_owned_paths", deadline, beforeDispatch)
++            check(journal.maintenanceInventory() == inventory) { "Maintenance scope changed." }
++            if (result.stderr.isNotEmpty() || result.stdout != nonce) {
++                throw HdcException("Owned maintenance cleanup was not confirmed.")
++            }
++            deadline.remaining()
++            try {
++                onConfirmedBatch(MaintenanceCleanupBatch(index, batch.flatMap { it.paths }, callId))
++            } catch (failure: InterruptedException) {
++                Thread.currentThread().interrupt()
++                throw failure
++            }
++            deadline.remaining()
++            index++
++            batch.clear()
++        }
++        for (step in steps) {
++            deadline.remaining()
++            if (bytes(batch + step) > MAX_SHELL_BYTES) flush()
++            check(bytes(listOf(step)) <= MAX_SHELL_BYTES) { "A maintenance cleanup step exceeds the shell limit." }
++            batch += step
++        }
++        flush()
++        check(journal.maintenanceInventory() == inventory) { "Maintenance scope changed." }
++    }
++
++    private fun query(arguments: List<String>, purpose: String, deadline: Deadline,
++                      beforeDispatch: (MaintenanceCall) -> Unit): Pair<HdcCommandResult, String> {
++        val digest = MessageDigest.getInstance("SHA-256").digest(mapper.writeValueAsBytes(arguments))
++            .joinToString("") { "%02x".format(it) }
++        var callId: String? = null
++        val result = try {
++            hdc.shellRecovery(journal.deviceId, arguments, deadline.remaining(), journal) { id ->
++                deadline.remaining()
++                beforeDispatch(MaintenanceCall(id, purpose, digest))
++                deadline.remaining()
++                callId = id
++            }
++        } catch (failure: InterruptedException) {
++            Thread.currentThread().interrupt()
++            throw failure
++        }
++        deadline.remaining()
++        return result to checkNotNull(callId)
++    }
++
++    private data class CleanupStep(val script: String, val paths: List<String>)
++    private class Deadline(val timeout: Duration) {
++        private val end: Long
++        init {
++            require(timeout > Duration.ZERO && timeout <= Duration.ofMinutes(1)) { "Maintenance timeout must be within one minute." }
++            end = System.nanoTime() + timeout.toNanos()
++        }
++        fun remaining(): Duration {
++            if (Thread.currentThread().isInterrupted) throw InterruptedException("Maintenance was interrupted.")
++            val nanos = end - System.nanoTime()
++            if (nanos <= 0) throw HdcTimeoutException(timeout)
++            return Duration.ofNanos(nanos)
++        }
++    }
++
++    private companion object {
++        val mapper = jacksonObjectMapper()
++        const val MAX_SHELL_BYTES = 6 * 1024
++        const val NIL_UUID = "00000000-0000-0000-0000-000000000000"
++        val UUID_PATTERN = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
++        fun quote(value: String) = HdcClient.quoteShellArgument(value)
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
 index 0000000..f8ced01
@@ -10873,10 +12551,10 @@ index 0000000..f8ced01
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..b72c991
+index 0000000..44f4995
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,495 @@
+@@ -0,0 +1,520 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -10979,6 +12657,21 @@ index 0000000..b72c991
 +
 +    @Synchronized fun snapshot(): RecoveryReport = report()
 +
++    internal data class MaintenanceInventory(val remoteRoot: String, val operationIds: List<String>)
++
++    /** Read-only scope check; a pending finite command is not treated as completed. */
++    @Synchronized internal fun maintenanceInventory(): MaintenanceInventory {
++        ensureOpen()
++        check(state.sealed && activeCalls == 0 && !persistenceUnconfirmed) { "Maintenance requires a sealed, durable, idle journal." }
++        check(state.hostCalls.all { it.stopped }) { "Maintenance requires confirmed native termination." }
++        check(state.temporaryFiles.isEmpty() && recordings == null &&
++            Files.notExists(path.resolveSibling("recording-resources.json"), LinkOption.NOFOLLOW_LINKS)) {
++            "Maintenance does not handle temporary files or recording resources."
++        }
++        check(state.operations.all { it.completed || it.recoverable }) { "Maintenance requires finite pending commands." }
++        return MaintenanceInventory(state.remoteRoot, state.operations.map { it.id })
++    }
++
 +    @Synchronized internal fun allocateTemporaryFile(kind: String, extension: String): String {
 +        require(kind.matches(Regex("[a-z]+")) && extension.matches(Regex("[a-z][a-z0-9]*")))
 +        requireDispatch()
@@ -11062,17 +12755,27 @@ index 0000000..b72c991
 +        throw HdcException("The tracked command did not return its completion proof; recovery remains unknown.")
 +    }
 +
-+    internal fun <T> hostCall(allowSealed: Boolean = false, execute: ((HostProcess) -> Unit) -> T): T {
++    internal fun <T> hostCall(
++        allowSealed: Boolean = false,
++        beforeDispatch: (hostCallId: String) -> Unit = {},
++        execute: ((HostProcess) -> Unit) -> T,
++    ): T {
 +        val boundary = dispatchBoundary.get()
 +        val call = synchronized(this) {
 +            if (allowSealed) ensureOpen() else requireDispatch()
 +            val call = HostCall(UUID.randomUUID().toString())
 +            state.hostCalls += call
 +            activeCalls++
-+            try { persist() } catch (failure: Throwable) {
++            try {
++                persist()
++                // The caller must durably bind this ID before any runner can be entered.
++                beforeDispatch(call.id)
++            } catch (failure: Throwable) {
 +                state.hostCalls.remove(call)
 +                activeCalls--
-+                persistRollback(failure)
++                try { persistRollback(failure) } finally {
++                    if (failure is InterruptedException) Thread.currentThread().interrupt()
++                }
 +                if (boundary != null && !boundary.entered) throw BeforeDispatchFailure(boundary, failure)
 +                throw failure
 +            }
@@ -11372,12 +13075,72 @@ index 0000000..b72c991
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSUptimeObservation.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSUptimeObservation.kt
+new file mode 100644
+index 0000000..c460847
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSUptimeObservation.kt
+@@ -0,0 +1,54 @@
++package maestro.harmonyos.hdc
++
++import java.math.BigInteger
++
++/**
++ * Supported format/semantics: no-argument English Toybox uptime, based on
++ * https://raw.githubusercontent.com/openharmony/third_party_toybox/master/toys/other/uptime.c
++ * That implementation reads sysinfo and divides uptime seconds by 60 before formatting.
++ * This contract does not identify the device vendor's exact implementation or a boot UUID.
++ */
++class HarmonyOSUptimeObservation private constructor(val raw: String, val minutes: String) {
++    /** Interval for the provider's reported uptime, not a millisecond-precision clock sample. */
++    val lowerBoundMilliseconds: String get() = (BigInteger(minutes) * MILLIS_PER_MINUTE).toString()
++    val upperBoundMillisecondsExclusive: String get() = ((BigInteger(minutes) + BigInteger.ONE) * MILLIS_PER_MINUTE).toString()
++
++    companion object {
++        const val PROVIDER = "toybox-uptime-english-floor-minute-v1"
++        private const val MAX_OUTPUT_LENGTH = 512
++        private val MILLIS_PER_MINUTE = BigInteger.valueOf(60_000)
++        private val MINUTES_PER_DAY = BigInteger.valueOf(1_440)
++        private val MINUTES_PER_HOUR = BigInteger.valueOf(60)
++        private const val DECIMAL_LOAD = "(?:0|[1-9][0-9]*)\\.[0-9]{2}"
++        // Spaces mirror the published printf format, including %2d for nonzero hours.
++        // Exactly one LF or CRLF is accepted; no trimming can hide diagnostics or another line.
++        private val output = Regex(
++            " ([0-9]{2}):([0-5][0-9]):([0-5][0-9]) up " +
++                "(?:([1-9][0-9]*) (day|days), )?" +
++                "(?:( [1-9]|1[0-9]|2[0-3]):([0-5][0-9])|([0-9]|[1-5][0-9]) min),  " +
++                "(0|[1-9][0-9]*) (user|users),  load average: " +
++                "$DECIMAL_LOAD, $DECIMAL_LOAD, $DECIMAL_LOAD\\r?\\n"
++        )
++
++        fun parse(raw: String): HarmonyOSUptimeObservation {
++            require(raw.length <= MAX_OUTPUT_LENGTH) { "Uptime output exceeds 512 characters." }
++            val match = output.matchEntire(raw) ?: throw IllegalArgumentException("Unsupported uptime output.")
++            require(match.groupValues[1].toInt() <= 23) { "Invalid current-time hour in uptime output." }
++            val days = match.groupValues[4].takeIf { it.isNotEmpty() }?.let(::BigInteger) ?: BigInteger.ZERO
++            if (match.groupValues[4].isNotEmpty()) {
++                require(match.groupValues[5] == if (days == BigInteger.ONE) "day" else "days") { "Invalid day plurality." }
++            }
++            val users = BigInteger(match.groupValues[9])
++            require(match.groupValues[10] == if (users == BigInteger.ONE) "user" else "users") { "Invalid user plurality." }
++            val withinDay = if (match.groupValues[6].isNotEmpty()) {
++                BigInteger(match.groupValues[6].trim()) * MINUTES_PER_HOUR + BigInteger(match.groupValues[7])
++            } else BigInteger(match.groupValues[8])
++            return HarmonyOSUptimeObservation(raw, (days * MINUTES_PER_DAY + withinDay).toString())
++        }
++
++        /** Caller must bind both observations to the same explicit device and trusted command. */
++        fun requireRestarted(before: HarmonyOSUptimeObservation, after: HarmonyOSUptimeObservation) {
++            require(BigInteger(after.minutes) < BigInteger(before.minutes)) { "Uptime did not strictly decrease." }
++        }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..bb00cab
+index 0000000..7aa89ba
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,211 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -11487,11 +13250,12 @@ index 0000000..bb00cab
 +    }
 +
 +    /** Recovery does not register new device work, but its native HDC processes remain tracked. */
-+    internal fun shellRecovery(deviceId: String, arguments: List<String>, timeout: Duration, journal: HarmonyOSRecoveryJournal): HdcCommandResult {
++    internal fun shellRecovery(deviceId: String, arguments: List<String>, timeout: Duration, journal: HarmonyOSRecoveryJournal,
++                               beforeDispatch: ((String) -> Unit)? = null): HdcCommandResult {
 +        validateDeviceId(deviceId)
 +        require(journal.deviceId == deviceId)
 +        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
-+        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true, beforeDispatch)
 +    }
 +
 +    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean, allowSealed: Boolean = false): HdcCommandResult {
@@ -11521,10 +13285,19 @@ index 0000000..bb00cab
 +    }
 +
 +    private fun execute(arguments: List<String>, timeout: Duration, trackHost: Boolean = false,
-+        journal: HarmonyOSRecoveryJournal? = recoveryJournal, allowSealed: Boolean = false): HdcCommandResult {
++        journal: HarmonyOSRecoveryJournal? = recoveryJournal, allowSealed: Boolean = false,
++        beforeDispatch: ((String) -> Unit)? = null): HdcCommandResult {
 +        val command = listOf(executablePath) + arguments
-+        val result = if (trackHost && journal != null) journal.hostCall(allowSealed) { observer ->
-+            if (runner is ProcessHdcCommandRunner) runner.runObserved(command, timeout, observer) else runner.run(command, timeout)
++        // A maintenance binding may write to disk. Charge that work to the same command budget.
++        val deadline = if (beforeDispatch == null) null else System.nanoTime() + timeout.toNanos()
++        val result = if (trackHost && journal != null) journal.hostCall(allowSealed, beforeDispatch ?: {}) { observer ->
++            val effectiveTimeout = deadline?.let {
++                if (Thread.currentThread().isInterrupted) throw InterruptedException("Maintenance dispatch was interrupted.")
++                val remaining = it - System.nanoTime()
++                if (remaining <= 0) throw HdcTimeoutException(timeout)
++                Duration.ofNanos(remaining)
++            } ?: timeout
++            if (runner is ProcessHdcCommandRunner) runner.runObserved(command, effectiveTimeout, observer) else runner.run(command, effectiveTimeout)
 +        } else runner.run(command, timeout)
 +        if (result.exitCode != 0 || hasHdcFailure(result.stdout) || hasHdcFailure(result.stderr)) {
 +            throw HdcCommandException(result)
@@ -14920,6 +16693,447 @@ index 0000000..3d213c2
 +        assertThat(Files.readString(target())).isEqualTo("old")
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceDispatchTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceDispatchTest.kt
+new file mode 100644
+index 0000000..5304c6f
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceDispatchTest.kt
+@@ -0,0 +1,130 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.IOException
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++
++class HarmonyOSMaintenanceDispatchTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private fun file() = directory.resolve("journal.json")
++    private fun state() = mapper.readTree(file().toFile())
++    private fun create() = HarmonyOSRecoveryJournal.create(file(), "fixture-target", UUID.randomUUID().toString())
++
++    @Test fun `binding sees persisted identity before the runner is entered`() {
++        create().use { journal ->
++            var bound: String? = null
++            journal.hostCall(beforeDispatch = { id ->
++                assertThat(state()["hostCalls"].single()["id"].asText()).isEqualTo(id)
++                assertThat(state()["hostCalls"].single()["returned"].asBoolean()).isFalse()
++                bound = id
++            }) {
++                assertThat(bound).isNotNull()
++                assertThat(state()["hostCalls"].single()["id"].asText()).isEqualTo(bound)
++            }
++            assertThat(state()["hostCalls"].single()["returned"].asBoolean()).isTrue()
++            assertThat(state()["hostCalls"].single()["stopped"].asBoolean()).isTrue()
++        }
++    }
++
++    @Test fun `failed binding rolls back only the new host call and leaves no active count`() {
++        val journal = create()
++        journal.hostCall { Unit }
++        val prior = state()["hostCalls"].single().deepCopy<com.fasterxml.jackson.databind.JsonNode>()
++        val failure = IOException("Binding could not be saved")
++        assertThat(assertThrows(IOException::class.java) {
++            journal.hostCall(beforeDispatch = { throw failure }) { error("Must not enter runner") }
++        }).isSameInstanceAs(failure)
++        assertThat(state()["hostCalls"].size()).isEqualTo(1)
++        assertThat(state()["hostCalls"].single()).isEqualTo(prior)
++        assertThat(journal.snapshot().issues.map { it.code }).doesNotContain("HOST_CALL_ACTIVE")
++        journal.close()
++        HarmonyOSRecoveryJournal.open(file()).use { reopened ->
++            assertThat(reopened.snapshot().state).isEqualTo("complete")
++            assertThat(state()["hostCalls"].size()).isEqualTo(1)
++        }
++    }
++
++    @Test fun `nested binding failure can roll back its never entered shell without deleting history`() {
++        create().use { journal ->
++            assertThrows(HdcException::class.java) {
++                journal.shell(listOf("uitest", "dumpLayout"), true) { HdcCommandResult(0, "missing proof", "") }
++            }
++            val prior = state()["operations"].single().deepCopy<com.fasterxml.jackson.databind.JsonNode>()
++            val failure = IOException("Binding failure")
++            assertThat(assertThrows(IOException::class.java) {
++                journal.shell(listOf("uitest", "uiInput", "click", "1", "2"), true) {
++                    journal.hostCall(beforeDispatch = { throw failure }) { error("Must not enter runner") }
++                }
++            }).isSameInstanceAs(failure)
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["operations"].single()).isEqualTo(prior)
++            assertThat(state()["rootRemoved"].asBoolean()).isFalse()
++            assertThat(state()["hostCalls"].size()).isEqualTo(0)
++        }
++    }
++
++    @Test fun `rollback persistence failure retains original error and blocks maintenance`() {
++        var failWrite = false
++        val writeFailure = IOException("Rollback cannot be persisted")
++        val writer = HarmonyOSJournalFileWriter()
++        val journal = HarmonyOSRecoveryJournal.create(file(), "fixture-target", UUID.randomUUID().toString()) { path, bytes ->
++            if (failWrite) throw writeFailure
++            writer.write(path, bytes)
++        }
++        val original = IOException("Binding cannot be persisted")
++        try {
++            journal.seal()
++            assertThat(assertThrows(IOException::class.java) {
++                journal.hostCall(allowSealed = true, beforeDispatch = { failWrite = true; throw original }) { error("Must not enter runner") }
++            }).isSameInstanceAs(original)
++            assertThat(original.suppressed.toList()).contains(writeFailure)
++            assertThat(journal.snapshot().issues.map { it.code }).contains("JOURNAL_PERSISTENCE_UNCONFIRMED")
++            assertThat(journal.snapshot().issues.map { it.code }).doesNotContain("HOST_CALL_ACTIVE")
++            assertThat(state()["hostCalls"].size()).isEqualTo(1)
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> error("Must not dispatch") })
++            assertThrows(IllegalStateException::class.java) {
++                HarmonyOSMaintenanceTransport(journal, hdc).observeBoot(Duration.ofSeconds(1)) {}
++            }
++        } finally { failWrite = false; journal.close() }
++        HarmonyOSRecoveryJournal.open(file()).use {
++            assertThat(state()["hostCalls"].size()).isEqualTo(0)
++            assertThat(it.snapshot().state).isEqualTo("complete")
++        }
++    }
++
++    @Test fun `binding interruption preserves interrupt and original exception without executing`() {
++        create().use { journal ->
++            val interrupted = InterruptedException("Binding interrupted")
++            try {
++                assertThat(assertThrows(InterruptedException::class.java) {
++                    journal.hostCall(beforeDispatch = { throw interrupted }) { error("Must not enter runner") }
++                }).isSameInstanceAs(interrupted)
++                assertThat(Thread.currentThread().isInterrupted).isTrue()
++                assertThat(state()["hostCalls"].size()).isEqualTo(0)
++            } finally { Thread.interrupted() }
++        }
++    }
++
++    @Test fun `runner entry keeps the bound host call and pending operation on failure`() {
++        create().use { journal ->
++            var bound: String? = null
++            val failure = IOException("Runner was entered")
++            assertThat(assertThrows(IOException::class.java) {
++                journal.shell(listOf("uitest", "dumpLayout"), true) {
++                    journal.hostCall(beforeDispatch = { bound = it }) { throw failure }
++                }
++            }).isSameInstanceAs(failure)
++            assertThat(state()["operations"].size()).isEqualTo(1)
++            assertThat(state()["operations"].single()["completed"].asBoolean()).isFalse()
++            assertThat(state()["hostCalls"].single()["id"].asText()).isEqualTo(bound)
++            assertThat(state()["hostCalls"].single()["returned"].asBoolean()).isTrue()
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt
+new file mode 100644
+index 0000000..8a429d0
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt
+@@ -0,0 +1,299 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.databind.node.ObjectNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.io.IOException
++import java.nio.file.Path
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++
++class HarmonyOSMaintenanceTransportTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private val timeout = Duration.ofSeconds(10)
++    private val bootId = "f0e81b81-4967-4a73-8109-21ed1f719f60"
++
++    private fun create() = HarmonyOSRecoveryJournal.create(directory.resolve(UUID.randomUUID().toString()).resolve("journal.json"),
++        "fixture-target", UUID.randomUUID().toString())
++    private fun state(journal: HarmonyOSRecoveryJournal) = mapper.readTree(journal.path.toFile())
++    private fun original(journal: HarmonyOSRecoveryJournal): JsonNode = state(journal).deepCopy<ObjectNode>().apply { remove("hostCalls") }
++    private fun pending(journal: HarmonyOSRecoveryJournal, count: Int = 1, finite: Boolean = true) {
++        repeat(count) {
++            assertThrows(HdcException::class.java) {
++                journal.shell(listOf("uitest", "dumpLayout"), finite) { HdcCommandResult(0, "no completion proof", "") }
++            }
++        }
++    }
++    private fun hash(arguments: List<String>) = MessageDigest.getInstance("SHA-256").digest(mapper.writeValueAsBytes(arguments))
++        .joinToString("") { "%02x".format(it) }
++    private fun shellArguments(command: List<String>): List<String> {
++        assertThat(command.take(4)).containsExactly("fake", "-t", "fixture-target", "shell").inOrder()
++        val shell = command.last()
++        assertThat(shell).startsWith("'sh' '-c' '")
++        return listOf("sh", "-c", shell.removePrefix("'sh' '-c' '").removeSuffix("'").replace("'\"'\"'", "'"))
++    }
++    private fun nonce(command: List<String>) = Regex("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
++        .findAll(shellArguments(command).last()).last().value
++
++    @Test fun `uptime query binds its fixed arguments and preserves the raw observation`() {
++        create().use { journal ->
++            pending(journal)
++            journal.seal()
++            val before = original(journal)
++            val raw = " 23:02:14 up 4 days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\r\n"
++            val bindings = mutableListOf<MaintenanceCall>()
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                assertThat(bindings).hasSize(1)
++                assertThat(state(journal)["hostCalls"].single()["id"].asText()).isEqualTo(bindings.single().hostCallId)
++                assertThat(command).containsExactly("fake", "-t", "fixture-target", "shell", "'uptime'").inOrder()
++                HdcCommandResult(0, raw, "")
++            })
++            val observation = HarmonyOSMaintenanceTransport(journal, hdc).observeUptime(timeout, bindings::add)
++            assertThat(observation.raw).isEqualTo(raw)
++            assertThat(observation.minutes).isEqualTo("5795")
++            assertThat(bindings.single().purpose).isEqualTo("observe_uptime")
++            assertThat(bindings.single().argumentsSha256).isEqualTo(hash(listOf("uptime")))
++            assertThat(original(journal)).isEqualTo(before)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++    }
++
++    @Test fun `uptime query rejects native failure diagnostics and malformed observations`() {
++        val raw = " 23:02:14 up 4 days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\r\n"
++        val outputs = listOf(HdcCommandResult(1, raw, ""), HdcCommandResult(0, raw, "\n"),
++            HdcCommandResult(0, "", ""), HdcCommandResult(0, raw + raw, ""),
++            HdcCommandResult(0, raw.replace("35 min", "60 min"), ""),
++            HdcCommandResult(0, raw.replace("35 min", "25:00"), ""),
++            HdcCommandResult(0, raw.replace("4 days", "-4 days"), ""),
++            HdcCommandResult(0, "x".repeat(513), ""))
++        for (output in outputs) create().use { journal ->
++            journal.seal()
++            val transport = HarmonyOSMaintenanceTransport(journal, HdcClient("fake", HdcCommandRunner { _, _ -> output }))
++            assertThrows(HdcException::class.java) { transport.observeUptime(timeout) {} }
++        }
++    }
++
++    @Test fun `uptime observations keep minutes beyond fixed width integer limits`() {
++        create().use { journal ->
++            journal.seal()
++            val days = "18446744073709551616"
++            val raw = " 23:02:14 up $days days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\n"
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> HdcCommandResult(0, raw, "") })
++            val observation = HarmonyOSMaintenanceTransport(journal, hdc).observeUptime(timeout) {}
++            assertThat(observation.minutes).isEqualTo(java.math.BigInteger(days).multiply(java.math.BigInteger.valueOf(1440)).add(java.math.BigInteger.valueOf(35)).toString())
++            assertThat(observation.raw).isEqualTo(raw)
++        }
++    }
++
++    @Test fun `boot query binds the durable call and actual arguments before transport`() {
++        create().use { journal ->
++            pending(journal)
++            journal.seal()
++            val before = original(journal)
++            val bindings = mutableListOf<MaintenanceCall>()
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                assertThat(bindings).hasSize(1)
++                val call = state(journal)["hostCalls"].single()
++                assertThat(call["id"].asText()).isEqualTo(bindings.single().hostCallId)
++                assertThat(call["returned"].asBoolean()).isFalse()
++                assertThat(command).containsExactly("fake", "-t", "fixture-target", "shell",
++                    "'cat' '/proc/sys/kernel/random/boot_id'").inOrder()
++                HdcCommandResult(0, "$bootId\n", "")
++            })
++            assertThat(HarmonyOSMaintenanceTransport(journal, hdc).observeBoot(timeout, bindings::add)).isEqualTo(bootId)
++            assertThat(bindings.single().purpose).isEqualTo("observe_boot")
++            assertThat(bindings.single().argumentsSha256).isEqualTo(hash(listOf("cat", "/proc/sys/kernel/random/boot_id")))
++            assertThat(state(journal)["hostCalls"].single()["stopped"].asBoolean()).isTrue()
++            assertThat(original(journal)).isEqualTo(before)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++    }
++
++    @Test fun `boot query rejects nil malformed multiple values and diagnostics`() {
++        val outputs = listOf(
++            HdcCommandResult(0, "00000000-0000-0000-0000-000000000000\n", ""),
++            HdcCommandResult(0, "$bootId\n$bootId\n", ""), HdcCommandResult(0, " $bootId", ""),
++            HdcCommandResult(0, "$bootId\r", ""), HdcCommandResult(0, bootId.uppercase(), ""),
++            HdcCommandResult(0, "", ""), HdcCommandResult(0, bootId, "\n"), HdcCommandResult(1, bootId, ""))
++        for (output in outputs) create().use { journal ->
++            journal.seal()
++            val transport = HarmonyOSMaintenanceTransport(journal, HdcClient("fake", HdcCommandRunner { _, _ -> output }))
++            assertThrows(HdcException::class.java) { transport.observeBoot(timeout) {} }
++        }
++    }
++
++    @Test fun `cleanup confirms bounded explicit paths and preserves every original business field`() {
++        val journal = create()
++        pending(journal, 100)
++        journal.seal()
++        val before = original(journal)
++        val root = state(journal)["remoteRoot"].asText()
++        val expectedPaths = state(journal)["operations"].flatMap {
++            val dir = "$root/${it["id"].asText()}"
++            listOf("$dir/done", "$dir/done.pending", dir)
++        } + listOf("$root/files", root)
++        val bindings = mutableListOf<MaintenanceCall>()
++        val confirmed = mutableListOf<MaintenanceCleanupBatch>()
++        var calls = 0
++        val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++            val bound = bindings[calls++]
++            assertThat(bound.argumentsSha256).isEqualTo(hash(shellArguments(command)))
++            assertThat(bound.purpose).isEqualTo("cleanup_owned_paths")
++            assertThat(state(journal)["hostCalls"].last()["id"].asText()).isEqualTo(bound.hostCallId)
++            assertThat(command.last().toByteArray(Charsets.UTF_8).size).isAtMost(6 * 1024)
++            for (forbidden in listOf("rm -r", "kill", "toggle", "*", "mediatool")) assertThat(command.last()).doesNotContain(forbidden)
++            assertThat(shellArguments(command).last()).contains("[ ! -L")
++            HdcCommandResult(0, nonce(command), "")
++        })
++        HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, bindings::add, confirmed::add)
++        assertThat(calls).isGreaterThan(1)
++        assertThat(confirmed.map { it.index }).containsExactlyElementsIn((0 until calls).toList()).inOrder()
++        assertThat(confirmed.map { it.hostCallId }).containsExactlyElementsIn(bindings.map { it.hostCallId }).inOrder()
++        assertThat(confirmed.flatMap { it.paths }).containsExactlyElementsIn(expectedPaths).inOrder()
++        assertThat(original(journal)).isEqualTo(before)
++        assertThat(journal.snapshot().state).isEqualTo("unknown")
++        assertThat(journal.snapshot().pendingOperations).isEqualTo(100)
++        val path = journal.path
++        journal.close()
++        HarmonyOSRecoveryJournal.open(path).use { reopened ->
++            assertThat(original(reopened)).isEqualTo(before)
++            assertThat(reopened.snapshot().pendingOperations).isEqualTo(100)
++        }
++    }
++
++    @Test fun `bad cleanup nonce cannot confirm a batch or clear old pending`() {
++        create().use { journal ->
++            pending(journal)
++            journal.seal()
++            val before = original(journal)
++            val confirmed = mutableListOf<MaintenanceCleanupBatch>()
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> HdcCommandResult(0, "wrong nonce", "") })
++            assertThrows(HdcException::class.java) {
++                HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, {}, confirmed::add)
++            }
++            assertThat(confirmed).isEmpty()
++            assertThat(original(journal)).isEqualTo(before)
++        }
++    }
++
++    @Test fun `later cleanup failure retains only already confirmed batches`() {
++        create().use { journal ->
++            pending(journal, 100)
++            journal.seal()
++            val before = original(journal)
++            var calls = 0
++            val confirmed = mutableListOf<MaintenanceCleanupBatch>()
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                if (++calls == 2) throw HdcTimeoutException(Duration.ofMillis(1))
++                HdcCommandResult(0, nonce(command), "")
++            })
++            assertThrows(HdcTimeoutException::class.java) {
++                HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, {}, confirmed::add)
++            }
++            assertThat(calls).isEqualTo(2)
++            assertThat(confirmed).hasSize(1)
++            assertThat(confirmed.single().index).isEqualTo(0)
++            assertThat(confirmed.single().paths).doesNotContain(state(journal)["remoteRoot"].asText())
++            assertThat(original(journal)).isEqualTo(before)
++        }
++    }
++
++    @Test fun `failed batch persistence stops before any further cleanup`() {
++        create().use { journal ->
++            pending(journal, 100)
++            journal.seal()
++            val failure = IOException("Cannot persist batch confirmation")
++            var calls = 0
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ -> calls++; HdcCommandResult(0, nonce(command), "") })
++            assertThat(assertThrows(IOException::class.java) {
++                HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, {}, { throw failure })
++            }).isSameInstanceAs(failure)
++            assertThat(calls).isEqualTo(1)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(100)
++        }
++    }
++
++    @Test fun `maintenance refuses active unsealed temporary recording and nonfinite scopes`() {
++        val fixtures: List<(HarmonyOSRecoveryJournal) -> Unit> = listOf(
++            {}, { it.allocateTemporaryFile("layout", "json"); it.seal() },
++            { it.enableRecordingResources(); it.seal() }, { pending(it, finite = false); it.seal() },
++            { journal ->
++                journal.hostCall { observer ->
++                    val process = ProcessHandle.current()
++                    observer(HarmonyOSRecoveryJournal.HostProcess(process.pid(), process.info().startInstant().get().toString()))
++                }
++                journal.seal()
++            })
++        for (prepare in fixtures) create().use { journal ->
++            prepare(journal)
++            val transport = HarmonyOSMaintenanceTransport(journal, HdcClient("fake", HdcCommandRunner { _, _ -> error("Must not dispatch") }))
++            assertThrows(IllegalStateException::class.java) { transport.observeBoot(timeout) {} }
++            assertThrows(IllegalStateException::class.java) { transport.cleanupOwnedPaths(timeout, {}, {}) }
++        }
++        create().use { journal ->
++            journal.seal()
++            journal.hostCall(allowSealed = true) {
++                val transport = HarmonyOSMaintenanceTransport(journal, HdcClient("fake", HdcCommandRunner { _, _ -> error("Must not dispatch") }))
++                assertThrows(IllegalStateException::class.java) { transport.observeBoot(timeout) {} }
++            }
++        }
++    }
++
++    @Test fun `expired shared deadline or binding failure never enters the runner`() {
++        create().use { journal ->
++            journal.seal()
++            val transport = HarmonyOSMaintenanceTransport(journal, HdcClient("fake", HdcCommandRunner { _, _ -> error("Must not dispatch") }))
++            assertThrows(HdcTimeoutException::class.java) { transport.cleanupOwnedPaths(Duration.ofNanos(1), {}, {}) }
++            val failure = IOException("Cannot bind checkpoint")
++            assertThat(assertThrows(IOException::class.java) { transport.observeBoot(timeout) { throw failure } }).isSameInstanceAs(failure)
++            assertThat(state(journal)["hostCalls"].size()).isEqualTo(0)
++            assertThrows(HdcTimeoutException::class.java) {
++                transport.observeBoot(Duration.ofMillis(30)) { Thread.sleep(50) }
++            }
++            assertThat(state(journal)["hostCalls"].size()).isEqualTo(0)
++        }
++    }
++
++    @Test fun `interruption preserves the flag and cannot confirm cleanup`() {
++        create().use { journal ->
++            pending(journal)
++            journal.seal()
++            val confirmed = mutableListOf<MaintenanceCleanupBatch>()
++            val interrupted = InterruptedException("Injected interruption")
++            val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> throw interrupted })
++            try {
++                assertThat(assertThrows(InterruptedException::class.java) {
++                    HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, {}, confirmed::add)
++                }).isSameInstanceAs(interrupted)
++                assertThat(Thread.currentThread().isInterrupted).isTrue()
++                assertThat(confirmed).isEmpty()
++                assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++            } finally { Thread.interrupted() }
++        }
++    }
++
++    @Test fun `interrupted batch persistence restores the flag and prevents later cleanup`() {
++        create().use { journal ->
++            pending(journal, 100)
++            journal.seal()
++            val before = original(journal)
++            val interrupted = InterruptedException("Batch persistence interrupted")
++            var calls = 0
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ -> calls++; HdcCommandResult(0, nonce(command), "") })
++            try {
++                assertThat(assertThrows(InterruptedException::class.java) {
++                    HarmonyOSMaintenanceTransport(journal, hdc).cleanupOwnedPaths(timeout, {}, { throw interrupted })
++                }).isSameInstanceAs(interrupted)
++                assertThat(Thread.currentThread().isInterrupted).isTrue()
++                assertThat(calls).isEqualTo(1)
++                assertThat(original(journal)).isEqualTo(before)
++            } finally { Thread.interrupted() }
++        }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
 index 0000000..5943dcf
@@ -16277,6 +18491,117 @@ index 0000000..6995722
 +            if (failCleanup || cleanup.size == failCleanupCall) return HdcCommandResult(0, "", "")
 +            val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").findAll(script).last().value
 +            return HdcCommandResult(0, nonce, "")
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSUptimeObservationTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSUptimeObservationTest.kt
+new file mode 100644
+index 0000000..cd612d3
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSUptimeObservationTest.kt
+@@ -0,0 +1,105 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.assertThrows
++import java.math.BigInteger
++
++class HarmonyOSUptimeObservationTest {
++    private fun text(duration: String, users: String = "0 users", clock: String = "23:02:14", end: String = "\n") =
++        " $clock up $duration,  $users,  load average: 12.18, 12.26, 12.44$end"
++    private fun observe(duration: String, clock: String = "23:02:14") = HarmonyOSUptimeObservation.parse(text(duration, clock = clock))
++
++    @Test fun `real observed English output preserves raw text and bounds its minute interval`() {
++        val raw = " 23:02:14 up 4 days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\r\n"
++        val observation = HarmonyOSUptimeObservation.parse(raw)
++        assertThat(observation.raw).isEqualTo(raw)
++        assertThat(observation.minutes).isEqualTo("5795")
++        assertThat(observation.lowerBoundMilliseconds).isEqualTo("347700000")
++        assertThat(observation.upperBoundMillisecondsExclusive).isEqualTo("347760000")
++    }
++
++    @Test fun `zero minutes singular days users and padded hours follow Toybox formatting`() {
++        assertThat(observe("0 min").minutes).isEqualTo("0")
++        assertThat(observe("59 min").minutes).isEqualTo("59")
++        assertThat(observe(" 1:00").minutes).isEqualTo("60")
++        assertThat(observe(" 9:59").minutes).isEqualTo("599")
++        assertThat(observe("23:59").minutes).isEqualTo("1439")
++        assertThat(HarmonyOSUptimeObservation.parse(text("1 day,  1:05", "1 user")).minutes).isEqualTo("1505")
++        assertThat(observe("2 days, 10:05").minutes).isEqualTo("3485")
++        val zero = observe("0 min")
++        assertThat(zero.lowerBoundMilliseconds).isEqualTo("0")
++        assertThat(zero.upperBoundMillisecondsExclusive).isEqualTo("60000")
++    }
++
++    @Test fun `day and minute arithmetic never rounds through double or overflows Long`() {
++        for (days in listOf("9007199254740993", "18446744073709551615", "9".repeat(100))) {
++            val observed = observe("$days days, 23:59")
++            val expected = BigInteger(days) * BigInteger.valueOf(1440) + BigInteger.valueOf(1439)
++            assertThat(observed.minutes).isEqualTo(expected.toString())
++            assertThat(observed.lowerBoundMilliseconds).isEqualTo((expected * BigInteger.valueOf(60000)).toString())
++            assertThat(observed.upperBoundMillisecondsExclusive).isEqualTo(((expected + BigInteger.ONE) * BigInteger.valueOf(60000)).toString())
++        }
++    }
++
++    @Test fun `current time is syntactically validated but never used to infer reboot`() {
++        for (clock in listOf("24:00:00", "23:60:00", "23:59:60", "1:00:00", "01:2:03", "01:02:3", "aa:bb:cc")) {
++            assertThrows<IllegalArgumentException> { observe("1 min", clock) }
++        }
++        HarmonyOSUptimeObservation.requireRestarted(observe("2 min", "00:00:00"), observe("1 min", "23:59:59"))
++        assertThrows<IllegalArgumentException> {
++            HarmonyOSUptimeObservation.requireRestarted(observe("1 min", "23:59:59"), observe("2 min", "00:00:00"))
++        }
++    }
++
++    @Test fun `noncanonical duration spellings and invalid ranges are refused`() {
++        for (duration in listOf("0 days, 1 min", "1 days, 1 min", "2 day, 1 min", "01 day, 1 min", "-1 day, 1 min",
++            "+1 day, 1 min", "1.0 days, 1 min", "1e3 days, 1 min", "60 min", "01 min", "-1 min", "+1 min",
++            "1:00", "01:00", " 0:30", "24:00", " 1:60", " 1:5", "1 hour", "1 minute", "1 week, 0 days, 0 hours, 0 minutes")) {
++            assertThrows<IllegalArgumentException> { observe(duration) }
++        }
++    }
++
++    @Test fun `users and all load values are fully checked without float parsing`() {
++        for (users in listOf("0 user", "1 users", "2 user", "01 user", "-1 users", "+1 user", "1.0 user")) {
++            assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.parse(text("1 min", users)) }
++        }
++        for (load in listOf("NaN", "Infinity", "-1.00", "+1.00", "1", "1.0", "1.000", "01.00", "1e3")) {
++            for (original in listOf("12.18", "12.26", "12.44")) {
++                assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.parse(text("1 min").replace(original, load)) }
++            }
++        }
++        HarmonyOSUptimeObservation.parse(text("1 min").replace("12.18, 12.26, 12.44", "0.00, 123456789.12, 1.00"))
++    }
++
++    @Test fun `extra lines diagnostics alternate output modes and missing newline are rejected`() {
++        val valid = text("1 min")
++        for (raw in listOf("Permission denied\n", "up 1 minute\n", "2026-10-30 01:02:03\n", valid + valid,
++            valid + "\n", "warning\n" + valid, valid + "warning", valid.trim(), valid.dropLast(1), valid.dropLast(1) + "\r",
++            valid.replace(" up ", " UP "), valid.replace(",  0 users", ", 0 users"), valid.replace("load average:", "load averages:"),
++            valid.replace("1 min", "1 min\u0000"), valid.replace("1 min", "１ min"))) {
++            assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.parse(raw) }
++        }
++        HarmonyOSUptimeObservation.parse(valid)
++        HarmonyOSUptimeObservation.parse(valid.replace("\n", "\r\n"))
++    }
++
++    @Test fun `the output bound is checked before unbounded integer input`() {
++        val template = text("1 days, 1 min")
++        val days = "9".repeat(512 - template.length + 1)
++        val boundary = text("$days days, 1 min")
++        assertThat(boundary.length).isEqualTo(512)
++        HarmonyOSUptimeObservation.parse(boundary)
++        assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.parse(text("${days}9 days, 1 min")) }
++        assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.parse("9".repeat(10000)) }
++    }
++
++    @Test fun `only a strictly lower minute interval confirms the reboot criterion`() {
++        HarmonyOSUptimeObservation.requireRestarted(observe("1 day, 0 min"), observe("23:59"))
++        HarmonyOSUptimeObservation.requireRestarted(observe("1 min"), observe("0 min"))
++        HarmonyOSUptimeObservation.requireRestarted(observe("9007199254740993 days, 0 min"), observe("9007199254740992 days, 23:59"))
++        for ((before, after) in listOf("0 min" to "0 min", "1 min" to "1 min", "1 min" to "2 min", "23:59" to "1 day, 0 min")) {
++            assertThrows<IllegalArgumentException> { HarmonyOSUptimeObservation.requireRestarted(observe(before), observe(after)) }
 +        }
 +    }
 +}
