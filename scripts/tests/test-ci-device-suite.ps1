@@ -60,12 +60,14 @@ try {
     }
     foreach ($directory in @($testRoot, (Join-Path $fixture 'scripts/ci'), (Join-Path $fixture 'scripts/validation'),
         (Join-Path $fixture 'examples/agent-client'), (Join-Path $fixture 'patches/maestro'),
+        (Join-Path $fixture 'scripts/recovery'),
         (Join-Path $fixture '.upstream/maestro/maestro-cli/build/install/maestro/lib'))) {
         $null = [IO.Directory]::CreateDirectory($directory)
     }
     $shell = (Get-Process -Id $PID).Path
     foreach ($file in @('scripts/ci/run-device-suite.ps1', 'scripts/ci/verify-state.mjs', 'scripts/ci/device-reservation.ps1',
         'scripts/ci/suite.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/read-junit.ps1', 'scripts/ci/verify-videos.mjs', 'scripts/verify-recording.ps1',
+        'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
         'scripts/validation/io.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs',
         'scripts/validation/static-flows.mjs', 'scripts/validation/static-plan.mjs',
         'scripts/validation/retry-evidence.mjs',

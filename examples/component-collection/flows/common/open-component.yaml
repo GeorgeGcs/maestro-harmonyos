@@ -1,0 +1,25 @@
+appId: ohos.samples.componentcollection
+---
+- tapOn:
+    id: tabBar0
+    retryTapIfNoChange: false
+- scrollUntilVisible:
+    element:
+      text: ${CATEGORY}
+    direction: DOWN
+    timeout: 20000
+    centerElement: false
+- tapOn:
+    text: ${CATEGORY}
+    retryTapIfNoChange: false
+- scrollUntilVisible:
+    element:
+      text: ${PAGE}
+    direction: DOWN
+    timeout: 20000
+    centerElement: false
+- tapOn:
+    text: ${PAGE}
+    retryTapIfNoChange: false
+- assertVisible:
+    id: backBtn

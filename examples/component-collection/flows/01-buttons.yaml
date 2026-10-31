@@ -1,0 +1,22 @@
+appId: ohos.samples.componentcollection
+name: component-collection-buttons
+---
+- runFlow: common/home.yaml
+- runFlow:
+    file: common/open-component.yaml
+    env:
+      CATEGORY: 按钮与选择
+      PAGE: Button 按钮
+- assertVisible:
+    id: Capsule
+- tapOn:
+    id: Capsule
+    retryTapIfNoChange: false
+- assertVisible:
+    id: Capsule onClickId
+- takeScreenshot: component-collection-button
+- tapOn:
+    id: backBtn
+    retryTapIfNoChange: false
+- assertVisible:
+    id: tabBar0

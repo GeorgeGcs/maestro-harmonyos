@@ -45,11 +45,12 @@ try {
     if (-not $env:JAVA_HOME -or -not (Test-Path -LiteralPath (Join-Path $env:JAVA_HOME 'bin/java.exe') -PathType Leaf)) {
         throw 'The host fixture requires JAVA_HOME to identify a direct JDK 17+ installation.'
     }
-    foreach ($directory in @('scripts/validation', 'scripts/ci', 'scripts/tests', 'examples/agent-client')) {
+    foreach ($directory in @('scripts/validation', 'scripts/ci', 'scripts/recovery', 'scripts/tests', 'examples/agent-client')) {
         $null = [IO.Directory]::CreateDirectory((Join-Path $fixture $directory))
     }
     foreach ($relative in @('scripts/test-validation-plan.ps1', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-state.mjs',
         'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
+        'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
         'scripts/tests/validation-fixture.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination (Join-Path $fixture $relative)
     }

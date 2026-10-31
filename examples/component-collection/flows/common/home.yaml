@@ -1,0 +1,8 @@
+appId: ohos.samples.componentcollection
+---
+- stopApp
+- launchApp
+- assertVisible:
+    id: tabBar0
+- assertVisible:
+    id: tabBar3

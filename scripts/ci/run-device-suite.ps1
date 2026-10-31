@@ -171,11 +171,11 @@ try {
         $state.state = 'released'
         $state.updatedAt = [DateTime]::UtcNow.ToString('o')
         Write-DeviceReservationState $reservation $state
-        Write-Output 'The retained launch is released using the checked v2 recovery report. Its original execution result is unchanged.'
+        Write-Output 'The retained launch is released using the verified recovery evidence. Its original execution result is unchanged.'
         $exitCode = 0
     } else {
         if ($null -ne $state -and $state.state -ne 'released') {
-            throw ('Device use is blocked by a retained CI launch (' + $state.launchId + '). Inspect it and reconcile with a trusted v2 recovery report; a timeout does not release it.')
+            throw ('Device use is blocked by a retained CI launch (' + $state.launchId + '). Inspect it and reconcile with verified recovery evidence; a timeout does not release it.')
         }
         if ($JobTimeoutSeconds -gt 0 -and $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds + (4 * $VerificationTimeoutSeconds) + 60 -ge $JobTimeoutSeconds) {
             throw 'The job budget must cover freeze, pre-dispatch check, release and quality verification separately, plus execution/termination/output drain and more than 60 seconds for startup and archival.'

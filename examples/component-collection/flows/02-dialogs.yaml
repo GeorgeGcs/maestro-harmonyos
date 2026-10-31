@@ -1,0 +1,36 @@
+appId: ohos.samples.componentcollection
+name: component-collection-dialogs
+---
+- runFlow: common/home.yaml
+- tapOn:
+    id: tabBar3
+    retryTapIfNoChange: false
+- tapOn:
+    text: 弹窗
+    retryTapIfNoChange: false
+- tapOn:
+    text: AlertDialog 警告弹窗
+    retryTapIfNoChange: false
+- tapOn:
+    id: test_oneButton
+    retryTapIfNoChange: false
+- assertVisible: 提示
+- tapOn:
+    text: 确认
+    retryTapIfNoChange: false
+- assertNotVisible: 提示
+- tapOn:
+    id: test_twoButton
+    retryTapIfNoChange: false
+- assertVisible: 警告
+- assertVisible: 您正在执行操作
+- takeScreenshot: component-collection-dialog
+- tapOn:
+    text: 取消
+    retryTapIfNoChange: false
+- assertNotVisible: 警告
+- tapOn:
+    id: backBtn
+    retryTapIfNoChange: false
+- assertVisible:
+    id: tabBar0

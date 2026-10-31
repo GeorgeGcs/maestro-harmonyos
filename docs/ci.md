@@ -175,6 +175,10 @@ pwsh -NoProfile -File scripts/ci/run-device-suite.ps1 `
 
 此命令只读核对报告及内层记录，不主动调用 HDC，不修改内层门禁。它要求旧 PowerShell/Java 进程已结束，恢复响应属于当前设备会话，审计文件位于同一个可信恢复根目录且哈希正确；成功只解除外层占用，不修改原执行结果，也不立即启动下一次测试。
 
+如果普通恢复无法确认旧有限命令的结束，可以按[设备维护流程](session-maintenance.md)完成有证据的依次重启。`RecoveryReportPath` 也接受该流程 `complete` 返回的完整 `harmonyos.reboot-recovery` JSON。此分支单独核对版本 2 占用记录、版本 3 回执及维护链，不把维护回执降级成普通 v2 恢复。核销结果记录 `recoveryKind=ordered_restart_maintenance`，原执行仍保留失败或未知。只完成 `prepare`、`resume` 或只有一份声称成功的 JSON 均不够。普通完成路径也不会用维护释放来证明原测试已经通过。
+
+维护核销仍保留原进程身份检查：身份丢失时不会仅凭重启回执跳过。现有收集器尚不支持维护版本 3 的完整归档，需单独保留维护响应与原维护证据目录，不将核销成功当成证据已经收齐。
+
 若进程身份缺失、原进程仍存活、恢复记录损坏或恢复返回 unknown，核销失败，原占用保留。没有“强制清除”开关。录屏的第二版清理凭据还会核对不可变资源快照及保留原件，确认结束、归属和清理；缺少这些证据时仍可能持续返回 unknown，不能只确认一个提示就继续测试。
 
 验证计划通过同一个预约模块使用 `kind: validation` 的占用记录。该记录绑定整个 matrix 调用的 `unitInvocationId` 和 `controlIndexPath`；每个已派发 attempt 都有单独 runner 控制记录。核销时检查索引身份及所有已派发进程，不能仅凭最后一轮的退出解除整次占用。只有 planned 且没有控制文件的项可以作为未派发处理；launching 项缺少进程身份仍会阻止核销。

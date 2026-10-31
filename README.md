@@ -29,6 +29,7 @@ VSCode 的“操作录制”记录通过插件发出的动作，不监听手机�
 | 使用或开发 VSCode 插件 | [插件说明](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md) |
 | 接入智能体或自动化调用方 | [调用协议](docs/agent-protocol.md)、[可运行的 Node.js 示例](examples/agent-client/README.md)：环境查询、结果、证据和取消恢复；需重新构建本仓库 CLI |
 | 按多台设备或多轮执行同一流程 | [逐台验证说明](docs/device-matrix.md) |
+| 准备 ComponentCollection 的交互验证 | [按钮、弹窗、输入和滚动示例](examples/component-collection/README.md)，当前仅静态解析通过 |
 | 冻结场景、核对覆盖并分开统计首次与最终成功 | [重复验证计划](docs/validation-plan.md) |
 | 接入专用 Windows CI 主机 | [CI 入口与设备占用](docs/ci.md) |
 | 检查录屏及恢复保留的媒体 | [录屏检查与恢复](docs/recording-diagnostics.md) |

@@ -1,0 +1,25 @@
+appId: ohos.samples.componentcollection
+name: component-collection-scroll
+---
+- runFlow: common/home.yaml
+- runFlow:
+    file: common/open-component.yaml
+    env:
+      CATEGORY: 滚动与滑动
+      PAGE: Scroll 滚动
+- assertVisible: 横向滚动
+- swipe:
+    direction: UP
+    duration: 600
+- scrollUntilVisible:
+    element:
+      id: test_input
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- tapOn:
+    id: test_input
+    retryTapIfNoChange: false
+- inputText: panda-scroll
+- assertVisible: panda-scroll
+- takeScreenshot: component-collection-scroll-input

@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { validateDocument } from '../../examples/agent-client/client.mjs';
 import { verifyRecordingResources } from '../../examples/agent-client/evidence.mjs';
+import { verifyMaintenanceRelease } from '../recovery/verify-maintenance.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -89,10 +90,11 @@ export async function verifyEvidence(result, index, agentRoot) {
   return { checkedFiles, unavailable, steps: steps.size, hashes };
 }
 
-async function checkedGate(deviceId, recoveryRoot, since) {
+async function checkedGate(deviceId, recoveryRoot, since, responsePath = null) {
   const key = sha256(Buffer.from(deviceId, 'utf8'));
   const gateFile = path.resolve(recoveryRoot, `${key}.owner.json`);
   const { value: gate } = await checkedFile(gateFile);
+  if (gate.schemaVersion === 2) return verifyMaintenanceRelease({ deviceId, recoveryRoot, createdAt: since, responsePath });
   if (gate.schemaVersion !== 1 || gate.deviceId !== deviceId || !uuid.test(gate.ownerSessionId) || gate.state !== 'clean' ||
       gate.requiresRecovery !== false || gate.unresolvedRecording !== false || gate.closeFailure !== null) {
     throw new Error('The existing device lease does not confirm clean release.');
@@ -128,7 +130,14 @@ export async function verifyState(input) {
       typeof input.deviceId !== 'string' || !input.deviceId || !Number.isFinite(Date.parse(input.createdAt))) {
     throw new Error('Invalid verification identity.');
   }
-  const gate = await checkedGate(input.deviceId, input.recoveryRoot, input.createdAt);
+  const gate = await checkedGate(input.deviceId, input.recoveryRoot, input.createdAt,
+    input.mode === 'recovery' ? input.recoveryReportPath : null);
+  if (gate.maintenanceId) {
+    if (input.mode !== 'recovery' || !gate.recoveryResponseSha256) {
+      throw new Error('Maintenance release cannot establish completion of the original execution.');
+    }
+    return { mode: 'recovery', recoveryKind: 'ordered_restart_maintenance', releaseConfirmed: true, ...gate };
+  }
   if (input.mode === 'recovery') {
     const { value: document, sha256: responseSha256 } = await checkedFile(input.recoveryReportPath);
     const value = document.data;

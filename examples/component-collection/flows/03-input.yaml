@@ -1,0 +1,23 @@
+appId: ohos.samples.componentcollection
+name: component-collection-input
+---
+- runFlow: common/home.yaml
+- runFlow:
+    file: common/open-component.yaml
+    env:
+      CATEGORY: 文本与输入
+      PAGE: TextInput 文本输入
+- scrollUntilVisible:
+    element:
+      text: 当前最大输入12字符
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- assertVisible: '0/12'
+- tapOn:
+    text: 当前最大输入12字符
+    retryTapIfNoChange: false
+- inputText: maestro12345
+- assertVisible: maestro12345
+- assertVisible: '12/12'
+- takeScreenshot: component-collection-input
