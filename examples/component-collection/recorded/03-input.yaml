@@ -1,0 +1,6 @@
+appId: ohos.samples.componentcollection
+name: component-collection-input-recorded
+---
+- startRecording: component-collection-input
+- runFlow: ../flows/03-input.yaml
+- stopRecording

@@ -36,3 +36,29 @@
 这些示例用于开发验证。正式重复测试需另行固定应用版本、设备、场景和初始状态，并使用[验证计划](../../docs/validation-plan.md)记录首次与最终结果；不同构建的开发运行不能累加为同一批统计。
 
 四条顶层 Flow 和两个公共子 Flow 已用当前安装的 Maestro YAML reader 完成静态解析，未执行脚本或设备命令。这个结果只确认语法和依赖可读；页面定位、键盘遮挡、滑动效果及耗时仍需真机验证。
+
+## 带录屏的入口
+
+`recorded/` 中的四条 Flow 分别启动录屏、调用同名原场景、显式停止录屏；原场景的初始化和断言保持一致。选择 `flows/` 或 `recorded/` 中的一组执行，不要把整个 `component-collection/` 目录作为批次，以免重复运行。
+
+```powershell
+$env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
+$env:MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA = 'false'
+./scripts/run-harmonyos.ps1 `
+  -FlowPath ./examples/component-collection/recorded/01-buttons.yaml `
+  -BundleId ohos.samples.componentcollection -AbilityName MainAbility -Module entry `
+  -DeviceId YOUR_DEVICE_ID -RunTimeoutSeconds 360
+```
+
+系统录屏仍为实验功能。先逐条预跑并检查每段原始视频的完整解码结果，再决定是否进入批次。超时值只是起点，需计入实际交互、导出和收尾耗时；外层超时不会提高录屏后端的时长上限。也不要通过添加等待来掩盖短录屏失败。
+
+断言失败会跳过 YAML 末尾的 `stopRecording`，由 Maestro 执行器的录屏收尾处理。正文错误、录屏关闭错误、设备清理状态分别保留：断言失败且清理完成仍是测试失败；清理 unknown 时应停止后续设备任务。进程被强制终止不能依赖这个收尾保证，需要按[恢复说明](../../docs/session-maintenance.md)处理。不能为“尽量跑完”忽略录屏错误。
+
+当前录屏入口只通过原生解析和源码步骤关联检查，未在设备上执行。原始视频校验见[录屏检查](../../docs/recording-diagnostics.md)。正式验证的 sourceRoot 应包含 `flows/` 与 `recorded/`，并重新生成源码索引和计划指纹，不能沿用未录屏版本的覆盖清单。
+
+主机解析检查可使用 JDK 17 和已构建 CLI；输出文件须不存在：
+
+```powershell
+& 'C:/tools/jdk/bin/java.exe' --class-path 'C:/build/maestro/lib/*' `
+  scripts/tests/fixtures/InspectComponentFlows.java examples/component-collection C:/build/component-source-indices.json
+```

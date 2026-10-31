@@ -1,0 +1,6 @@
+appId: ohos.samples.componentcollection
+name: component-collection-scroll-recorded
+---
+- startRecording: component-collection-scroll
+- runFlow: ../flows/04-scroll.yaml
+- stopRecording

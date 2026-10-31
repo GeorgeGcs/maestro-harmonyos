@@ -1,0 +1,6 @@
+appId: ohos.samples.componentcollection
+name: component-collection-dialogs-recorded
+---
+- startRecording: component-collection-dialogs
+- runFlow: ../flows/02-dialogs.yaml
+- stopRecording

@@ -1,0 +1,6 @@
+appId: ohos.samples.componentcollection
+name: component-collection-buttons-recorded
+---
+- startRecording: component-collection-buttons
+- runFlow: ../flows/01-buttons.yaml
+- stopRecording
