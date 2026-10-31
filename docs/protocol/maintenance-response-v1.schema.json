@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:maintenance-response:1",
+  "title": "Ordered restart maintenance response v1",
+  "$comment": "Successful command responses only; command errors are separate. A response alone never authorizes release.",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "schemaVersion", "maintenanceId", "deviceId", "ownerId", "state", "cleanup", "phase", "handoffReady", "checkpoint", "head", "evidenceDirectory", "receipt"],
+  "properties": {
+    "protocol": {"const": "harmonyos.reboot-recovery"},
+    "schemaVersion": {"const": 1},
+    "maintenanceId": {"$ref": "#/$defs/uuid"},
+    "ownerId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+    "state": {"enum": ["unknown", "complete"]},
+    "cleanup": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"enum": ["unknown", "complete"]}}},
+    "phase": {"enum": ["prepared", "host_verified", "phone_prepared", "terminated", "cleaning", "cleaned", "receipt_written", "complete"]},
+    "handoffReady": {"type": "boolean"},
+    "checkpoint": {"$ref": "#/$defs/reference"},
+    "head": {"$ref": "#/$defs/reference"},
+    "evidenceDirectory": {"type": "string", "minLength": 1},
+    "receipt": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "schemaVersion"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/hash"}, "schemaVersion": {"const": 3}}}]}
+  },
+  "allOf": [{"if": {"properties": {"phase": {"const": "complete"}}}, "then": {"properties": {"state": {"const": "complete"}, "cleanup": {"properties": {"state": {"const": "complete"}}}, "handoffReady": {"const": true}, "receipt": {"type": "object"}}}, "else": {"properties": {"state": {"const": "unknown"}, "cleanup": {"properties": {"state": {"const": "unknown"}}}, "handoffReady": {"const": false}, "receipt": {"type": "null"}}}}],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reference": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {
+      "path": {"type": "string", "pattern": "^[a-z][a-z-]{0,40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"}, "sha256": {"$ref": "#/$defs/hash"}
+    }}
+  }
+}

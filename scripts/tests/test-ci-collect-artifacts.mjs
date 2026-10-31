@@ -16,9 +16,16 @@ const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recu
 const fileHash = async file => hash(await fs.readFile(file));
 const document = (kind, data) => ({ protocol: 'maestro.harmonyos.agent', schemaVersion: 1, kind, revision: 1, observedAt: new Date().toISOString(), data });
 
-async function withMaintenance(t) {
-  const f = await fixture(t, 'failed', 'unknown');
-  const maintenance = await maintenanceFixture(f.root, undefined, { deviceId: f.record.deviceId });
+async function withMaintenance(t, producer = false) {
+  const f = await fixture(t, 'failed', 'unknown', producer ? 'maintenance-producer-fixture' : undefined);
+  let maintenance;
+  if (producer) {
+    const produced = spawnSync(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+      path.join(repo, 'scripts/tests/fixtures/MaintenanceProducer.java'), f.record.recoveryRoot, 'complete'],
+    { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    assert.equal(produced.status, 0, produced.stderr);
+    maintenance = { input: JSON.parse(await fs.readFile(path.join(f.record.recoveryRoot, 'input.json'), 'utf8')) };
+  } else maintenance = await maintenanceFixture(f.root, undefined, { deviceId: f.record.deviceId });
   const checked = await verifyMaintenanceRelease(maintenance.input);
   f.record.createdAt = maintenance.input.createdAt;
   f.result.data.cleanup.errors.push({ code: 'DEVICE_RECOVERY_REQUIRED', details: { recoverySessionId: checked.sessionId } });
@@ -30,6 +37,19 @@ async function withMaintenance(t) {
   return { ...f, maintenance, recovered, recoveryStateRecord,
     options: { recoveryStateRecord, expectedLaunchId: f.record.launchId } };
 }
+
+test('JVM coordinator output passes Node release verification and the full CI archive collector', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI,
+}, async t => {
+  const f = await withMaintenance(t, true), before = await fileHash(f.resultPath);
+  const report = await f.collect(f.options);
+  assert.equal(report.status, 'complete', JSON.stringify(report.issues));
+  assert.equal(report.recoveryEvidence, 'maintenance_receipt_and_chain');
+  assert.equal(report.originals.ci.execution, 'failed');
+  assert.equal(report.originals.result.cleanup.state, 'unknown');
+  assert.equal(await fileHash(f.resultPath), before);
+  assert.ok(report.files.filter(file => file.path.startsWith('recovery/maintenance/')).length > 25);
+});
 
 test('archives a completed maintenance chain beside the immutable failed CI result', async t => {
   const f = await withMaintenance(t), before = await fileHash(path.join(f.ci, 'ci-result.json'));
@@ -103,12 +123,12 @@ test('public archive command accepts a separate recovery state without changing 
   assert.equal(report.originals.ci.state, 'needs_inspection');
 });
 
-async function fixture(t, status = 'passed', cleanup = 'complete') {
+async function fixture(t, status = 'passed', cleanup = 'complete', deviceId = 'fixture-device-not-a-real-serial') {
   const root = path.join(parent, randomUUID()), launchId = randomUUID(), runId = randomUUID(), attemptId = randomUUID();
   const ci = path.join(root, 'outputs', 'ci-' + launchId), persistent = path.join(root, 'persistent');
   const agentRoot = path.join(persistent, 'agent'), attempt = path.join(agentRoot, 'runs', runId, attemptId);
   const runner = path.join(ci, 'harmonyos-fixture'), controlPath = path.join(persistent, 'launches', launchId + '.json');
-  const deviceId = 'fixture-device-not-a-real-serial', inputs = path.join(ci, 'ci-inputs.json'), quality = path.join(ci, 'ci-quality.json');
+  const inputs = path.join(ci, 'ci-inputs.json'), quality = path.join(ci, 'ci-quality.json');
   const ref = async relative => ({ path: relative, sha256: await fileHash(path.join(attempt, relative)) });
   await write(inputs, { schemaVersion: 1, toolFiles: [{ path: path.join(root, 'tools/not-copied.jar'), sha256: 'a'.repeat(64) }] });
   await write(quality, { status: 'passed' });

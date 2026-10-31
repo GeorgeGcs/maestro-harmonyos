@@ -12,6 +12,23 @@ import { maintenanceFixture, sha } from './fixtures/maintenance.mjs';
 import { verifyMaintenanceReport } from '../../examples/agent-client/maintenance.mjs';
 
 const execute = promisify(execFile);
+test('JVM unconfirmed observation remains gated and cannot be accepted by Node', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI,
+}, async t => {
+  const parent = process.env.MAESTRO_TEST_TEMP ?? os.tmpdir();
+  await fs.mkdir(parent, { recursive: true });
+  const root = await fs.mkdtemp(path.join(parent, 'maestro-producer-'));
+  t.after(async () => { assert.equal(path.dirname(root), path.resolve(parent)); await fs.rm(root, { recursive: true, force: true }); });
+  const output = path.join(root, 'unconfirmed');
+  await execute(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+    path.resolve('scripts/tests/fixtures/MaintenanceProducer.java'), output, 'unconfirmed'], { windowsHide: true, timeout: 60000 });
+  const input = JSON.parse(await fs.readFile(path.join(output, 'input.json'), 'utf8'));
+  const before = await fs.readFile(path.join(output, 'prepared.json'));
+  await assert.rejects(verifyMaintenanceRelease(input));
+  assert.deepEqual(await fs.readFile(path.join(output, 'prepared.json')), before);
+  const producer = JSON.parse(await fs.readFile(path.join(output, 'producer.json'), 'utf8'));
+  assert.equal(producer.deviceCalls, 0); assert.equal(producer.transportCalls, 1);
+});
 async function fixture(t, transform) {
   const parent = process.env.MAESTRO_TEST_TEMP ?? os.tmpdir();
   await fs.mkdir(parent, { recursive: true });

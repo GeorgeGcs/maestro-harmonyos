@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:maintenance-receipt:3",
+  "title": "Ordered restart maintenance receipt v3",
+  "$comment": "Shape only. Hashes, ownership, reboot order, pending operation identities and the live gate must be independently verified. Original test outcome remains unknown.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recoveryId", "deviceId", "observedAt", "sessionId", "reason", "state", "originalExecutionResult", "operations", "originalPendingOperations", "pendingOperations", "temporaryFiles", "issues", "maintenanceId", "checkpoint", "evidenceHead", "termination", "originalJournal", "finalJournal", "originalReceipt", "cleanupBatches"],
+  "properties": {
+    "schemaVersion": {"const": 3},
+    "recoveryId": {"$ref": "#/$defs/uuid"},
+    "maintenanceId": {"$ref": "#/$defs/uuid"},
+    "sessionId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+    "observedAt": {"type": "string", "format": "date-time"},
+    "reason": {"const": "ordered_restart_maintenance"},
+    "state": {"const": "complete"},
+    "originalExecutionResult": {"const": "unknown"},
+    "operations": {"type": "integer", "minimum": 0},
+    "originalPendingOperations": {"type": "integer", "minimum": 0},
+    "pendingOperations": {"const": 0},
+    "temporaryFiles": {"const": 0},
+    "issues": {"type": "array", "maxItems": 0},
+    "checkpoint": {"$ref": "#/$defs/reference"},
+    "evidenceHead": {"$ref": "#/$defs/reference"},
+    "termination": {"$ref": "#/$defs/reference"},
+    "originalJournal": {"$ref": "#/$defs/reference"},
+    "finalJournal": {"$ref": "#/$defs/reference"},
+    "originalReceipt": {"$ref": "#/$defs/reference"},
+    "cleanupBatches": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/reference"}}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "reference": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[a-z][a-z-]{0,40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

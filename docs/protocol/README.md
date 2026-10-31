@@ -13,6 +13,8 @@
 | 人工复核输入 | 当前 [v2](validation-review-v2.schema.json)，旧 [v1](validation-review-v1.schema.json) | v2 增加逐槽安装和准备状态确认；见[验证计划](../validation-plan.md) |
 | 录屏资源登记与快照 | [v1](recording-resources-v1.schema.json) | [资源身份、阶段与原件](recording-resources.md) |
 | 内部恢复凭据 | [v1/v2](recovery-receipt.schema.json) | v2 增加不可变录屏资源快照引用 |
+| 依次重启维护凭据 | [v3](maintenance-receipt-v3.schema.json) | 独立维护分支；原执行结果保持 unknown |
+| 依次重启维护响应 | [v1](maintenance-response-v1.schema.json) | prepare/resume/complete 的成功命令响应；见[维护格式](maintenance.md) |
 | 完整解码报告 | [v1](recording-verification-v1.schema.json) | [解码命令与检查范围](../recording-diagnostics.md) |
 | 录屏阶段诊断 | [v1](recording-diagnostics-v1.schema.json) | [来源、事件与视频关联](recording-diagnostics.md) |
 
