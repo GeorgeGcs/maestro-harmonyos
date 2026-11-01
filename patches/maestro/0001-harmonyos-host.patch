@@ -12827,10 +12827,10 @@ index 0000000..f8ced01
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..44f4995
+index 0000000..df7efae
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,526 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -13149,12 +13149,18 @@ index 0000000..44f4995
 +                for (operations in state.operations.filterNot { it.markerRemoved }.chunked(20)) {
 +                    // List each owned directory once. Repeating its full path for every check
 +                    // made ordinary multi-recording sessions require too many HDC round trips.
-+                    val directories = operations.joinToString(" ") { quote("${state.remoteRoot}/${it.id}") }
-+                    val script = "for __maestro_cleanup_dir in $directories; do " +
++                    // State validation restricts these paths to the generated UUID namespace:
++                    // no whitespace or glob characters. Split only on spaces with globbing off.
++                    val directories = operations.joinToString(" ") { "${state.remoteRoot}/${it.id}" }
++                    val script = "set -f; IFS=' '; __maestro_cleanup_dirs=${quote(directories)}; " +
++                        "__maestro_cleanup_files=''; __maestro_cleanup_existing=''; " +
++                        "for __maestro_cleanup_dir in \$__maestro_cleanup_dirs; do " +
 +                        "if [ -e \"\$__maestro_cleanup_dir\" ] || [ -L \"\$__maestro_cleanup_dir\" ]; then " +
-+                        "[ -d \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] && " +
-+                        "rm -f \"\$__maestro_cleanup_dir/done\" \"\$__maestro_cleanup_dir/done.pending\" && " +
-+                        "rmdir \"\$__maestro_cleanup_dir\" || exit 121; fi; done; "
++                        "[ -d \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] || exit 121; " +
++                        "__maestro_cleanup_files=\"\$__maestro_cleanup_files \$__maestro_cleanup_dir/done \$__maestro_cleanup_dir/done.pending\"; " +
++                        "__maestro_cleanup_existing=\"\$__maestro_cleanup_existing \$__maestro_cleanup_dir\"; fi; done; " +
++                        "if [ -n \"\$__maestro_cleanup_existing\" ]; then " +
++                        "rm -f \$__maestro_cleanup_files && rmdir \$__maestro_cleanup_existing || exit 121; fi; "
 +                    steps += script to { operations.forEach { it.markerRemoved = true } }
 +                }
 +                val files = state.remoteRoot + "/files"
@@ -18382,16 +18388,17 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..6995722
+index 0000000..425a143
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,440 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import com.google.common.truth.Truth.assertThat
 +import org.junit.jupiter.api.Assertions.assertThrows
 +import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.Assumptions.assumeTrue
 +import org.junit.jupiter.api.io.TempDir
 +import java.nio.file.Files
 +import java.nio.file.Path
@@ -18404,6 +18411,61 @@ index 0000000..6995722
 +    private val mapper = jacksonObjectMapper()
 +    private fun file() = directory.resolve("journal.json")
 +    private fun create() = HarmonyOSRecoveryJournal.create(file(), "fixture-target", UUID.randomUUID().toString())
++
++    @Test fun `batched cleanup executes named paths and preserves unexpected content in a real shell`() {
++        val shell = System.getenv("MAESTRO_TEST_POSIX_SHELL") ?: "/bin/sh"
++        assumeTrue(Files.isRegularFile(Path.of(shell)), "Set MAESTRO_TEST_POSIX_SHELL to exercise the generated shell on Windows")
++        for (mode in listOf("normal", "missing-directory", "unexpected-file", "not-a-directory")) {
++            val work = Files.createDirectory(directory.resolve(mode))
++            val journalPath = work.resolve("journal.json")
++            HarmonyOSRecoveryJournal.create(journalPath, "fixture-target", UUID.randomUUID().toString()).use { journal ->
++                val remote = FakeRemote(journalPath)
++                val hdc = HdcClient("fake", HdcCommandRunner { command, timeout ->
++                    if (command.last().contains("MAESTRO_RECOVERY_")) remote.run(command, timeout)
++                    else {
++                        val state = mapper.readTree(journalPath.toFile())
++                        // Only this test's scratch tree is exposed to the shell; never /data/local/tmp.
++                        val script = command.last().replace(state["remoteRoot"].asText(), "./owned")
++                        check(!script.contains("/data/local/tmp"))
++                        val stdout = work.resolve("stdout.txt"); val stderr = work.resolve("stderr.txt")
++                        val builder = ProcessBuilder(shell, "-c", script).directory(work.toFile())
++                            .redirectOutput(stdout.toFile()).redirectError(stderr.toFile())
++                        builder.environment()["PATH"] = Path.of(shell).parent.toString() + java.io.File.pathSeparator + System.getenv("PATH")
++                        val process = builder.start()
++                        try {
++                            check(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) { "Test shell timed out" }
++                            HdcCommandResult(process.exitValue(), Files.readString(stdout), Files.readString(stderr))
++                        } finally { if (process.isAlive) { process.destroyForcibly(); process.waitFor() } }
++                    }
++                })
++                val tracked = hdc.withRecoveryJournal(journal)
++                repeat(3) { tracked.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++                val state = mapper.readTree(journalPath.toFile())
++                val owned = Files.createDirectory(work.resolve("owned")); Files.createDirectory(owned.resolve("files"))
++                val ids = state["operations"].map { it["id"].asText() }
++                for ((index, id) in ids.withIndex()) {
++                    if (index == 0 && mode == "missing-directory") continue
++                    if (index == 0 && mode == "not-a-directory") { Files.writeString(owned.resolve(id), "keep"); continue }
++                    val operation = Files.createDirectory(owned.resolve(id))
++                    Files.writeString(operation.resolve("done"), "proof")
++                    Files.writeString(operation.resolve("done.pending"), "partial")
++                    if (index == 0 && mode == "unexpected-file") Files.writeString(operation.resolve("foreign"), "keep")
++                }
++                Files.writeString(work.resolve("outside"), "keep")
++                journal.seal()
++                val report = journal.recover(hdc)
++                val successful = mode in listOf("normal", "missing-directory")
++                assertThat(report.state).isEqualTo(if (successful) "complete" else "unknown")
++                assertThat(Files.readString(work.resolve("outside"))).isEqualTo("keep")
++                if (successful) assertThat(Files.exists(owned)).isFalse()
++                else {
++                    val foreign = if (mode == "unexpected-file") owned.resolve(ids.first()).resolve("foreign") else owned.resolve(ids.first())
++                    assertThat(Files.readString(foreign)).isEqualTo("keep")
++                    assertThat(mapper.readTree(journalPath.toFile())["operations"].all { !it["markerRemoved"].asBoolean() }).isTrue()
++                }
++            }
++        }
++    }
 +
 +    @Test fun `empty failed-open session releases without consulting an unavailable device`() {
 +        create().use { journal ->
