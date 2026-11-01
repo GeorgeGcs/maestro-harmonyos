@@ -127,6 +127,14 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
     for (const name of ['java', 'hdc', 'script']) requireValue(equal(cp.tools[name], priorCheckpoint.tools[name]), 'Nonmigratable tool changed.');
     requireValue(cp.tools.powershell.path === priorCheckpoint.tools.powershell.path && !equal(cp.tools.powershell, priorCheckpoint.tools.powershell), 'PowerShell replacement differs.');
     function jars(tools) {
+      requireValue(tools && typeof tools === 'object' && Object.keys(tools).length <= 1000 &&
+        ['java', 'hdc', 'script', 'powershell'].every(name => Object.hasOwn(tools, name)), 'Missing migration tools.');
+      for (const [key, item] of Object.entries(tools)) {
+        fields(item, 'path sha256 bytes');
+        requireValue((['java', 'hdc', 'script', 'powershell'].includes(key) || key.startsWith('classpath:')) &&
+          typeof item.path === 'string' && path.win32.isAbsolute(item.path) && digest(item.sha256) &&
+          Number.isSafeInteger(item.bytes) && item.bytes > 0, 'Invalid migration tool fingerprint.');
+      }
       const entries = Object.entries(tools).filter(([key]) => key.startsWith('classpath:')).map(([, item]) => [path.win32.basename(item.path), item]);
       requireValue(entries.length > 0 && new Set(entries.map(([name]) => name)).size === entries.length && Object.keys(tools).length === entries.length + 4,
         'Invalid migration tool membership.');

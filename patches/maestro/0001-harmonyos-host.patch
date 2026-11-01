@@ -3930,7 +3930,7 @@ index 0000000..88d0e66
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 new file mode 100644
-index 0000000..709abad
+index 0000000..83aedff
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 @@ -0,0 +1,528 @@
@@ -3964,6 +3964,23 @@ index 0000000..709abad
 +    val head: MaintenanceReference,
 +    val evidenceDirectory: String,
 +    val receipt: RecoveryOutcome? = null,
++) {
++    fun toMap(): Map<String, Any?> = mapOf("protocol" to "harmonyos.reboot-recovery", "schemaVersion" to 1,
++        "maintenanceId" to maintenanceId, "deviceId" to deviceId, "ownerId" to ownerId,
++        "state" to if (complete) "complete" else "unknown", "cleanup" to mapOf("state" to if (complete) "complete" else "unknown"),
++        "phase" to phase, "handoffReady" to complete, "checkpoint" to checkpoint, "head" to head,
++        "evidenceDirectory" to evidenceDirectory, "receipt" to receipt?.let {
++            mapOf("path" to it.reportPath.toString(), "sha256" to it.sha256, "schemaVersion" to 3)
++        })
++}
++
++/** Explicit host-restart, then device-restart maintenance. Ordinary command results are never rewritten. */
++internal class HarmonyOsMaintenanceRecovery(
++    private val lockDirectory: Path,
++    private val tools: Map<String, MaintenanceTool>,
++    private val observeHost: (Path) -> JsonNode,
++    private val hdcFactory: () -> HdcClient,
++    private val gateWriter: (Path, LeaseGate) -> Unit = ::writeGate,
 +) {
 +    /** Explicit, hash-bound migration, only before any maintenance device dispatch. */
 +    fun migrateHost(deviceId: String, ownerId: String, approval: Path): MaintenanceOutcome = locked(deviceId, ownerId) { directory, gate ->
@@ -4003,23 +4020,6 @@ index 0000000..709abad
 +        load(directory, updated, gateWriter).outcome()
 +    }
 +
-+    fun toMap(): Map<String, Any?> = mapOf("protocol" to "harmonyos.reboot-recovery", "schemaVersion" to 1,
-+        "maintenanceId" to maintenanceId, "deviceId" to deviceId, "ownerId" to ownerId,
-+        "state" to if (complete) "complete" else "unknown", "cleanup" to mapOf("state" to if (complete) "complete" else "unknown"),
-+        "phase" to phase, "handoffReady" to complete, "checkpoint" to checkpoint, "head" to head,
-+        "evidenceDirectory" to evidenceDirectory, "receipt" to receipt?.let {
-+            mapOf("path" to it.reportPath.toString(), "sha256" to it.sha256, "schemaVersion" to 3)
-+        })
-+}
-+
-+/** Explicit host-restart, then device-restart maintenance. Ordinary command results are never rewritten. */
-+internal class HarmonyOsMaintenanceRecovery(
-+    private val lockDirectory: Path,
-+    private val tools: Map<String, MaintenanceTool>,
-+    private val observeHost: (Path) -> JsonNode,
-+    private val hdcFactory: () -> HdcClient,
-+    private val gateWriter: (Path, LeaseGate) -> Unit = ::writeGate,
-+) {
 +    fun prepare(deviceId: String, ownerId: String): MaintenanceOutcome = locked(deviceId, ownerId) { directory, gate ->
 +        if (gate.maintenance != null) return@locked load(directory, gate, gateWriter).also { requireSettled(it); verifyFrozen(it) }.outcome()
 +        require(gate.state == "quarantined" && gate.closeFailure == null && !gate.unresolvedRecording)

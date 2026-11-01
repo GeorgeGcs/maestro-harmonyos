@@ -11,7 +11,7 @@ export function encode(value) {
 }
 
 // Synthetic evidence only. No installed CLI, device state, executable or HDC is accessed.
-export async function maintenanceFixture(root, transform = (_kind, value) => value, { deviceId = 'maintenance-fixture' } = {}) {
+export async function maintenanceFixture(root, transform = (_kind, value) => value, { deviceId = 'maintenance-fixture', migrate = false } = {}) {
   const ownerId = randomUUID(), maintenanceId = randomUUID(), generation = randomUUID();
   const recoveryRoot = path.join(root, 'recovery'), key = sha(Buffer.from(deviceId));
   const owner = path.join(recoveryRoot, key, ownerId), evidence = path.join(owner, 'maintenance', maintenanceId);
@@ -24,10 +24,13 @@ export async function maintenanceFixture(root, transform = (_kind, value) => val
   const createdAt = '2026-10-20T00:00:00.000Z', now = '2026-10-31T01:00:00.000Z';
   const tool = name => ({ path: 'C:\\fixture\\' + name, sha256: 'a'.repeat(64), bytes: 10 });
   const tools = { powershell: tool('pwsh.exe'), script: tool('observe.ps1'), hdc: tool('hdc.exe'), java: tool('java.exe'), 'classpath:0:fixture.jar': tool('fixture.jar') };
+  const originalTools = structuredClone(tools);
+  let powershellVersion = '5.1.1.1';
   const host = (observedAt, boot, uptime) => ({ protocol: 'maestro.harmonyos.host-boot-observation', schemaVersion: 1,
     provider: { name: 'windows-gettickcount64-cim', version: 1 }, observedAt, lastBootUpTime: boot, uptimeMilliseconds: uptime,
-    machineIdSha256: 'b'.repeat(64), tools: { powershell: { ...tools.powershell, version: '5.1.1.1' }, script: tools.script } });
+    machineIdSha256: 'b'.repeat(64), tools: { powershell: { ...tools.powershell, version: powershellVersion }, script: tools.script } });
   const hostBefore = await put('host-before', host('2026-10-30T00:00:00.000Z', createdAt, '864000000'));
+  if (migrate) { tools.powershell = { ...tools.powershell, sha256: 'c'.repeat(64) }; powershellVersion = '5.1.1.2'; }
   const hostResume = await put('host-resume', host('2026-10-31T00:00:00.000Z', '2026-10-30T23:58:00.000Z', '120000'));
   const hostComplete = await put('host-complete', host('2026-10-31T00:10:00.000Z', '2026-10-30T23:58:00.000Z', '720000'));
   const remote = '/data/local/tmp/maestro-session-' + generation;
@@ -43,14 +46,24 @@ export async function maintenanceFixture(root, transform = (_kind, value) => val
   const oldHash = await write(oldPath, oldReceipt);
   const gateBase = { schemaVersion: 1, deviceId, ownerSessionId: ownerId, state: 'quarantined', journalPath, updatedAt: now,
     closeFailure: null, reportPath: oldPath, reportSha256: oldHash, requiresRecovery: true, uncertainReason: 'fixture', unresolvedRecording: false };
-  const cp = { schemaVersion: 1, maintenanceId, deviceId, ownerId, generation, createdAt: now,
+  let cp = { schemaVersion: 1, maintenanceId, deviceId, ownerId, generation, createdAt: now,
     originalGate: await put('original-gate', gateBase), originalJournal: await put('original-journal', original),
-    originalReceipt: await put('original-receipt', oldReceipt), hostBefore, tools };
-  const checkpoint = await put('checkpoint', cp);
+    originalReceipt: await put('original-receipt', oldReceipt), hostBefore, tools: originalTools };
+  let checkpoint = await put('checkpoint', cp);
   let step = { schemaVersion: 1, checkpointSha256: checkpoint.sha256, revision: 0, previous: null, phase: 'prepared', observedAt: now,
     journal: cp.originalJournal, calls: [], hostResume: null, phoneBefore: null, hostComplete: null, phoneAfter: null,
     termination: null, cleanupBatches: [], receipt: null };
   let head = await put('step', step), current = structuredClone(original);
+  if (migrate) {
+    const transition = await put('host-tool-transition', { schemaVersion: 1, reason: 'windows_powershell_update', previousCheckpoint: checkpoint,
+      previousHead: head, previousGate: await put('previous-gate', { ...gateBase, schemaVersion: 2, maintenance: { maintenanceId, checkpoint, head } }),
+      approval: await put('tool-approval', { schemaVersion: 1, reason: 'windows_powershell_update', checkpointSha256: checkpoint.sha256, tools }),
+      hostObserved: await put('host-migrated', host('2026-10-30T23:59:00.000Z', '2026-10-30T23:58:00.000Z', '60000')) });
+    cp = { ...cp, schemaVersion: 2, tools, transition };
+    checkpoint = await put('checkpoint', cp);
+    step = { ...step, checkpointSha256: checkpoint.sha256 };
+    head = await put('step', step);
+  }
   async function publish(change) {
     step = { ...step, ...change, previous: head, revision: step.revision + 1 };
     head = await put('step', step);

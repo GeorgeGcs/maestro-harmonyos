@@ -29,13 +29,35 @@ test('JVM unconfirmed observation remains gated and cannot be accepted by Node',
   const producer = JSON.parse(await fs.readFile(path.join(output, 'producer.json'), 'utf8'));
   assert.equal(producer.deviceCalls, 0); assert.equal(producer.transportCalls, 1);
 });
-async function fixture(t, transform) {
+async function fixture(t, transform, options) {
   const parent = process.env.MAESTRO_TEST_TEMP ?? os.tmpdir();
   await fs.mkdir(parent, { recursive: true });
   const root = await fs.mkdtemp(path.join(parent, 'maestro-maintenance-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  return { root, ...await maintenanceFixture(root, transform) };
+  return { root, ...await maintenanceFixture(root, transform, options) };
 }
+test('migrated host evidence permits different PowerShell versions only across the approved restart', async t => {
+  const f = await fixture(t, undefined, { migrate: true });
+  const result = await verifyMaintenanceRelease(f.input);
+  assert.equal(result.originalExecutionResult, 'unknown');
+  assert.equal(result.originalPendingOperations, 1);
+});
+for (const [label, kind, mutate] of [
+  ['approval mismatch', 'tool-approval', v => { v.checkpointSha256 = 'e'.repeat(64); }],
+  ['changed migration reason', 'host-tool-transition', v => { v.reason = 'force'; }],
+  ['changed Java', 'checkpoint', v => { if (v.schemaVersion === 2) v.tools.java.sha256 = 'e'.repeat(64); }],
+  ['changed dependency', 'checkpoint', v => { if (v.schemaVersion === 2) v.tools['classpath:0:fixture.jar'].sha256 = 'e'.repeat(64); }],
+  ['foreign prior owner', 'previous-gate', v => { v.ownerSessionId = randomUUID(); }],
+  ['prior gate released', 'previous-gate', v => { v.state = 'clean'; }],
+  ['changed original scope', 'checkpoint', v => { if (v.schemaVersion === 2) v.generation = randomUUID(); }],
+  ['foreign migration host', 'host-migrated', v => { v.machineIdSha256 = 'e'.repeat(64); }],
+  ['no migration reboot', 'host-migrated', v => { v.lastBootUpTime = '2026-10-20T00:00:00.000Z'; }],
+  ['second boot after migration', 'host-migrated', v => { v.lastBootUpTime = '2026-10-30T23:57:00.000Z'; }],
+  ['version changes after migration', 'host-resume', v => { v.tools.powershell.version = '5.1.1.3'; }],
+]) test(`migration rejects ${label}`, async t => {
+  const f = await fixture(t, (k, value) => { if (k === kind) mutate(value); return value; }, { migrate: true });
+  await assert.rejects(verifyMaintenanceRelease(f.input));
+});
 test('completed chain confirms release without rewriting the old unknown result or files', async t => {
   const f = await fixture(t), before = await fs.readFile(f.journalPath);
   const result = await verifyMaintenanceRelease(f.input);
