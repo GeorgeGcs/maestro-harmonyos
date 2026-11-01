@@ -58,6 +58,40 @@ $maintenanceArgs = @(
 
 部分维护调用未确认时，需要保留现场继续诊断；重复同一命令不保证能够自动续办。失败时 stderr 提供异常类型和代码位置，不输出日志正文或命令凭据。
 
+## 重启后工具发生变化
+
+Windows 更新可能同时替换系统 PowerShell。即使路径和文件大小相同，程序内容也可能变化；当前维护入口要求工具与 prepare 时一致，因此会拒绝继续。微软签名有效只能确认签名校验结果，不能代替原检查点的工具一致性检查。
+
+可先只读检查检查点登记的文件：
+
+```powershell
+node scripts/recovery/check-maintenance-tools.mjs --checkpoint 'C:/sessions/owner/maintenance/id/checkpoint-UUID.json'
+```
+
+输出逐文件的 expected/actual 指纹，以及 unchanged、changed 或 unreadable 状态。退出码 0 表示本次读取的登记文件均一致，2 表示有变化或不可读，1 表示输入或检查点读取失败。此工具不启动 PowerShell、Java 或 HDC，也不修改文件。输出可能含本机路径，分享前检查内容。
+
+这个检查只用于定位变化，不检查全部维护证据或批准接管；即使全部 unchanged，也必须通过原恢复入口。遇到工具变化时，保留原检查点、占用和旧日志，不直接改哈希、替换系统文件或删除占用。
+
+### 显式迁移系统 PowerShell
+
+只允许迁移仍处于首次 `prepared`、没有任何维护设备调用的会话。运行者应先核对 Windows 更新事实及系统程序签名，并使用已审查、已测试的新 CLI；工具指纹清单本身不是发布者签名。新 CLI 放在独立目录，原分发目录和其他工具必须保持原样。
+
+先用新 CLI 生成清单。`CHECKPOINT_SHA256` 是原 gate 引用的检查点摘要：
+
+```powershell
+& $cli --platform harmonyos --device $device harmonyos-recovery plan-host-migration @maintenanceArgs `
+  --checkpoint-sha256 CHECKPOINT_SHA256 > tool-approval.json
+# 阅读清单并核对新 CLI 的构建来源、工具路径与摘要后，再执行迁移。
+& $cli --platform harmonyos --device $device harmonyos-recovery migrate-host @maintenanceArgs `
+  --tool-approval ./tool-approval.json
+```
+
+清单绑定原检查点及当前新工具集。允许系统 PowerShell 在原路径更换内容；Java、HDC、观察脚本必须不变。CLI 可移到独立目录，JAR 文件集合必须一致，只有 Maestro 的 cli/client/orchestra/orchestra-models 四类实现 JAR 允许更换内容，其他依赖的字节必须一致。原 CLI 的全部文件与目录成员仍需核验。
+
+迁移核实同一主机已重启，保存原 gate、检查点、阶段引用、确认清单及新主机观察，再原子更新 gate 指向的检查点。新检查点采用 v2，旧文件不覆盖，原命令仍未确认，设备仍不可接管。已执行设备调用、旧文件变化、清单过期、依赖变化或不能证明主机重启都会拒绝。
+
+成功后继续用同一个新 CLI 执行 `resume`。它要求仍是迁移时的电脑启动周期，保存手机基线后才进入 `phone_prepared`；此后再手动重启手机并执行 `complete`。迁移之前已经重启过手机，不能代替基线记录之后的重启。若发生第二次系统工具更新或已有未确认调用，不会自动再次迁移。
+
 ## 手机运行时间的限制
 
 当前读取系统自带的无参数 `uptime`，接受明确的英文输出格式。[OpenHarmony 的 Toybox 实现](https://github.com/openharmony/third_party_toybox/blob/master/toys/other/uptime.c)使用 `sysinfo`，将运行时间截取到整分钟。维护入口按这个格式和语义解析，保留原始输出与整数分钟，不把输出中的当前时钟当成重启依据。

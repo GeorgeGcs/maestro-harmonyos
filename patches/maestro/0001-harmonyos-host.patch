@@ -142,10 +142,10 @@ index 0000000..a7b39b1
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
 new file mode 100644
-index 0000000..41f101c
+index 0000000..7c78d07
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,90 @@
 +package maestro.cli.command
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -173,13 +173,19 @@ index 0000000..41f101c
 +    private lateinit var hostScript: Path
 +    @CommandLine.Option(names = ["--hdc"], required = true, description = ["Absolute path to the HDC executable"])
 +    private lateinit var hdc: Path
++    @CommandLine.Option(names = ["--tool-approval"], description = ["Reviewed, exact host migration plan JSON"])
++    private var toolApproval: Path? = null
++    @CommandLine.Option(names = ["--checkpoint-sha256"], description = ["Original checkpoint hash for plan-host-migration"])
++    private var checkpointSha256: String? = null
 +
 +    override fun call(): Int {
 +        val mapper = jacksonObjectMapper()
 +        return try {
 +            require(parent?.platform == "harmonyos") { "Use --platform harmonyos with harmonyos-recovery." }
 +            val device = requireNotNull(parent?.deviceId) { "Use --device with the original HDC target." }
-+            require(action in setOf("prepare", "resume", "complete")) { "Expected prepare, resume, or complete." }
++            require(action in setOf("prepare", "resume", "complete", "plan-host-migration", "migrate-host")) { "Unknown maintenance action." }
++            require(toolApproval == null || action == "migrate-host")
++            require(checkpointSha256 == null || action == "plan-host-migration")
 +            HarmonyOsSessionSupport.validateOptions(host = parent?.host, port = parent?.port,
 +                driverHostPort = parent?.driverHostPort)
 +            val observer = HarmonyOsMaintenanceHostObserver(powershell, hostScript)
@@ -197,11 +203,19 @@ index 0000000..41f101c
 +                val key = "classpath:$index:${entry.fileName}"
 +                tools[key] = HarmonyOsMaintenanceHostObserver.fingerprint(entry)
 +            }
++            if (action == "plan-host-migration") {
++                require(checkpointSha256?.matches(Regex("[0-9a-f]{64}")) == true)
++                println(mapper.writeValueAsString(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
++                    "checkpointSha256" to checkpointSha256, "tools" to tools.toSortedMap())))
++                System.out.flush()
++                return if (System.out.checkError()) 2 else 0
++            }
 +            val recovery = HarmonyOsMaintenanceRecovery(HarmonyOsSessionSupport.defaultLockDirectory(), tools,
 +                observer::observe, hdcFactory = { HdcClient(tools.getValue("hdc").path) })
 +            val outcome = when (action) {
 +                "prepare" -> recovery.prepare(device, ownerId)
 +                "resume" -> recovery.resume(device, ownerId)
++                "migrate-host" -> recovery.migrateHost(device, ownerId, requireNotNull(toolApproval))
 +                else -> recovery.complete(device, ownerId)
 +            }
 +            println(mapper.writeValueAsString(outcome.toMap()))
@@ -3512,10 +3526,10 @@ index b79b107..7a38dd6 100644
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt
 new file mode 100644
-index 0000000..255737a
+index 0000000..609de28
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,160 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -3553,6 +3567,8 @@ index 0000000..255737a
 +    val originalReceipt: MaintenanceReference,
 +    val hostBefore: MaintenanceReference,
 +    val tools: Map<String, MaintenanceTool>,
++    @get:com.fasterxml.jackson.annotation.JsonInclude(com.fasterxml.jackson.annotation.JsonInclude.Include.NON_NULL)
++    val transition: MaintenanceReference? = null,
 +)
 +
 +internal data class MaintenanceCallEvidence(
@@ -3676,10 +3692,10 @@ index 0000000..255737a
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt
 new file mode 100644
-index 0000000..acee757
+index 0000000..3e2c41a
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceHostBoot.kt
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,158 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -3732,6 +3748,15 @@ index 0000000..acee757
 +
 +    fun requireRestarted(before: Observation, after: Observation) {
 +        pair(before, after)
++        require(after.lastBootUpTime != before.lastBootUpTime) { "boot_time_unchanged" }
++        require(ticks(after.uptimeMilliseconds) < ticks(before.uptimeMilliseconds)) { "uptime_did_not_decrease" }
++    }
++
++    // Caller must independently validate the immutable, explicitly approved tool transition.
++    fun requireRestartedAfterToolMigration(before: Observation, after: Observation) {
++        validateObservation(before); validateObservation(after)
++        require(before.machineIdSha256 == after.machineIdSha256) { "machine_mismatch" }
++        require(after.observedAt > before.observedAt) { "observation_order_not_confirmed" }
 +        require(after.lastBootUpTime != before.lastBootUpTime) { "boot_time_unchanged" }
 +        require(ticks(after.uptimeMilliseconds) < ticks(before.uptimeMilliseconds)) { "uptime_did_not_decrease" }
 +    }
@@ -3905,10 +3930,10 @@ index 0000000..88d0e66
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 new file mode 100644
-index 0000000..9859aa0
+index 0000000..709abad
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,528 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -3940,6 +3965,44 @@ index 0000000..9859aa0
 +    val evidenceDirectory: String,
 +    val receipt: RecoveryOutcome? = null,
 +) {
++    /** Explicit, hash-bound migration, only before any maintenance device dispatch. */
++    fun migrateHost(deviceId: String, ownerId: String, approval: Path): MaintenanceOutcome = locked(deviceId, ownerId) { directory, gate ->
++        val state = load(directory, gate, gateWriter)
++        val plan = mapper.readTree(E.read(approval, 1024 * 1024))
++        E.exactFields(plan, setOf("schemaVersion", "reason", "checkpointSha256", "tools"))
++        require(plan["schemaVersion"].asInt() == 1 && plan["reason"].asText() == "windows_powershell_update")
++        require(plan["tools"] == mapper.valueToTree<JsonNode>(tools)) { "Approved tools differ from the running distribution." }
++        verifyTools(tools)
++        if (state.checkpoint.schemaVersion == 2) {
++            val transition = state.evidence.json(requireNotNull(state.checkpoint.transition))
++            require(plan["checkpointSha256"].asText() == transition["previousCheckpoint"]["sha256"].asText())
++            verifyFrozen(state)
++            return@locked state.outcome()
++        }
++        require(plan["checkpointSha256"].asText() == gate.maintenance!!.checkpoint.sha256)
++        requirePrepared(state.step, gate.maintenance!!.checkpoint, state.checkpoint.originalJournal)
++        validateToolTransition(state.checkpoint.tools, tools)
++        // The original distribution remains intact. Only the OS-owned PowerShell file may have changed.
++        val originalWithUpdatedPowerShell = state.checkpoint.tools + ("powershell" to tools.getValue("powershell"))
++        verifyTools(originalWithUpdatedPowerShell)
++        val observed = observe(state.evidence)
++        val current = HarmonyOsMaintenanceHostBoot.parse(state.evidence.json(observed), tools.getValue("powershell"), tools.getValue("script"))
++        HarmonyOsMaintenanceHostBoot.requireRestartedAfterToolMigration(state.host(state.checkpoint.hostBefore), current)
++        val savedPlan = state.evidence.save("tool-approval", plan)
++        val transition = state.evidence.save("host-tool-transition", mapOf("schemaVersion" to 1,
++            "reason" to "windows_powershell_update", "previousCheckpoint" to gate.maintenance!!.checkpoint,
++            "previousHead" to gate.maintenance!!.head,
++            "previousGate" to state.evidence.saveBytes("previous-gate", E.read(gatePath(directory, deviceId))),
++            "approval" to savedPlan, "hostObserved" to observed))
++        val checkpoint = state.checkpoint.copy(schemaVersion = 2, createdAt = now(), tools = tools.toSortedMap(), transition = transition)
++        val reference = state.evidence.save("checkpoint", checkpoint)
++        val head = state.evidence.save("step", state.step.copy(checkpointSha256 = reference.sha256, observedAt = now()))
++        verifyTools(tools); verifyTools(originalWithUpdatedPowerShell); state.verifyCurrentJournal()
++        val updated = gate.copy(maintenance = gate.maintenance!!.copy(checkpoint = reference, head = head), updatedAt = now())
++        gateWriter(directory, updated)
++        load(directory, updated, gateWriter).outcome()
++    }
++
 +    fun toMap(): Map<String, Any?> = mapOf("protocol" to "harmonyos.reboot-recovery", "schemaVersion" to 1,
 +        "maintenanceId" to maintenanceId, "deviceId" to deviceId, "ownerId" to ownerId,
 +        "state" to if (complete) "complete" else "unknown", "cleanup" to mapOf("state" to if (complete) "complete" else "unknown"),
@@ -3998,7 +4061,11 @@ index 0000000..9859aa0
 +            state.verifyCurrentJournal()
 +            if (state.step.phase == "prepared") {
 +                val host = observe(state.evidence)
-+                HarmonyOsMaintenanceHostBoot.requireRestarted(state.host(state.checkpoint.hostBefore), state.host(host))
++                requireHostRestart(state, host)
++                state.checkpoint.transition?.let {
++                    val migrated = mapper.treeToValue(state.evidence.json(it)["hostObserved"], MaintenanceReference::class.java)
++                    HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(migrated), state.host(host))
++                }
 +                state.publish(state.step.copy(phase = "host_verified", hostResume = host))
 +            } else {
 +                require(state.step.calls.isEmpty()) { "A previous phone observation is not confirmed." }
@@ -4109,8 +4176,13 @@ index 0000000..9859aa0
 +            require(E.digest(current) == step.journal.sha256) { "Journal changed outside its recorded maintenance call." }
 +            verifyJournal(original, mapper.readTree(current), step.calls, allowLastPending = false)
 +        }
-+        fun host(reference: MaintenanceReference) = HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference),
-+            checkpoint.tools.getValue("powershell"), checkpoint.tools.getValue("script"))
++        fun host(reference: MaintenanceReference): HarmonyOsMaintenanceHostBoot.Observation {
++            val expected = if (checkpoint.transition != null && reference == checkpoint.hostBefore) {
++                val prior = mapper.treeToValue(evidence.json(checkpoint.transition)["previousCheckpoint"], MaintenanceReference::class.java)
++                readCheckpoint(evidence, prior).tools
++            } else checkpoint.tools
++            return HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference), expected.getValue("powershell"), expected.getValue("script"))
++        }
 +        fun phone(reference: MaintenanceReference): HarmonyOSUptimeObservation = parsePhone(evidence.json(reference), gate)
 +        fun publish(next: MaintenanceStep, clean: RecoveryOutcome? = null) {
 +            val linked = next.copy(revision = step.revision + 1, previous = gate.maintenance!!.head, observedAt = now())
@@ -4155,6 +4227,55 @@ index 0000000..9859aa0
 +        private const val PHONE_PROVIDER = "toybox-uptime-english-floor-minute-v1"
 +        private fun now() = Instant.now().toString()
 +        private fun pendingIds(journal: JsonNode) = journal["operations"].filter { !it["completed"].booleanValue() }.map { it["id"].asText() }
++        private fun readCheckpoint(evidence: HarmonyOsMaintenanceEvidence, reference: MaintenanceReference): MaintenanceCheckpoint {
++            val node = evidence.json(reference)
++            val version = node["schemaVersion"].asInt()
++            require(version in setOf(1, 2))
++            E.exactFields(node, if (version == 1) E.checkpointFields else E.checkpointFields + "transition")
++            return mapper.treeToValue(node, MaintenanceCheckpoint::class.java).also {
++                require((version == 1) == (it.transition == null))
++            }
++        }
++        private fun requirePrepared(step: MaintenanceStep, checkpoint: MaintenanceReference, journal: MaintenanceReference) {
++            require(step.schemaVersion == 1 && step.phase == "prepared" && step.revision == 0 && step.previous == null &&
++                step.checkpointSha256 == checkpoint.sha256 && step.journal == journal && step.calls.isEmpty() &&
++                step.hostResume == null && step.phoneBefore == null && step.hostComplete == null && step.phoneAfter == null &&
++                step.termination == null && step.cleanupBatches.isEmpty() && step.receipt == null) { "Migration requires untouched prepare." }
++        }
++        private fun validateToolTransition(old: Map<String, MaintenanceTool>, next: Map<String, MaintenanceTool>) {
++            require(old.getValue("powershell").path == next.getValue("powershell").path && old.getValue("powershell") != next.getValue("powershell"))
++            for (key in listOf("java", "hdc", "script")) require(old.getValue(key) == next.getValue(key))
++            fun jars(value: Map<String, MaintenanceTool>) = value.filterKeys { it.startsWith("classpath:") }.values.associateBy { Path.of(it.path).fileName.toString() }
++            val before = jars(old); val after = jars(next)
++            require(before.isNotEmpty() && before.keys == after.keys && old.size == before.size + 4 && next.size == after.size + 4)
++            for ((name, value) in before) {
++                val target = after.getValue(name)
++                if (!name.matches(Regex("maestro-(cli|client|orchestra|orchestra-models)(-[0-9][A-Za-z0-9._+-]*)?\\.jar")))
++                    require(value.sha256 == target.sha256 && value.bytes == target.bytes) { "Unrelated dependency changed." }
++            }
++        }
++        private fun validateTransition(evidence: HarmonyOsMaintenanceEvidence, cp: MaintenanceCheckpoint, management: MaintenanceGate) {
++            val node = evidence.json(requireNotNull(cp.transition))
++            E.exactFields(node, setOf("schemaVersion", "reason", "previousCheckpoint", "previousHead", "previousGate", "approval", "hostObserved"))
++            require(node["schemaVersion"].asInt() == 1 && node["reason"].asText() == "windows_powershell_update")
++            fun reference(name: String) = mapper.treeToValue(node[name], MaintenanceReference::class.java)
++            val oldRef = reference("previousCheckpoint"); require(oldRef != management.checkpoint)
++            val old = readCheckpoint(evidence, oldRef); require(old.schemaVersion == 1)
++            require(cp.copy(schemaVersion = 1, createdAt = old.createdAt, tools = old.tools, transition = null) == old)
++            validateToolTransition(old.tools, cp.tools)
++            requirePrepared(evidence.document(reference("previousHead"), MaintenanceStep::class.java, E.stepFields), oldRef, old.originalJournal)
++            val previousGate = evidence.json(reference("previousGate"))
++            val oldGate = mapper.treeToValue(previousGate["maintenance"], MaintenanceGate::class.java)
++            require(oldGate == MaintenanceGate(cp.maintenanceId, oldRef, reference("previousHead")) &&
++                previousGate["schemaVersion"].asInt() == 2 && previousGate["state"].asText() == "quarantined" &&
++                previousGate["deviceId"].asText() == cp.deviceId && previousGate["ownerSessionId"].asText() == cp.ownerId)
++            val approval = evidence.json(reference("approval"))
++            require(approval == mapper.valueToTree<JsonNode>(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
++                "checkpointSha256" to oldRef.sha256, "tools" to cp.tools)))
++            val before = HarmonyOsMaintenanceHostBoot.parse(evidence.json(old.hostBefore), old.tools.getValue("powershell"), old.tools.getValue("script"))
++            val current = HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference("hostObserved")), cp.tools.getValue("powershell"), cp.tools.getValue("script"))
++            HarmonyOsMaintenanceHostBoot.requireRestartedAfterToolMigration(before, current)
++        }
 +        private fun verifyTools(tools: Map<String, MaintenanceTool>) {
 +            require(tools.keys.containsAll(setOf("powershell", "script", "hdc", "java")) && tools.keys.any { it.startsWith("classpath:") })
 +            require(tools.size <= 1000 && tools.values.map { it.path }.distinct().size == tools.size)
@@ -4217,8 +4338,9 @@ index 0000000..9859aa0
 +        private fun load(directory: Path, gate: LeaseGate, gateWriter: (Path, LeaseGate) -> Unit = ::writeGate): State {
 +            val management = requireNotNull(gate.maintenance) { "Prepare is required before maintenance can proceed." }
 +            val evidence = HarmonyOsMaintenanceEvidence(ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("maintenance").resolve(management.maintenanceId))
-+            val checkpoint = evidence.document(management.checkpoint, MaintenanceCheckpoint::class.java, E.checkpointFields)
-+            require(checkpoint.schemaVersion == 1 && checkpoint.maintenanceId == management.maintenanceId && checkpoint.deviceId == gate.deviceId && checkpoint.ownerId == gate.ownerId)
++            val checkpoint = readCheckpoint(evidence, management.checkpoint)
++            require(checkpoint.maintenanceId == management.maintenanceId && checkpoint.deviceId == gate.deviceId && checkpoint.ownerId == gate.ownerId)
++            if (checkpoint.schemaVersion == 2) validateTransition(evidence, checkpoint, management)
 +            val step = evidence.document(management.head, MaintenanceStep::class.java, E.stepFields)
 +            val state = State(directory, gate, evidence, checkpoint, step, gateWriter)
 +            requireScope(state.original, gate)
@@ -4255,8 +4377,12 @@ index 0000000..9859aa0
 +        private fun validateTermination(state: State) {
 +            val step = state.step
 +            val hostResume = requireNotNull(step.hostResume)
-+            HarmonyOsMaintenanceHostBoot.requireRestarted(state.host(state.checkpoint.hostBefore), state.host(hostResume))
++            requireHostRestart(state, hostResume)
 +            HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(hostResume), state.host(requireNotNull(step.hostComplete)))
++            state.checkpoint.transition?.let {
++                val migrated = mapper.treeToValue(state.evidence.json(it)["hostObserved"], MaintenanceReference::class.java)
++                HarmonyOsMaintenanceHostBoot.requireSameBoot(state.host(migrated), state.host(hostResume))
++            }
 +            HarmonyOSUptimeObservation.requireRestarted(state.phone(requireNotNull(step.phoneBefore)), state.phone(requireNotNull(step.phoneAfter)))
 +            val expected = mapper.valueToTree<JsonNode>(mapOf("schemaVersion" to 1, "deviceId" to state.gate.deviceId,
 +                "ownerId" to state.gate.ownerId, "checkpointSha256" to state.gate.maintenance!!.checkpoint.sha256,
@@ -4270,6 +4396,11 @@ index 0000000..9859aa0
 +                    state.evidence.json(requireNotNull(reference))["hostCallId"].asText() == call.hostCallId &&
 +                    call.argumentsSha256 == E.digest(mapper.writeValueAsBytes(listOf("uptime"))))
 +            }
++        }
++        private fun requireHostRestart(state: State, reference: MaintenanceReference) {
++            val before = state.host(state.checkpoint.hostBefore); val after = state.host(reference)
++            if (state.checkpoint.transition == null) HarmonyOsMaintenanceHostBoot.requireRestarted(before, after)
++            else HarmonyOsMaintenanceHostBoot.requireRestartedAfterToolMigration(before, after)
 +        }
 +        private fun validateCleanup(state: State) {
 +            validateTermination(state)
@@ -9767,10 +9898,10 @@ index 0000000..c62e2ea
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
 new file mode 100644
-index 0000000..d9fa540
+index 0000000..4ceb551
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,345 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -9805,7 +9936,8 @@ index 0000000..d9fa540
 +
 +    private inner class Fixture(val root: Path, recording: Boolean = false) {
 +        val owner = UUID.randomUUID().toString()
-+        val tools: Map<String, MaintenanceTool>
++        var tools: Map<String, MaintenanceTool>
++        var powershellVersion = "7.5.0"
 +        val originalReceipt: Path
 +        val originalReceiptBytes: ByteArray
 +        val originalJournalBytes: ByteArray
@@ -9855,7 +9987,7 @@ index 0000000..d9fa540
 +                "provider" to mapOf("name" to "windows-gettickcount64-cim", "version" to 1),
 +                "observedAt" to "2026-10-30T0${index + 2}:00:00.000Z", "uptimeMilliseconds" to ticks,
 +                "lastBootUpTime" to boot, "machineIdSha256" to "a".repeat(64),
-+                "tools" to mapOf("powershell" to (mapper.convertValue(tools.getValue("powershell"), Map::class.java) + mapOf("version" to "7.5.0")),
++                "tools" to mapOf("powershell" to (mapper.convertValue(tools.getValue("powershell"), Map::class.java) + mapOf("version" to powershellVersion)),
 +                    "script" to tools.getValue("script"))))
 +            Files.write(path, mapper.writeValueAsBytes(node), StandardOpenOption.CREATE_NEW)
 +            // The production observer returns the persisted JSON, including its parsed number types.
@@ -9906,6 +10038,72 @@ index 0000000..d9fa540
 +            assertThat(after["operations"].single()["completed"].asBoolean()).isFalse()
 +            assertThat(after["operations"].single()["markerRemoved"].asBoolean()).isFalse()
 +        }
++    }
++
++    private fun Fixture.updatedPlan(checkpoint: MaintenanceReference): Path {
++        val executable = Path.of(tools.getValue("powershell").path)
++        Files.writeString(executable, "updated Windows PowerShell")
++        tools = tools + ("powershell" to HarmonyOsMaintenanceEvidence.fingerprint(executable))
++        powershellVersion = "7.5.1"
++        val plan = root.resolve("tool-approval.json")
++        Files.write(plan, mapper.writeValueAsBytes(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
++            "checkpointSha256" to checkpoint.sha256, "tools" to tools)))
++        return plan
++    }
++
++    @Test fun `explicit system update migration preserves old evidence and completes with new PowerShell version`() = fixture { f ->
++        val prepared = f.recovery().prepare(device, f.owner)
++        val oldCheckpoint = Files.readAllBytes(Path.of(prepared.evidenceDirectory).resolve(prepared.checkpoint.path))
++        val approval = f.updatedPlan(prepared.checkpoint)
++        assertThrows<AgentProtocolException> { f.recovery().resume(device, f.owner) }
++        val migrated = f.recovery().migrateHost(device, f.owner, approval)
++        assertThat(migrated.phase).isEqualTo("prepared")
++        assertThat(migrated.complete).isFalse()
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThat(Files.readAllBytes(Path.of(prepared.evidenceDirectory).resolve(prepared.checkpoint.path))).isEqualTo(oldCheckpoint)
++        assertThat(f.recovery().migrateHost(device, f.owner, approval).checkpoint).isEqualTo(migrated.checkpoint)
++        assertThat(f.recovery().resume(device, f.owner).phase).isEqualTo("phone_prepared")
++        assertThat(f.recovery().complete(device, f.owner).complete).isTrue()
++        f.assertOriginalPreserved()
++    }
++
++    @Test fun `migration rejects altered approval stale checkpoint extra tool and dependency changes without gate mutation`() {
++        for (mode in listOf("approval", "checkpoint", "script", "dependency", "extra", "no-restart", "missing-original")) fixture { f ->
++            val prepared = f.recovery().prepare(device, f.owner)
++            val approval = f.updatedPlan(prepared.checkpoint)
++            val before = Files.readAllBytes(gatePath(f.root, device))
++            if (mode == "approval") Files.writeString(approval, "{}")
++            if (mode == "checkpoint") {
++                val value = mapper.readTree(approval.toFile()).deepCopy<ObjectNode>(); value.put("checkpointSha256", "a".repeat(64))
++                Files.write(approval, mapper.writeValueAsBytes(value))
++            }
++            if (mode in listOf("script", "dependency", "extra")) {
++                val key = if (mode == "dependency") "classpath:0:fixture.jar" else "script"
++                val file = Path.of(f.tools.getValue(key).path); Files.writeString(file, "unexpected content")
++                f.tools = f.tools + ((if (mode == "extra") "extra" else key) to HarmonyOsMaintenanceEvidence.fingerprint(file))
++                Files.write(approval, mapper.writeValueAsBytes(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
++                    "checkpointSha256" to prepared.checkpoint.sha256, "tools" to f.tools)))
++            }
++            if (mode == "no-restart") f.unchangedHost = true
++            if (mode == "missing-original") Files.delete(Path.of(f.tools.getValue("hdc").path))
++            assertThrows<AgentProtocolException> { f.recovery().migrateHost(device, f.owner, approval) }
++            assertThat(Files.readAllBytes(gatePath(f.root, device))).isEqualTo(before)
++            assertThat(f.deviceCalls).isEqualTo(0)
++        }
++    }
++
++    @Test fun `migration cannot reset an already dispatched phone baseline`() = fixture { f ->
++        val prepared = f.recovery().prepare(device, f.owner); f.recovery().resume(device, f.owner)
++        val approval = f.updatedPlan(prepared.checkpoint); val gate = f.gate()
++        assertThrows<AgentProtocolException> { f.recovery().migrateHost(device, f.owner, approval) }
++        assertThat(f.gate()).isEqualTo(gate); assertThat(f.deviceCalls).isEqualTo(1)
++    }
++
++    @Test fun `another host restart after migration rejects resume before device dispatch`() = fixture { f ->
++        val prepared = f.recovery().prepare(device, f.owner); val approval = f.updatedPlan(prepared.checkpoint)
++        f.recovery().migrateHost(device, f.owner, approval); f.secondHostRestart = true
++        assertThrows<AgentProtocolException> { f.recovery().resume(device, f.owner) }
++        assertThat(f.deviceCalls).isEqualTo(0)
 +    }
 +
 +    @Test fun `ordered restart chain releases only through verified receipt three without rewriting original failure`() = fixture { f ->

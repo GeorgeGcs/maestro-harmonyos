@@ -18,6 +18,8 @@ class MaintenanceProducer {
     final Map<String, HarmonyOsMaintenanceHostBoot.Tool> tools = new TreeMap<>();
     int hosts, calls;
     final boolean failObservation;
+    boolean migrate;
+    String powershellVersion = "5.1.1.1";
 
     MaintenanceProducer(Path root, boolean failObservation) throws Exception {
         this.root = root;
@@ -39,7 +41,7 @@ class MaintenanceProducer {
         try {
             int index = hosts++;
             Map<String, Object> ps = new LinkedHashMap<>(JSON.convertValue(tools.get("powershell"), Map.class));
-            ps.put("version", "5.1.1.1");
+            ps.put("version", powershellVersion);
             var value = Map.of("protocol", "maestro.harmonyos.host-boot-observation", "schemaVersion", 1,
                 "provider", Map.of("name", "windows-gettickcount64-cim", "version", 1),
                 "observedAt", "2026-10-30T0" + (index + 2) + ":00:00.000Z",
@@ -89,7 +91,18 @@ class MaintenanceProducer {
         });
         var recovery = new HarmonyOsMaintenanceRecovery(root, tools, this::observe, this::transport,
             (directory, gate) -> { HarmonyOsSessionLeaseKt.writeGate(directory, gate); return Unit.INSTANCE; });
-        write("prepared.json", recovery.prepare(DEVICE, owner).toMap());
+        var prepared = recovery.prepare(DEVICE, owner);
+        write("prepared.json", prepared.toMap());
+        if (migrate) {
+            Path executable = Path.of(tools.get("powershell").getPath());
+            Files.writeString(executable, "updated fixture PowerShell");
+            tools.put("powershell", HarmonyOsMaintenanceEvidence.Companion.fingerprint(executable));
+            powershellVersion = "5.1.1.2";
+            write("approval.json", Map.of("schemaVersion", 1, "reason", "windows_powershell_update",
+                "checkpointSha256", prepared.getCheckpoint().getSha256(), "tools", tools));
+            write("migrated.json", recovery.migrateHost(DEVICE, owner, root.resolve("approval.json")).toMap());
+            if (calls != 0) throw new AssertionError("Migration dispatched a device call");
+        }
         if (failObservation) {
             try { recovery.resume(DEVICE, owner); throw new AssertionError("Lost query released"); }
             catch (AgentProtocolException expected) { }
@@ -118,8 +131,10 @@ class MaintenanceProducer {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2 || !Set.of("complete", "unconfirmed").contains(args[1]))
-            throw new IllegalArgumentException("NEW_OUTPUT_DIRECTORY complete|unconfirmed");
-        new MaintenanceProducer(Path.of(args[0]).toAbsolutePath().normalize(), args[1].equals("unconfirmed")).run();
+        if (args.length != 2 || !Set.of("complete", "unconfirmed", "migrated").contains(args[1]))
+            throw new IllegalArgumentException("NEW_OUTPUT_DIRECTORY complete|unconfirmed|migrated");
+        var producer = new MaintenanceProducer(Path.of(args[0]).toAbsolutePath().normalize(), args[1].equals("unconfirmed"));
+        producer.migrate = args[1].equals("migrated");
+        producer.run();
     }
 }

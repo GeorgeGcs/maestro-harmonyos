@@ -21,7 +21,7 @@ async function withMaintenance(t, producer = false) {
   let maintenance;
   if (producer) {
     const produced = spawnSync(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
-      path.join(repo, 'scripts/tests/fixtures/MaintenanceProducer.java'), f.record.recoveryRoot, 'complete'],
+      path.join(repo, 'scripts/tests/fixtures/MaintenanceProducer.java'), f.record.recoveryRoot, producer === 'migrated' ? 'migrated' : 'complete'],
     { encoding: 'utf8', windowsHide: true, timeout: 60000 });
     assert.equal(produced.status, 0, produced.stderr);
     maintenance = { input: JSON.parse(await fs.readFile(path.join(f.record.recoveryRoot, 'input.json'), 'utf8')) };
@@ -49,6 +49,20 @@ test('JVM coordinator output passes Node release verification and the full CI ar
   assert.equal(report.originals.result.cleanup.state, 'unknown');
   assert.equal(await fileHash(f.resultPath), before);
   assert.ok(report.files.filter(file => file.path.startsWith('recovery/maintenance/')).length > 25);
+});
+
+test('JVM migrated checkpoint preserves the old chain through Node verification and CI archive', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI,
+}, async t => {
+  const f = await withMaintenance(t, 'migrated');
+  const report = await f.collect(f.options);
+  assert.equal(report.status, 'complete', JSON.stringify(report.issues));
+  assert.equal(report.recoveryEvidence, 'maintenance_receipt_and_chain');
+  assert.equal(report.originals.ci.execution, 'failed');
+  assert.ok(report.files.some(file => path.basename(file.source).startsWith('host-tool-transition-')));
+  assert.ok(report.files.some(file => path.basename(file.source).startsWith('tool-approval-')));
+  const checkpoints = report.files.filter(file => path.basename(file.source).startsWith('checkpoint-'));
+  assert.equal(checkpoints.length, 2);
 });
 
 test('archives a completed maintenance chain beside the immutable failed CI result', async t => {

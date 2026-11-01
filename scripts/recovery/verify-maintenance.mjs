@@ -99,8 +99,46 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
     return record.value;
   }
   const cp = await ref(management.checkpoint), final = await ref(management.head);
-  fields(cp, 'schemaVersion maintenanceId deviceId ownerId generation createdAt originalGate originalJournal originalReceipt hostBefore tools');
-  requireValue(cp.schemaVersion === 1 && cp.maintenanceId === management.maintenanceId && cp.deviceId === deviceId && cp.ownerId === ownerId && uuid(cp.generation), 'Checkpoint identity differs.');
+  const checkpointFields = 'schemaVersion maintenanceId deviceId ownerId generation createdAt originalGate originalJournal originalReceipt hostBefore tools';
+  fields(cp, checkpointFields + (cp.schemaVersion === 2 ? ' transition' : ''));
+  requireValue([1, 2].includes(cp.schemaVersion) && cp.maintenanceId === management.maintenanceId && cp.deviceId === deviceId && cp.ownerId === ownerId && uuid(cp.generation), 'Checkpoint identity differs.');
+  let priorCheckpoint = cp, migrationHost = null;
+  if (cp.schemaVersion === 2) {
+    const transition = await ref(cp.transition);
+    fields(transition, 'schemaVersion reason previousCheckpoint previousHead previousGate approval hostObserved');
+    requireValue(transition.schemaVersion === 1 && transition.reason === 'windows_powershell_update', 'Unsupported tool transition.');
+    priorCheckpoint = await ref(transition.previousCheckpoint);
+    fields(priorCheckpoint, checkpointFields);
+    const { transition: ignored, ...base } = cp;
+    requireValue(priorCheckpoint.schemaVersion === 1 && equal({ ...base, schemaVersion: 1,
+      createdAt: priorCheckpoint.createdAt, tools: priorCheckpoint.tools }, priorCheckpoint), 'Migration changed original checkpoint scope.');
+    const prepared = await ref(transition.previousHead); fields(prepared, stepFields);
+    requireValue(equal({ ...prepared, observedAt: null }, { schemaVersion: 1, checkpointSha256: transition.previousCheckpoint.sha256,
+      revision: 0, previous: null, phase: 'prepared', observedAt: null, journal: cp.originalJournal, calls: [], hostResume: null,
+      phoneBefore: null, hostComplete: null, phoneAfter: null, termination: null, cleanupBatches: [], receipt: null }), 'Migration followed device dispatch.');
+    const oldGate = await ref(transition.previousGate);
+    fields(oldGate, 'schemaVersion deviceId ownerSessionId state journalPath updatedAt closeFailure reportPath reportSha256 requiresRecovery uncertainReason unresolvedRecording maintenance');
+    requireValue(oldGate.schemaVersion === 2 && oldGate.deviceId === deviceId && oldGate.ownerSessionId === ownerId &&
+      oldGate.state === 'quarantined' && oldGate.requiresRecovery === true && oldGate.closeFailure === null && oldGate.unresolvedRecording === false &&
+      same(oldGate.journalPath, gate.journalPath) && equal(oldGate.maintenance, { maintenanceId: cp.maintenanceId,
+        checkpoint: transition.previousCheckpoint, head: transition.previousHead }), 'Migration lacks its prior occupied gate.');
+    requireValue(equal(await ref(transition.approval), { schemaVersion: 1, reason: 'windows_powershell_update',
+      checkpointSha256: transition.previousCheckpoint.sha256, tools: cp.tools }), 'Migration was not bound to approved tools.');
+    for (const name of ['java', 'hdc', 'script']) requireValue(equal(cp.tools[name], priorCheckpoint.tools[name]), 'Nonmigratable tool changed.');
+    requireValue(cp.tools.powershell.path === priorCheckpoint.tools.powershell.path && !equal(cp.tools.powershell, priorCheckpoint.tools.powershell), 'PowerShell replacement differs.');
+    function jars(tools) {
+      const entries = Object.entries(tools).filter(([key]) => key.startsWith('classpath:')).map(([, item]) => [path.win32.basename(item.path), item]);
+      requireValue(entries.length > 0 && new Set(entries.map(([name]) => name)).size === entries.length && Object.keys(tools).length === entries.length + 4,
+        'Invalid migration tool membership.');
+      return Object.fromEntries(entries);
+    }
+    const oldJars = jars(priorCheckpoint.tools), newJars = jars(cp.tools);
+    requireValue(equal(Object.keys(oldJars).sort(), Object.keys(newJars).sort()), 'Migration dependency membership changed.');
+    for (const [name, item] of Object.entries(oldJars)) if (!/^maestro-(cli|client|orchestra|orchestra-models)(-[0-9][A-Za-z0-9._+-]*)?\.jar$/.test(name)) {
+      requireValue(item.sha256 === newJars[name].sha256 && item.bytes === newJars[name].bytes, 'Migration dependency bytes changed.');
+    }
+    migrationHost = await ref(transition.hostObserved);
+  }
   const original = await ref(cp.originalJournal), originalGate = await ref(cp.originalGate), originalReceipt = await ref(cp.originalReceipt);
   requireValue(original.version === 1 && original.deviceId === deviceId && original.ownerId === ownerId && original.generation === cp.generation &&
     original.remoteRoot === '/data/local/tmp/maestro-session-' + cp.generation && original.sealed === true &&
@@ -156,9 +194,18 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
   requireValue((await read(gate.journalPath)).sha256 === final.journal.sha256, 'Current journal changed after maintenance.');
   const hostBefore = await ref(cp.hostBefore), hostResume = await ref(final.hostResume), hostComplete = await ref(final.hostComplete);
   // The provider carries PowerShell's version; checkpoint fingerprints intentionally omit it.
-  const expectedTools = { powershell: { ...cp.tools.powershell, version: hostBefore.tools?.powershell?.version }, script: cp.tools.script };
-  parseObservation(hostBefore, expectedTools);
-  requireValue(restarted(hostBefore, hostResume, expectedTools).confirmed && sameBoot(hostResume, hostComplete, expectedTools).confirmed, 'Ordered host restart is unconfirmed.');
+  const oldTools = { powershell: { ...priorCheckpoint.tools.powershell, version: hostBefore.tools?.powershell?.version }, script: priorCheckpoint.tools.script };
+  const expectedTools = { powershell: { ...cp.tools.powershell,
+    version: (migrationHost ?? hostBefore).tools?.powershell?.version }, script: cp.tools.script };
+  parseObservation(hostBefore, oldTools);
+  if (migrationHost) {
+    parseObservation(migrationHost, expectedTools); parseObservation(hostResume, expectedTools);
+    for (const current of [migrationHost, hostResume]) requireValue(current.machineIdSha256 === hostBefore.machineIdSha256 &&
+      current.observedAt > hostBefore.observedAt && current.lastBootUpTime !== hostBefore.lastBootUpTime &&
+      BigInt(current.uptimeMilliseconds) < BigInt(hostBefore.uptimeMilliseconds), 'Migrated host restart is unconfirmed.');
+    requireValue(sameBoot(migrationHost, hostResume, expectedTools).confirmed, 'Host restarted again after migration.');
+  } else requireValue(restarted(hostBefore, hostResume, expectedTools).confirmed, 'Ordered host restart is unconfirmed.');
+  requireValue(sameBoot(hostResume, hostComplete, expectedTools).confirmed, 'Host changed during maintenance.');
   const before = await ref(final.phoneBefore), after = await ref(final.phoneAfter);
   requireValue(phone(after, deviceId, ownerId) < phone(before, deviceId, ownerId), 'Phone uptime did not decrease.');
   for (const [phase, reference, observation] of [['host_verified', final.phoneBefore, before], ['phone_prepared', final.phoneAfter, after]]) {

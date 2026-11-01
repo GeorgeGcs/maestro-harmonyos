@@ -10,7 +10,8 @@
 | 维护最终凭据 | schemaVersion 3 | 使用 [maintenance-receipt-v3.schema.json](maintenance-receipt-v3.schema.json)；不按普通 v2 读取 |
 | 维护响应 | protocol=harmonyos.reboot-recovery，schemaVersion=1 | 使用 [maintenance-response-v1.schema.json](maintenance-response-v1.schema.json) |
 | 占用记录 | schemaVersion 2 | 含 maintenanceId、checkpoint、head；由维护核验器与设备锁共同处理 |
-| 检查点、阶段记录 | schemaVersion 1 | 内部证据链，字段和跨文件关系由维护核验器检查 |
+| 检查点 | schemaVersion 1/2 | v2 增加 transition 引用，关联工具更新前的 v1 检查点与初始阶段 |
+| 阶段记录 | schemaVersion 1 | 内部证据链，字段和跨文件关系由维护核验器检查 |
 
 最终凭据 v3 只在清理完成后产生。中途失败保留阶段记录和占用，不生成一个声称完成的凭据。响应的 `phase=complete`、`state=complete`、`cleanup.state=complete`、`handoffReady=true` 必须同时成立，并引用 v3 凭据；其他阶段不允许接管。
 
