@@ -18388,10 +18388,10 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..425a143
+index 0000000..f348982
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,443 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -18428,9 +18428,10 @@ index 0000000..425a143
 +                        val script = command.last().replace(state["remoteRoot"].asText(), "./owned")
 +                        check(!script.contains("/data/local/tmp"))
 +                        val stdout = work.resolve("stdout.txt"); val stderr = work.resolve("stderr.txt")
-+                        val builder = ProcessBuilder(shell, "-c", script).directory(work.toFile())
++                        // A file avoids Windows native argv rewriting nested POSIX quotes.
++                        Files.writeString(work.resolve("cleanup.sh"), "PATH=/usr/bin:/bin:\"\$PATH\"; export PATH\n" + script + "\n")
++                        val builder = ProcessBuilder(shell, "cleanup.sh").directory(work.toFile())
 +                            .redirectOutput(stdout.toFile()).redirectError(stderr.toFile())
-+                        builder.environment()["PATH"] = Path.of(shell).parent.toString() + java.io.File.pathSeparator + System.getenv("PATH")
 +                        val process = builder.start()
 +                        try {
 +                            check(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) { "Test shell timed out" }
@@ -18455,7 +18456,9 @@ index 0000000..425a143
 +                journal.seal()
 +                val report = journal.recover(hdc)
 +                val successful = mode in listOf("normal", "missing-directory")
-+                assertThat(report.state).isEqualTo(if (successful) "complete" else "unknown")
++                org.junit.jupiter.api.Assertions.assertEquals(if (successful) "complete" else "unknown", report.state) {
++                    "$mode: ${report.issues}; stderr=${if (Files.exists(work.resolve("stderr.txt"))) Files.readString(work.resolve("stderr.txt")) else "absent"}"
++                }
 +                assertThat(Files.readString(work.resolve("outside"))).isEqualTo("keep")
 +                if (successful) assertThat(Files.exists(owned)).isFalse()
 +                else {
