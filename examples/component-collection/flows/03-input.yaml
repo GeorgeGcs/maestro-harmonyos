@@ -16,7 +16,12 @@ name: component-collection-input
 - assertVisible: '0/12'
 - tapOn:
     text: 当前最大输入12字符
+    # The full-width counter overlays the input's center; tap above it within the input.
+    point: "50%,15%"
     retryTapIfNoChange: false
+- assertVisible:
+    text: 当前最大输入12字符
+    focused: true
 - inputText: maestro12345
 - assertVisible: maestro12345
 - assertVisible: '12/12'
