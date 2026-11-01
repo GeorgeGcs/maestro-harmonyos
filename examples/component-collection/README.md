@@ -1,6 +1,6 @@
 # ComponentCollection 场景
 
-这组 YAML 对照 ComponentCollection 源码编写，覆盖按钮、弹窗、文本输入，以及滚动后重新定位输入框。四条场景均已分别完成单机开发预跑；各场景结果和边界见下文，不能据此声明重复稳定性通过。
+这组 YAML 对照 ComponentCollection 源码编写，覆盖按钮、弹窗、文本输入，以及滚动后重新定位输入框。四条场景已完成单条预跑和一次同会话录屏批次；各场景结果和边界见下文，不能据此声明重复稳定性通过。
 
 参考应用仓库为 `HarmonyOS_Samples/component-collection`，本地参考源码提交为 `38a78a4aedfbf332ecc5da768b55d28d416474f0`；该提交与官方远端的对应关系尚未独立核实。页面位于 `entry/src/main/ets/pages/`，中文资源位于 `entry/src/main/resources/zh_CN/element/string.json`。应用由使用者自行构建、签名并安装，本目录不包含 HAP、签名文件或设备配置。
 
@@ -21,6 +21,17 @@
 ```
 
 单条通过后，`FlowPath` 可改为 `./examples/component-collection/flows` 批量执行，需按预跑耗时设置整个套件的超时。`common/` 是依赖目录，不单独执行；其参数由顶层 Flow 传入。用例没有添加失败自动重试，便于保留首次失败位置。
+
+同一会话批量执行时，把目录交给一次 CLI 调用；逐条启动 runner 会创建多个会话。四条场景的开发运行约需十分钟，可先为整批预留二十分钟：
+
+```powershell
+./scripts/run-harmonyos.ps1 `
+  -FlowPath ./examples/component-collection/flows `
+  -BundleId ohos.samples.componentcollection -AbilityName MainAbility -Module entry `
+  -DeviceId YOUR_DEVICE_ID -RunTimeoutSeconds 1200
+```
+
+批次是否通过需同时检查进程退出码、执行结果和 `cleanup.state`。控制台显示 `Flows Passed` 后仍可能发生会话清理失败；此时先按恢复报告处理，不能直接启动下一批。
 
 ## 场景和断言
 
@@ -53,7 +64,7 @@
 
 首次按钮运行的 UI 断言通过，但原 10 秒收尾预算不足，整次运行保留 unknown；显式恢复完成剩余清理后，使用 30 秒收尾预算重新运行通过。首次输入运行没有取得输入框焦点，文本断言失败；它的清理完成，原失败证据保留。两次修复后的通过均属于新的运行，不覆盖原记录。
 
-以上是分开执行的开发用例，尚未验证四条 Flow 在同一会话下批量执行、带录屏的同组场景或固定版本的 20 轮稳定性。不同构建和不同 YAML 版本不合并计算通过率。
+以上为分开执行的预跑。随后四条普通 Flow 同会话执行时，UI 断言全部通过，但清理超时，整批保留 `unknown`；显式恢复后完成剩余清理。修复批量清理命令的执行开销后，四条录屏入口在同一会话中 4/4 通过，CLI 退出码 0，清理 `complete`，四段原始视频完整解码通过，详见 [11-01 记录](../../docs/progress/2026-11-01.md)。固定版本的 20 轮稳定性尚未验证，不同构建和不同 YAML 版本不合并计算通过率。
 
 ## 带录屏的入口
 
@@ -62,17 +73,18 @@
 ```powershell
 $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 $env:MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA = 'false'
+$env:MAESTRO_HARMONYOS_RECORDING_MAX_SECONDS = '300'
 ./scripts/run-harmonyos.ps1 `
   -FlowPath ./examples/component-collection/recorded/01-buttons.yaml `
   -BundleId ohos.samples.componentcollection -AbilityName MainAbility -Module entry `
   -DeviceId YOUR_DEVICE_ID -RunTimeoutSeconds 360
 ```
 
-系统录屏仍为实验功能。先逐条预跑并检查每段原始视频的完整解码结果，再决定是否进入批次。超时值只是起点，需计入实际交互、导出和收尾耗时；外层超时不会提高录屏后端的时长上限。也不要通过添加等待来掩盖短录屏失败。
+系统录屏仍为实验功能。先逐条预跑并检查每段原始视频的完整解码结果，再决定是否进入批次。弹窗正文的单机预跑已超过默认的 180 秒录屏上限，因此示例显式设为 300 秒；该值需按实际场景耗时选择，允许范围为 1～600 秒。runner 超时需另行计入交互、导出和收尾耗时；外层超时不会提高录屏后端的时长上限。也不要通过添加等待来掩盖短录屏失败。
 
 断言失败会跳过 YAML 末尾的 `stopRecording`，由 Maestro 执行器的录屏收尾处理。正文错误、录屏关闭错误、设备清理状态分别保留：断言失败且清理完成仍是测试失败；清理 unknown 时应停止后续设备任务。进程被强制终止不能依赖这个收尾保证，需要按[恢复说明](../../docs/session-maintenance.md)处理。不能为“尽量跑完”忽略录屏错误。
 
-当前录屏入口只通过原生解析和源码步骤关联检查，未在设备上执行。原始视频校验见[录屏检查](../../docs/recording-diagnostics.md)。正式验证的 sourceRoot 应包含 `flows/` 与 `recorded/`，并重新生成源码索引和计划指纹，不能沿用未录屏版本的覆盖清单。
+本组录屏入口已在单台设备完成一次同会话批量验证。运行整组时，将上面的 `FlowPath` 改为 `./examples/component-collection/recorded`，并使用 `-RunTimeoutSeconds 1200`；每段录屏上限仍为 300 秒。原始视频校验见[录屏检查](../../docs/recording-diagnostics.md)。正式验证的 sourceRoot 应包含 `flows/` 与 `recorded/`，并重新生成源码索引和计划指纹，不能沿用未录屏版本的覆盖清单。
 
 主机解析检查可使用 JDK 17 和已构建 CLI；输出文件须不存在：
 
