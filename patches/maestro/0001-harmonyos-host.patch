@@ -8801,7 +8801,7 @@ index 0000000..cfe659a
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 new file mode 100644
-index 0000000..ab19e9e
+index 0000000..5d9b3da
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 @@ -0,0 +1,522 @@
@@ -8840,7 +8840,7 @@ index 0000000..ab19e9e
 +            val hdc = HdcClient("test-hdc", HdcCommandRunner { command, timeout ->
 +                val script = command.last()
 +                val ack = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)?.value
-+                if (ack != null) HdcCommandResult(0, "${ack}0\n", "")
++                if (ack != null) HdcCommandResult(0, "\n${ack}0\n", "")
 +                else {
 +                    budgets += timeout
 +                    // Model a cleanup transport that needs more than the old ten-second budget.
