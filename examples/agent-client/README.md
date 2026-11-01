@@ -93,6 +93,8 @@ CLI 使用新的任务与尝试标识。示例保存 CLI 的实际退出码，�
 
 对于通过独立 `harmonyos-recovery` 入口完成的维护，可用 `maintenance.mjs` 导出的 `verifyMaintenanceReport({ deviceId, recoveryRoot, createdAt, responsePath })` 核验保存的完整响应和磁盘证据。`createdAt` 使用原作业创建时间，`recoveryRoot` 来自调用方已知的配置，不能从待验证响应中推断。该函数不发送 RPC、不自动恢复或执行设备动作。返回的 `releaseConfirmed` 只表示维护释放证据完整，原用例结果仍为未知；下一次执行需要重新取得设备锁。普通 `runWorkflow` 不会自行触发重启维护。详见[维护说明](../../docs/session-maintenance.md)。
 
+对于 `harmonyos-cleanup-recovery` 的清理隔离响应，使用 `cleanup-fence.mjs` 中的 `verifyCleanupFenceReport({ deviceId, recoveryRoot, createdAt, responsePath })`，参数来源与维护核验相同。它核对版本 4 回执及完整事务链，不派发设备命令。成功表示旧派发已被阻止并允许新会话，原命令仍未确认；已登记的阻挡目录必须保留。普通 `runWorkflow` 不自动触发此恢复，具体条件见[清理恢复说明](../../docs/cleanup-fence-recovery.md)。
+
 设备标识、应用内容、输入文字、截图和本机路径可能出现在这些文件中。仓库的 `artifacts/`、`.local/` 已忽略；使用其他目录时自行设置忽略规则，分享前检查材料。
 
 ## 恢复范围

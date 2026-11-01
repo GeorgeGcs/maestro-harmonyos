@@ -12,7 +12,8 @@ export async function fixtureRuntime(project) {
   const fixtureRepository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
   for (const relative of ['scripts/validation/io.mjs', 'scripts/validation/static-flows.mjs',
     'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs',
-    'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs']) {
+    'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
+    'scripts/recovery/verify-cleanup-fence.mjs', 'scripts/recovery/cleanup-fence-scripts.mjs']) {
     const source = path.join(fixtureRepository, relative), destination = path.join(project, relative);
     if (path.resolve(source) === path.resolve(destination)) continue;
     await fs.mkdir(path.dirname(destination), { recursive: true }); await fs.copyFile(source, destination);

@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { collectArtifacts } from '../ci/collect-artifacts.mjs';
 import { maintenanceFixture } from './fixtures/maintenance.mjs';
 import { verifyMaintenanceRelease } from '../recovery/verify-maintenance.mjs';
+import { verifyState, verifyDeviceRelease } from '../ci/verify-state.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const parent = path.join(repo, 'artifacts/ci-archive-tests');
@@ -15,6 +16,49 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const write = async (file, value) => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, typeof value === 'string' ? value : JSON.stringify(value)); };
 const fileHash = async file => hash(await fs.readFile(file));
 const document = (kind, data) => ({ protocol: 'maestro.harmonyos.agent', schemaVersion: 1, kind, revision: 1, observedAt: new Date().toISOString(), data });
+
+test('production cleanup-fence evidence is archived without changing the failed CI result', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI || !process.env.MAESTRO_TEST_BASH,
+}, async t => {
+  const f = await fixture(t, 'failed', 'unknown', 'cleanup-fence-fixture');
+  const produced = spawnSync(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+    path.join(repo, 'scripts/tests/fixtures/CleanupFenceProducer.java'), f.record.recoveryRoot, process.env.MAESTRO_TEST_BASH, 'complete'],
+  { encoding: 'utf8', windowsHide: true, timeout: 90000 });
+  assert.equal(produced.status, 0, produced.stderr);
+  const input = JSON.parse(await fs.readFile(path.join(f.record.recoveryRoot, 'input.json'), 'utf8'));
+  const checked = await verifyState({ ...input, mode: 'recovery', recoveryReportPath: input.responsePath });
+  f.record.createdAt = input.createdAt;
+  f.result.data.cleanup.errors.push({ code: 'DEVICE_RECOVERY_REQUIRED', details: { recoverySessionId: checked.sessionId } });
+  await f.persist();
+  const before = await fileHash(f.resultPath);
+  const recovered = { ...f.record, state: 'released', updatedAt: new Date().toISOString(), resolution: checked };
+  const recoveryStateRecord = path.join(f.root, 'fence-recovered-state.json'); await write(recoveryStateRecord, recovered);
+  // The archive is bound to the old receipt, not to whichever owner is current when it is collected.
+  await write(path.join(f.record.recoveryRoot, hash(f.record.deviceId) + '.owner.json'), { ownerSessionId: randomUUID() });
+  const report = await f.collect({ recoveryStateRecord, expectedLaunchId: f.record.launchId });
+  assert.equal(report.status, 'complete', JSON.stringify(report.issues));
+  assert.equal(report.recoveryEvidence, 'cleanup_fence_receipt_and_chain');
+  assert.equal(report.originals.result.cleanup.state, 'unknown');
+  assert.equal(await fileHash(f.resultPath), before);
+});
+
+test('later ordinary session archives its inherited cleanup barriers', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI || !process.env.MAESTRO_TEST_BASH,
+}, async t => {
+  const f = await fixture(t, 'passed', 'complete', 'cleanup-fence-fixture');
+  const produced = spawnSync(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+    path.join(repo, 'scripts/tests/fixtures/CleanupFenceProducer.java'), f.record.recoveryRoot, process.env.MAESTRO_TEST_BASH, 'new-lease'],
+  { encoding: 'utf8', windowsHide: true, timeout: 90000 });
+  assert.equal(produced.status, 0, produced.stderr);
+  const input = JSON.parse(await fs.readFile(path.join(f.record.recoveryRoot, 'input.json'), 'utf8'));
+  f.record.createdAt = input.createdAt;
+  f.record.resolution = await verifyDeviceRelease(input);
+  await f.persist();
+  const report = await f.collect();
+  assert.equal(report.status, 'complete', JSON.stringify(report.issues));
+  assert.equal(report.retainedFenceEvidence, 'receipt_and_chain');
+  assert.ok(report.files.some(file => file.path.startsWith('recovery/retained/')));
+});
 
 async function withMaintenance(t, producer = false) {
   const f = await fixture(t, 'failed', 'unknown', producer ? 'maintenance-producer-fixture' : undefined);

@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { validateDocument } from '../../examples/agent-client/client.mjs';
 import { verifyRecordingResources } from '../../examples/agent-client/evidence.mjs';
 import { verifyMaintenanceRelease } from '../recovery/verify-maintenance.mjs';
+import { verifyCleanupFenceGate } from '../recovery/verify-cleanup-fence.mjs';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -95,7 +96,11 @@ async function checkedGate(deviceId, recoveryRoot, since, responsePath = null) {
   const gateFile = path.resolve(recoveryRoot, `${key}.owner.json`);
   const { value: gate } = await checkedFile(gateFile);
   if (gate.schemaVersion === 2) return verifyMaintenanceRelease({ deviceId, recoveryRoot, createdAt: since, responsePath });
-  if (gate.schemaVersion !== 1 || gate.deviceId !== deviceId || !uuid.test(gate.ownerSessionId) || gate.state !== 'clean' ||
+  if (gate.schemaVersion === 3) {
+    const fenced = await verifyCleanupFenceGate({ deviceId, recoveryRoot, createdAt: since, responsePath });
+    if (fenced.release) return { ...fenced.release, retainedFenceCount: fenced.retainedFenceCount, fenceCheckedFiles: fenced.checkedFiles };
+  }
+  if (![1, 3].includes(gate.schemaVersion) || gate.deviceId !== deviceId || !uuid.test(gate.ownerSessionId) || gate.state !== 'clean' ||
       gate.requiresRecovery !== false || gate.unresolvedRecording !== false || gate.closeFailure !== null) {
     throw new Error('The existing device lease does not confirm clean release.');
   }
@@ -117,7 +122,8 @@ async function checkedGate(deviceId, recoveryRoot, since, responsePath = null) {
   if (value.schemaVersion === 1 && 'recordingResources' in value) throw new Error('A v1 cleanup receipt cannot contain v2 recording resources.');
   const recording = await verifyRecordingResources(value, receipt.path, recoveryRoot);
   return { sessionId: gate.ownerSessionId, reportPath: receipt.path, reportSha256: receipt.sha256, observedAt: value.observedAt,
-    recordingResources: value.recordingResources ?? null, recordingCheckedFiles: recording.checkedFiles };
+    recordingResources: value.recordingResources ?? null, recordingCheckedFiles: recording.checkedFiles,
+    ...(gate.schemaVersion === 3 ? { deviceGateVersion: 3, retainedFences: gate.retainedFences } : {}) };
 }
 
 export async function verifyDeviceRelease({ deviceId, recoveryRoot, createdAt }) {
@@ -132,6 +138,12 @@ export async function verifyState(input) {
   }
   const gate = await checkedGate(input.deviceId, input.recoveryRoot, input.createdAt,
     input.mode === 'recovery' ? input.recoveryReportPath : null);
+  if (gate.cleanupFenceId) {
+    if (input.mode !== 'recovery' || !gate.recoveryResponseSha256) {
+      throw new Error('Cleanup fencing cannot establish completion of the original execution.');
+    }
+    return { mode: 'recovery', recoveryKind: 'cleanup_fence', releaseConfirmed: true, ...gate };
+  }
   if (gate.maintenanceId) {
     if (input.mode !== 'recovery' || !gate.recoveryResponseSha256) {
       throw new Error('Maintenance release cannot establish completion of the original execution.');

@@ -51,6 +51,7 @@ try {
     foreach ($relative in @('scripts/test-validation-plan.ps1', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-state.mjs',
         'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
         'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
+        'scripts/recovery/verify-cleanup-fence.mjs', 'scripts/recovery/cleanup-fence-scripts.mjs',
         'scripts/tests/validation-fixture.mjs', 'examples/agent-client/client.mjs', 'examples/agent-client/evidence.mjs')) {
         Copy-Item -LiteralPath (Join-Path $projectRoot $relative) -Destination (Join-Path $fixture $relative)
     }

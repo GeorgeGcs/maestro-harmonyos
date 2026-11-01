@@ -63,19 +63,20 @@ index c2ccec4..baefea6 100644
        "optional": true,
        "os": [
 diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
-index 8df1b2f..cc80a13 100644
+index 8df1b2f..4d6916d 100644
 --- a/maestro-cli/src/main/java/maestro/cli/App.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/App.kt
-@@ -29,6 +29,8 @@ import maestro.cli.command.CheckSyntaxCommand
+@@ -29,6 +29,9 @@ import maestro.cli.command.CheckSyntaxCommand
  import maestro.cli.command.CloudCommand
  import maestro.cli.command.DownloadSamplesCommand
  import maestro.cli.command.DriverCommand
 +import maestro.cli.command.HarmonyOsBridgeCommand
 +import maestro.cli.command.HarmonyOsRecoveryCommand
++import maestro.cli.command.HarmonyOsCleanupRecoveryCommand
  import maestro.cli.command.ListCloudDevicesCommand
  import maestro.cli.command.ListDevicesCommand
  import maestro.cli.command.LoginCommand
-@@ -41,6 +43,7 @@ import maestro.cli.command.StartDeviceCommand
+@@ -41,6 +44,7 @@ import maestro.cli.command.StartDeviceCommand
  import maestro.cli.command.StudioCommand
  import maestro.cli.command.TestCommand
  import maestro.cli.insights.TestAnalysisManager
@@ -83,16 +84,17 @@ index 8df1b2f..cc80a13 100644
  import maestro.cli.mcp.claimMcpStdout
  import maestro.cli.update.Updates
  import maestro.cli.util.ChangeLogUtils
-@@ -76,6 +79,8 @@ import kotlin.system.exitProcess
+@@ -76,6 +80,9 @@ import kotlin.system.exitProcess
          CheckSyntaxCommand::class,
          DriverCommand::class,
          McpCommand::class,
 +        HarmonyOsBridgeCommand::class,
 +        HarmonyOsRecoveryCommand::class,
++        HarmonyOsCleanupRecoveryCommand::class,
      ]
  )
  class App {
-@@ -88,7 +93,7 @@ class App {
+@@ -88,7 +95,7 @@ class App {
      @Option(names = ["-v", "--version"], versionHelp = true, description = ["Display CLI version"])
      var requestedVersion: Boolean? = false
  
@@ -101,7 +103,7 @@ index 8df1b2f..cc80a13 100644
      var platform: String? = null
  
      @Option(names = ["--host"], hidden = true)
-@@ -123,6 +128,7 @@ fun main(args: Array<String>) {
+@@ -123,6 +130,7 @@ fun main(args: Array<String>) {
      // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
      // channel and break the handshake for strict clients like Claude Desktop.
      if (args.firstOrNull() == "mcp") claimMcpStdout()
@@ -138,6 +140,66 @@ index 0000000..a7b39b1
 +        return HarmonyOsBridgeServer(
 +            System.`in`, HarmonyOsBridgeStdout.output, System.err, HarmonyOsRecorderBackend(),
 +        ).run()
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsCleanupRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsCleanupRecoveryCommand.kt
+new file mode 100644
+index 0000000..d6f032b
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsCleanupRecoveryCommand.kt
+@@ -0,0 +1,54 @@
++package maestro.cli.command
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.cli.App
++import maestro.cli.session.HarmonyOsCleanupFenceEvidence
++import maestro.cli.session.HarmonyOsCleanupFenceRecovery
++import maestro.cli.session.HarmonyOsMaintenanceEvidence
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.harmonyos.hdc.HdcClient
++import picocli.CommandLine
++import java.io.File
++import java.nio.file.Path
++import java.util.concurrent.Callable
++
++@CommandLine.Command(name = "harmonyos-cleanup-recovery", mixinStandardHelpOptions = true,
++    description = ["Isolate one unconfirmed layout cleanup without rebooting; retain the old dispatch barrier"])
++class HarmonyOsCleanupRecoveryCommand : Callable<Int> {
++    @CommandLine.ParentCommand private var parent: App? = null
++    @CommandLine.Option(names = ["--session"], required = true) private lateinit var owner: String
++    @CommandLine.Option(names = ["--hdc"], required = true) private lateinit var hdc: Path
++    @CommandLine.Option(names = ["--original-cli"], required = true,
++        description = ["Unmodified CLI distribution that produced the original session"])
++    private lateinit var originalCli: Path
++
++    override fun call(): Int {
++        val mapper = jacksonObjectMapper()
++        return try {
++            require(parent?.platform == "harmonyos") { "Use --platform harmonyos." }
++            val device = requireNotNull(parent?.deviceId) { "Use the explicit original --device." }
++            HarmonyOsSessionSupport.validateOptions(host = parent?.host, port = parent?.port, driverHostPort = parent?.driverHostPort)
++            val evidence = HarmonyOsMaintenanceEvidence
++            val origin = HarmonyOsCleanupFenceEvidence.origin(originalCli)
++            val executable = hdc.toAbsolutePath().normalize()
++            val toolSet = linkedMapOf("hdc" to evidence.fingerprint(executable),
++                "java" to evidence.fingerprint(Path.of(System.getProperty("java.home"), "bin",
++                    if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")))
++            val jars = System.getProperty("java.class.path").split(File.pathSeparator).map { Path.of(it).toAbsolutePath().normalize() }
++            require(jars.isNotEmpty() && jars.all { it.fileName.toString().endsWith(".jar") } && jars.distinct().size == jars.size) {
++                "Use a complete installed CLI JAR distribution."
++            }
++            jars.forEachIndexed { index, jar -> toolSet["classpath:$index:${jar.fileName}"] = evidence.fingerprint(jar) }
++            val result = HarmonyOsCleanupFenceRecovery(HarmonyOsSessionSupport.defaultLockDirectory(), origin,
++                toolSet, HdcClient(executable.toString())).recover(device, owner)
++            println(mapper.writeValueAsString(result)); 0
++        } catch (error: Exception) {
++            if (error is InterruptedException) Thread.currentThread().interrupt()
++            System.err.println("Cleanup fence recovery blocked: ${error.message}")
++            error.stackTrace.take(4).forEach { System.err.println("  at $it") }
++            println(mapper.writeValueAsString(mapOf("protocol" to "maestro.harmonyos.cleanup-fence-recovery",
++                "schemaVersion" to 1, "state" to "unknown", "handoffReady" to false, "error" to "CLEANUP_FENCE_BLOCKED")))
++            1
++        }
 +    }
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
@@ -3524,6 +3586,428 @@ index b79b107..7a38dd6 100644
                  logger.error("${shardPrefix}Failed to complete flow", e)
                  flowStatus = FlowStatus.ERROR
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt
+new file mode 100644
+index 0000000..7338b21
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt
+@@ -0,0 +1,67 @@
++package maestro.cli.session
++
++import maestro.harmonyos.hdc.CleanupFenceCall
++import maestro.harmonyos.hdc.CleanupFenceScope
++import java.nio.file.Files
++import java.nio.file.Path
++import java.util.jar.JarFile
++
++internal data class CleanupFenceGate(val recoveryId: String, val checkpoint: MaintenanceReference, val head: MaintenanceReference)
++internal data class RetainedCleanupFence(val ownerId: String, val recoveryId: String,
++    val checkpoint: MaintenanceReference, val receipt: MaintenanceReference)
++internal data class CleanupFenceOrigin(val profile: String, val journalClassSha256: String, val clientJar: MaintenanceTool)
++internal data class CleanupFenceCheckpoint(val schemaVersion: Int, val recoveryId: String, val deviceId: String,
++    val ownerId: String, val createdAt: String, val scope: CleanupFenceScope,
++    val originalGate: MaintenanceReference, val originalJournal: MaintenanceReference, val originalReceipt: MaintenanceReference,
++    val origin: CleanupFenceOrigin, val tools: Map<String, MaintenanceTool>)
++internal data class CleanupFenceCallEvidence(val call: CleanupFenceCall, val outcome: MaintenanceReference?)
++internal data class CleanupFenceStep(val schemaVersion: Int, val checkpointSha256: String, val revision: Int,
++    val previous: MaintenanceReference?, val phase: String, val observedAt: String, val journal: MaintenanceReference,
++    val calls: List<CleanupFenceCallEvidence>, val receipt: MaintenanceReference?)
++internal data class CleanupFenceReceipt(val schemaVersion: Int, val recoveryId: String, val deviceId: String,
++    val sessionId: String, val observedAt: String, val state: String, val handoffReady: Boolean,
++    val disposition: String, val originalResult: String, val pendingOperations: Int, val temporaryFiles: Int,
++    val checkpoint: MaintenanceReference, val verifiedHead: MaintenanceReference, val retainedDirectories: List<String>)
++
++internal object HarmonyOsCleanupFenceEvidence {
++    val E = HarmonyOsMaintenanceEvidence
++    const val PROFILE = "exclusive-operation-mkdir-v1"
++    // Frozen journal implementation exercised with actual shell races. No heuristic bytecode matching.
++    val supportedJournalClasses = setOf("c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac")
++    val checkpointFields = setOf("schemaVersion", "recoveryId", "deviceId", "ownerId", "createdAt", "scope",
++        "originalGate", "originalJournal", "originalReceipt", "origin", "tools")
++    val stepFields = setOf("schemaVersion", "checkpointSha256", "revision", "previous", "phase", "observedAt", "journal", "calls", "receipt")
++    val receiptFields = setOf("schemaVersion", "recoveryId", "deviceId", "sessionId", "observedAt", "state", "handoffReady",
++        "disposition", "originalResult", "pendingOperations", "temporaryFiles", "checkpoint", "verifiedHead", "retainedDirectories")
++    val phases = listOf("prepared", "claimed", "cleaned", "complete", "aborted")
++
++    fun origin(cli: Path): CleanupFenceOrigin {
++        val lib = cli.toAbsolutePath().normalize().resolve("lib")
++        E.regularAncestors(lib)
++        val jars = Files.list(lib).use { paths -> paths.filter { it.fileName.toString().endsWith(".jar") }.toList() }
++        val matches = jars.mapNotNull { path ->
++            E.regularAncestors(path)
++            JarFile(path.toFile()).use { jar ->
++                jar.getJarEntry("maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.class")?.let { entry ->
++                    require(entry.size in 1..(1024 * 1024))
++                    val bytes = jar.getInputStream(entry).use { it.readNBytes(1024 * 1024 + 1) }
++                    require(bytes.size <= 1024 * 1024)
++                    CleanupFenceOrigin(PROFILE, E.digest(bytes), E.fingerprint(path))
++                }
++            }
++        }
++        return matches.single().also(::validateOrigin)
++    }
++
++    fun validateOrigin(origin: CleanupFenceOrigin) {
++        require(origin.profile == PROFILE && origin.journalClassSha256 in supportedJournalClasses) {
++            "The original journal implementation has no verified cleanup-fence compatibility profile."
++        }
++        require(origin.clientJar.bytes > 0 && origin.clientJar.sha256.matches(Regex("[0-9a-f]{64}")))
++    }
++
++    fun root(directory: Path, device: String, owner: String, recovery: String): Path {
++        E.uuid(owner); E.uuid(recovery)
++        return ownerDirectory(directory, device, owner).resolve("cleanup-fence").resolve(recovery)
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt
+new file mode 100644
+index 0000000..99045f7
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt
+@@ -0,0 +1,343 @@
++package maestro.cli.session
++
++import com.fasterxml.jackson.databind.JsonNode
++import maestro.harmonyos.hdc.CleanupFenceObservation
++import maestro.harmonyos.hdc.HarmonyOSCleanupFenceTransport
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcTimeoutException
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.time.Duration
++import java.time.Instant
++import java.util.UUID
++
++/** Each remote mutation is bound to an immutable intent before dispatch. The original journal is not edited. */
++internal class HarmonyOsCleanupFenceRecovery(
++    private val lockDirectory: Path,
++    private val origin: CleanupFenceOrigin,
++    private val tools: Map<String, MaintenanceTool>,
++    private val hdc: HdcClient,
++    private val publishGate: (Path, LeaseGate) -> Unit = ::writeGate,
++) {
++    fun recover(device: String, owner: String): Map<String, Any?> = HarmonyOsSessionSupport.withDeviceLock(device, lockDirectory) {
++        E.uuid(owner)
++        val directory = lockDirectory.toAbsolutePath().normalize()
++        var gate = requireNotNull(readGate(directory, device)) { "No durable device owner." }
++        require(gate.ownerId == owner && gate.maintenance == null && gate.closeFailure == null && !gate.unresolvedRecording)
++        verifyTools()
++        if (gate.cleanupFence == null) {
++            require(gate.state == "quarantined") { "Cleanup fencing requires an isolated original owner." }
++            verifyRetained(directory, gate, hdc)
++            gate = prepare(directory, gate)
++        }
++        val management = requireNotNull(gate.cleanupFence)
++        val evidence = HarmonyOsMaintenanceEvidence(F.root(directory, device, owner, management.recoveryId))
++        val cp = checkpoint(evidence, management.checkpoint, device, owner, management.recoveryId)
++        require(cp.origin == origin && cp.tools == tools) { "Recovery tools changed since the intent was saved." }
++        verifyOriginal(directory, cp, evidence)
++        var step = readStep(evidence, management.head, management.checkpoint)
++        validateChain(evidence, management.head, management.checkpoint)
++        if (gate.state == "clean") {
++            completedOutcome(directory, gate)
++            val retained = gate.retainedFences.single { it.ownerId == owner && it.recoveryId == management.recoveryId }
++            val receipt = validateRetained(directory, device, retained)
++            verifyRetained(directory, gate, hdc)
++            return@withDeviceLock response(gate, retained, receipt, evidence)
++        }
++        require(gate.state == "quarantined" && step.phase != "complete")
++        val deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos()
++        fun remaining(): Duration {
++            if (Thread.currentThread().isInterrupted) throw InterruptedException("Cleanup fence recovery interrupted")
++            val left = deadline - System.nanoTime()
++            if (left <= 0) throw HdcTimeoutException(Duration.ofSeconds(30))
++            return Duration.ofNanos(left)
++        }
++        fun publish(next: CleanupFenceStep, clean: RetainedCleanupFence? = null) {
++            val nextStep = next.copy(revision = step.revision + 1, previous = gate.cleanupFence!!.head,
++                observedAt = Instant.now().toString())
++            val head = evidence.save("step", nextStep)
++            val nextGate = gate.copy(cleanupFence = management.copy(head = head),
++                state = if (clean == null) "quarantined" else "clean",
++                requiresRecovery = clean == null, uncertainReason = if (clean == null) gate.uncertainReason else null,
++                reportPath = clean?.let { evidence.root.resolve(it.receipt.path).toString() } ?: gate.reportPath,
++                reportSha256 = clean?.receipt?.sha256 ?: gate.reportSha256,
++                retainedFences = if (clean == null) gate.retainedFences else gate.retainedFences + clean,
++                updatedAt = Instant.now().toString())
++            publishGate(directory, nextGate)
++            gate = nextGate; step = nextStep
++        }
++        val callsPath = evidence.root.resolve("calls.json")
++        HarmonyOSRecoveryJournal.open(callsPath).use { calls ->
++            // An empty, separate journal tracks native recovery invocations without rewriting the original.
++            validateCallsJournal(E.mapper.readTree(E.read(callsPath)), cp, step, requireStopped = false)
++            calls.recover(hdc, remaining(), cleanupResources = false)
++            validateCallsJournal(E.mapper.readTree(E.read(callsPath)), cp, step, requireStopped = true)
++            val transport = HarmonyOSCleanupFenceTransport(hdc, calls)
++            fun query(action: String): CleanupFenceObservation {
++                require(step.calls.size < 64) { "Recovery invocation budget exhausted." }
++                verifyOriginal(directory, cp, evidence)
++                verifyTools()
++                try {
++                    val observed = transport.execute(cp.scope, HarmonyOSCleanupFenceTransport.proof(management.checkpoint.sha256),
++                        action, remaining()) { call ->
++                        val journal = evidence.saveBytes("calls", E.read(callsPath))
++                        publish(step.copy(journal = journal, calls = step.calls + CleanupFenceCallEvidence(call, null)))
++                    }
++                    val outcome = evidence.save("observation", observed)
++                    val updated = step.calls.toMutableList()
++                    require(updated.last().call.hostCallId == observed.hostCallId)
++                    updated[updated.lastIndex] = updated.last().copy(outcome = outcome)
++                    val snapshot = evidence.saveBytes("calls", E.read(callsPath))
++                    publish(step.copy(journal = snapshot, calls = updated))
++                    validateCallsJournal(evidence.json(step.journal), cp, step, requireStopped = true)
++                    return observed
++                } catch (error: Throwable) {
++                    // A lost response remains explicit; a later fixed verification may prove its effects are contained.
++                    try { publish(step.copy(journal = evidence.saveBytes("calls", E.read(callsPath)))) }
++                    catch (persistError: Throwable) { if (persistError !== error) error.addSuppressed(persistError) }
++                    throw error
++                }
++            }
++            fun restoreOccupied(): Nothing {
++                require(step.phase == "aborted" && step.calls.size == 1)
++                val item = step.calls.single()
++                require(item.call.action == "claim")
++                val observed = evidence.document(requireNotNull(item.outcome), CleanupFenceObservation::class.java,
++                    setOf("hostCallId", "action", "nonce", "phase", "stdout", "stderr"))
++                require(observed.hostCallId == item.call.hostCallId && observed.action == "claim" && observed.nonce == item.call.nonce &&
++                    HarmonyOSCleanupFenceTransport.confirmedPhase(observed.stdout, observed.stderr, observed.nonce) == "occupied")
++                require(item.call.argumentsSha256 == E.digest(E.mapper.writeValueAsBytes(HarmonyOSCleanupFenceTransport.arguments(
++                    cp.scope, HarmonyOSCleanupFenceTransport.proof(management.checkpoint.sha256), "claim", item.call.nonce))))
++                val original = evidence.json(cp.originalGate)
++                publishGate(directory, gate.copy(cleanupFence = null,
++                    requiresRecovery = original["requiresRecovery"].booleanValue(),
++                    uncertainReason = original["uncertainReason"].takeUnless(JsonNode::isNull)?.asText(),
++                    updatedAt = Instant.now().toString()))
++                throw IllegalStateException("The operation directory was already occupied. Original quarantine restored; use ordinary recovery to inspect its completion proof.")
++            }
++            if (step.phase == "aborted") restoreOccupied()
++            if (step.phase == "prepared") {
++                val observed = if (step.calls.any { it.call.action == "claim" }) query("verify") else query("claim")
++                if (observed.phase == "occupied") {
++                    // The atomic claim explicitly failed and its native invocation has stopped. No barrier was ours.
++                    publish(step.copy(phase = "aborted"))
++                    restoreOccupied()
++                }
++                publish(step.copy(phase = if (observed.phase == "cleaned") "cleaned" else "claimed"))
++            }
++            if (step.phase == "claimed") {
++                if (step.calls.any { it.call.action == "clean" }) {
++                    require(query("verify").phase == "cleaned") { "The previous cleanup has no confirming proof; do not replay it." }
++                } else query("clean")
++                publish(step.copy(phase = "cleaned"))
++            }
++            require(step.phase == "cleaned")
++            require(query("verify").phase == "cleaned")
++            verifyOriginal(directory, cp, evidence)
++            verifyTools()
++            val receipt = CleanupFenceReceipt(4, cp.recoveryId, device, owner, Instant.now().toString(), "isolated", true,
++                "prevented_before_dispatch", "unknown", 1, 0, management.checkpoint, gate.cleanupFence!!.head,
++                listOf(cp.scope.remoteRoot))
++            val reference = evidence.save("receipt", receipt)
++            // Save the receipt reference while still isolated; interruption here is safe to resume.
++            publish(step.copy(receipt = reference))
++        }
++        // Closing the call journal precedes the handoff commit.
++        verifyOriginal(directory, cp, evidence)
++        val retained = RetainedCleanupFence(owner, management.recoveryId, management.checkpoint, requireNotNull(step.receipt))
++        val receipt = validateRetained(directory, device, retained)
++        publish(step.copy(phase = "complete"), retained)
++        response(gate, retained, receipt, evidence)
++    }
++
++    private fun verifyTools() {
++        F.validateOrigin(origin)
++        require(tools.isNotEmpty() && tools.values.all { E.fingerprint(Path.of(it.path)) == it }) { "Recovery tool fingerprint changed." }
++        require(E.fingerprint(Path.of(origin.clientJar.path)) == origin.clientJar) { "Original CLI changed." }
++    }
++
++    private fun prepare(directory: Path, gate: LeaseGate): LeaseGate {
++        require(gate.retainedFences.size < 8)
++        val originalPath = checkedJournalPath(directory, gate)
++        val originalBytes = E.read(originalPath)
++        val scope = HarmonyOSRecoveryJournal.open(originalPath).use(HarmonyOSCleanupFenceTransport::inspect)
++        require(E.read(originalPath).contentEquals(originalBytes)) { "Original journal changed while opening." }
++        require(scope.deviceId == gate.deviceId && scope.ownerId == gate.ownerId)
++        for (action in listOf("claim", "clean", "verify")) HarmonyOSCleanupFenceTransport.arguments(scope,
++            HarmonyOSCleanupFenceTransport.proof("0".repeat(64)), action, "00000000-0000-0000-0000-000000000000")
++        val recoveryId = UUID.randomUUID().toString()
++        val root = F.root(directory, gate.deviceId, gate.ownerId, recoveryId)
++        Files.createDirectories(root.parent); E.regularAncestors(root.parent); Files.createDirectory(root)
++        val evidence = HarmonyOsMaintenanceEvidence(root)
++        val receiptPath = Path.of(requireNotNull(gate.reportPath)).toAbsolutePath().normalize()
++        require(receiptPath.parent == ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries"))
++        val originalReceipt = E.read(receiptPath)
++        require(E.digest(originalReceipt) == gate.reportSha256)
++        val cp = CleanupFenceCheckpoint(1, recoveryId, gate.deviceId, gate.ownerId, Instant.now().toString(), scope,
++            evidence.saveBytes("original-gate", E.read(gatePath(directory, gate.deviceId))),
++            evidence.saveBytes("original-journal", originalBytes), evidence.saveBytes("original-receipt", originalReceipt), origin, tools)
++        val cpRef = evidence.save("checkpoint", cp)
++        val callsPath = root.resolve("calls.json")
++        HarmonyOSRecoveryJournal.create(callsPath, gate.deviceId, recoveryId).use { it.seal() }
++        val step = CleanupFenceStep(1, cpRef.sha256, 0, null, "prepared", Instant.now().toString(),
++            evidence.saveBytes("calls", E.read(callsPath)), emptyList(), null)
++        val prepared = gate.copy(cleanupFence = CleanupFenceGate(recoveryId, cpRef, evidence.save("step", step)),
++            requiresRecovery = true, updatedAt = Instant.now().toString())
++        publishGate(directory, prepared)
++        return prepared
++    }
++
++    companion object {
++        private val E = HarmonyOsMaintenanceEvidence
++        private val F = HarmonyOsCleanupFenceEvidence
++
++        private fun checkpoint(evidence: HarmonyOsMaintenanceEvidence, ref: MaintenanceReference,
++                               device: String, owner: String, recovery: String): CleanupFenceCheckpoint {
++            val cp = evidence.document(ref, CleanupFenceCheckpoint::class.java, F.checkpointFields)
++            require(cp.schemaVersion == 1 && cp.deviceId == device && cp.ownerId == owner && cp.recoveryId == recovery)
++            E.uuid(owner); E.uuid(recovery); Instant.parse(cp.createdAt); F.validateOrigin(cp.origin)
++            require(cp.scope == HarmonyOSCleanupFenceTransport.scope(evidence.json(cp.originalJournal)))
++            require(cp.scope.deviceId == device && cp.scope.ownerId == owner)
++            val originalGate = evidence.json(cp.originalGate)
++            require(originalGate["deviceId"].asText() == device && originalGate["ownerSessionId"].asText() == owner &&
++                originalGate["state"].asText() == "quarantined" && originalGate["closeFailure"].isNull &&
++                !originalGate["unresolvedRecording"].asBoolean() && originalGate["maintenance"] == null &&
++                originalGate["cleanupFence"].let { it == null || it.isNull })
++            val originalReceipt = evidence.json(cp.originalReceipt)
++            require(originalGate["reportSha256"].asText() == cp.originalReceipt.sha256 &&
++                originalReceipt["deviceId"].asText() == device && originalReceipt["sessionId"].asText() == owner &&
++                originalReceipt["state"].asText() == "unknown")
++            return cp
++        }
++
++        private fun verifyOriginal(directory: Path, cp: CleanupFenceCheckpoint, evidence: HarmonyOsMaintenanceEvidence) {
++            val owner = ownerDirectory(directory, cp.deviceId, cp.ownerId)
++            require(E.read(owner.resolve("recovery-journal.json")).contentEquals(evidence.bytes(cp.originalJournal))) {
++                "The original journal changed; keep the device isolated."
++            }
++            require(Files.notExists(owner.resolve("recording-resources.json"), LinkOption.NOFOLLOW_LINKS))
++            val originalGate = evidence.json(cp.originalGate)
++            val receipt = Path.of(originalGate["reportPath"].asText()).toAbsolutePath().normalize()
++            require(receipt.parent == owner.resolve("recoveries"))
++            require(E.read(receipt).contentEquals(evidence.bytes(cp.originalReceipt)))
++        }
++
++        private fun readStep(evidence: HarmonyOsMaintenanceEvidence, ref: MaintenanceReference, cp: MaintenanceReference): CleanupFenceStep =
++            evidence.document(ref, CleanupFenceStep::class.java, F.stepFields).also {
++                require(it.schemaVersion == 1 && it.checkpointSha256 == cp.sha256 && it.revision in 0..256 &&
++                    it.phase in F.phases && it.calls.size <= 64)
++                Instant.parse(it.observedAt)
++            }
++
++        private fun validateChain(evidence: HarmonyOsMaintenanceEvidence, ref: MaintenanceReference, cp: MaintenanceReference) {
++            var step = readStep(evidence, ref, cp)
++            var count = 0
++            while (step.previous != null) {
++                require(++count <= 256)
++                val previous = readStep(evidence, step.previous!!, cp)
++                require(previous.revision + 1 == step.revision && F.phases.indexOf(previous.phase) <= F.phases.indexOf(step.phase))
++                require(previous.calls.size <= step.calls.size && previous.calls.indices.all { index ->
++                    previous.calls[index].call == step.calls[index].call &&
++                        (previous.calls[index].outcome == null || previous.calls[index].outcome == step.calls[index].outcome)
++                }) { "Recovery call history was rewritten." }
++                step = previous
++            }
++            require(step.revision == 0 && step.phase == "prepared" && step.calls.isEmpty() && step.receipt == null)
++        }
++
++        private fun validateCallsJournal(node: JsonNode, cp: CleanupFenceCheckpoint, step: CleanupFenceStep, requireStopped: Boolean) {
++            require(node["version"].asInt() == 1 && node["deviceId"].asText() == cp.deviceId && node["ownerId"].asText() == cp.recoveryId &&
++                node["sealed"].asBoolean() && node["rootRemoved"].asBoolean() && node["operations"].isEmpty && node["temporaryFiles"].isEmpty)
++            val calls = node["hostCalls"].toList()
++            require(calls.map { it["id"].asText() } == step.calls.map { it.call.hostCallId }) { "Unbound recovery invocation." }
++            require(calls.map { it["id"].asText() }.distinct().size == calls.size)
++            if (requireStopped) require(calls.all { it["stopped"].asBoolean() }) { "Recovery host invocation is not confirmed stopped." }
++        }
++
++        internal fun validateRetained(directory: Path, device: String, retained: RetainedCleanupFence): CleanupFenceReceipt {
++            val evidence = HarmonyOsMaintenanceEvidence(F.root(directory, device, retained.ownerId, retained.recoveryId))
++            val cp = checkpoint(evidence, retained.checkpoint, device, retained.ownerId, retained.recoveryId)
++            verifyOriginal(directory, cp, evidence)
++            val receipt = evidence.document(retained.receipt, CleanupFenceReceipt::class.java, F.receiptFields)
++            require(receipt.schemaVersion == 4 && receipt.recoveryId == cp.recoveryId && receipt.deviceId == device &&
++                receipt.sessionId == cp.ownerId && receipt.checkpoint == retained.checkpoint && receipt.state == "isolated" &&
++                receipt.handoffReady && receipt.disposition == "prevented_before_dispatch" && receipt.originalResult == "unknown" &&
++                receipt.pendingOperations == 1 && receipt.temporaryFiles == 0 && receipt.retainedDirectories == listOf(cp.scope.remoteRoot))
++            require(Instant.parse(receipt.observedAt) >= Instant.parse(cp.createdAt))
++            val step = readStep(evidence, receipt.verifiedHead, retained.checkpoint)
++            require(step.phase == "cleaned")
++            validateChain(evidence, receipt.verifiedHead, retained.checkpoint)
++            val callsNode = evidence.json(step.journal)
++            validateCallsJournal(callsNode, cp, step, requireStopped = true)
++            require(E.read(evidence.root.resolve("calls.json")).contentEquals(evidence.bytes(step.journal))) { "Recovery journal changed after release." }
++            require(step.calls.count { it.call.action == "claim" } == 1 && step.calls.count { it.call.action == "clean" } == 1)
++            for (item in step.calls) {
++                E.uuid(item.call.hostCallId); E.uuid(item.call.nonce)
++                val args = HarmonyOSCleanupFenceTransport.arguments(cp.scope,
++                    HarmonyOSCleanupFenceTransport.proof(retained.checkpoint.sha256), item.call.action, item.call.nonce)
++                require(item.call.argumentsSha256 == E.digest(E.mapper.writeValueAsBytes(args)))
++                item.outcome?.let { ref ->
++                    val result = evidence.document(ref, CleanupFenceObservation::class.java,
++                        setOf("hostCallId", "action", "nonce", "phase", "stdout", "stderr"))
++                    require(result.hostCallId == item.call.hostCallId && result.action == item.call.action && result.nonce == item.call.nonce)
++                    require(result.phase == HarmonyOSCleanupFenceTransport.confirmedPhase(result.stdout, result.stderr, result.nonce))
++                    require(result.action != "claim" || result.phase == "claimed")
++                    require(result.action != "clean" || result.phase == "cleaned")
++                }
++            }
++            val last = step.calls.last()
++            require(last.call.action == "verify" && last.outcome != null && evidence.json(last.outcome)["phase"].asText() == "cleaned")
++            return receipt
++        }
++
++        internal fun verifyRetained(directory: Path, gate: LeaseGate, hdc: HdcClient? = null) {
++            require(gate.retainedFences.size <= 8 && gate.retainedFences.map { it.ownerId to it.recoveryId }.distinct().size == gate.retainedFences.size)
++            val deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos()
++            for (retained in gate.retainedFences) {
++                validateRetained(directory, gate.deviceId, retained)
++                val saved = HarmonyOsMaintenanceEvidence(F.root(directory, gate.deviceId, retained.ownerId, retained.recoveryId))
++                val checkpoint = checkpoint(saved, retained.checkpoint, gate.deviceId, retained.ownerId, retained.recoveryId)
++                val old = saved.json(checkpoint.originalGate)["retainedFences"]
++                if (old != null) require(old.all { value ->
++                    val prior = E.mapper.treeToValue(value, RetainedCleanupFence::class.java)
++                    prior in gate.retainedFences
++                }) { "A prior retained fence was dropped." }
++                if (hdc != null) {
++                    val evidence = HarmonyOsMaintenanceEvidence(F.root(directory, gate.deviceId, retained.ownerId, retained.recoveryId))
++                    val cp = checkpoint(evidence, retained.checkpoint, gate.deviceId, retained.ownerId, retained.recoveryId)
++                    val remaining = deadline - System.nanoTime()
++                    if (remaining <= 0) throw HdcTimeoutException(Duration.ofSeconds(30))
++                    require(HarmonyOSCleanupFenceTransport(hdc).execute(cp.scope,
++                        HarmonyOSCleanupFenceTransport.proof(retained.checkpoint.sha256), "verify", Duration.ofNanos(remaining)).phase == "cleaned")
++                }
++            }
++        }
++
++        internal fun completedOutcome(directory: Path, gate: LeaseGate): RecoveryOutcome {
++            val management = requireNotNull(gate.cleanupFence)
++            require(gate.state == "clean" && !gate.requiresRecovery)
++            val retained = gate.retainedFences.single { it.ownerId == gate.ownerId && it.recoveryId == management.recoveryId }
++            require(retained.checkpoint == management.checkpoint)
++            val receipt = validateRetained(directory, gate.deviceId, retained)
++            val evidence = HarmonyOsMaintenanceEvidence(F.root(directory, gate.deviceId, gate.ownerId, management.recoveryId))
++            val step = readStep(evidence, management.head, management.checkpoint)
++            validateChain(evidence, management.head, management.checkpoint)
++            require(step.phase == "complete" && step.receipt == retained.receipt)
++            val path = evidence.root.resolve(retained.receipt.path)
++            require(gate.reportPath == path.toString() && gate.reportSha256 == retained.receipt.sha256)
++            @Suppress("UNCHECKED_CAST") val report = E.mapper.convertValue(receipt, Map::class.java) as Map<String, Any?>
++            return RecoveryOutcome(gate.deviceId, gate.ownerId, true, path, retained.receipt.sha256, report)
++        }
++
++        private fun response(gate: LeaseGate, retained: RetainedCleanupFence, receipt: CleanupFenceReceipt,
++                             evidence: HarmonyOsMaintenanceEvidence): Map<String, Any?> = mapOf(
++            "protocol" to "maestro.harmonyos.cleanup-fence-recovery", "schemaVersion" to 1,
++            "deviceId" to gate.deviceId, "sessionId" to gate.ownerId, "recoveryId" to retained.recoveryId,
++            "state" to receipt.state, "handoffReady" to true, "originalResult" to "unknown",
++            "disposition" to receipt.disposition, "retainedDirectories" to receipt.retainedDirectories,
++            "receipt" to mapOf("path" to evidence.root.resolve(retained.receipt.path).toString(),
++                "sha256" to retained.receipt.sha256, "schemaVersion" to 4))
++    }
++}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceEvidence.kt
 new file mode 100644
 index 0000000..609de28
@@ -3930,10 +4414,10 @@ index 0000000..88d0e66
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 new file mode 100644
-index 0000000..3a75228
+index 0000000..a3dbcb6
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,548 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -4159,6 +4643,9 @@ index 0000000..3a75228
 +        return HarmonyOsSessionSupport.withDeviceLock(deviceId, lockDirectory) {
 +            val directory = lockDirectory.toAbsolutePath().normalize()
 +            val gate = requireNotNull(readGate(directory, deviceId)) { "No durable owner is present." }
++            require(gate.cleanupFence == null && gate.retainedFences.isEmpty()) {
++                "Retained cleanup fences cannot be removed by reboot maintenance."
++            }
 +            require(gate.ownerId == ownerId) { "Maintenance cannot take over another owner." }
 +            try { block(directory, gate) } catch (error: Exception) {
 +                throw AgentProtocolException(AgentError("environment", "MAINTENANCE_RECOVERY_BLOCKED",
@@ -4481,10 +4968,10 @@ index 0000000..3a75228
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..8831442
+index 0000000..5ba4ea0
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,523 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -4602,16 +5089,19 @@ index 0000000..8831442
 +        }
 +
 +        /** Must be called while holding the matching device OS lock, before any device operation. */
++        @JvmOverloads
 +        fun begin(deviceId: String, ownerId: String, lockDirectory: Path,
-+            requiresRecordingCleanup: Boolean = false): HarmonyOsSessionLease {
++            requiresRecordingCleanup: Boolean = false, hdc: HdcClient = HdcClient()): HarmonyOsSessionLease {
 +            HarmonyOsAgentProtocol.uuid(ownerId, "ownerId")
 +            validateDevice(deviceId)
 +            val directory = lockDirectory.toAbsolutePath().normalize()
 +            require(directory.toRealPath() == directory) { "Device lease directory must not contain symbolic links." }
-+            readGate(directory, deviceId)?.let { prior ->
++            val previousGate = readGate(directory, deviceId)
++            previousGate?.let { prior ->
 +                if (prior.state != "clean" || runCatching { existingReceipt(directory, prior).complete }.getOrDefault(false).not()) {
 +                    throw recoveryRequired(prior, "A previous session requires recovery before this device can be used.")
 +                }
++                HarmonyOsCleanupFenceRecovery.verifyRetained(directory, prior, hdc)
 +            }
 +            val ownerDirectory = ownerDirectory(directory, deviceId, ownerId)
 +            Files.createDirectories(ownerDirectory.parent)
@@ -4628,7 +5118,7 @@ index 0000000..8831442
 +                throw error
 +            }
 +            val gate = LeaseGate(deviceId, ownerId, "active", journal.path.toString(), Instant.now().toString(),
-+                unresolvedRecording = requiresRecordingCleanup)
++                unresolvedRecording = requiresRecordingCleanup, retainedFences = previousGate?.retainedFences.orEmpty())
 +            try { writeGate(directory, gate) } catch (error: Throwable) {
 +                try { journal.close() } catch (closeError: Throwable) { error.addSuppressed(closeError) }
 +                throw error
@@ -4645,6 +5135,7 @@ index 0000000..8831442
 +        fun requiresRecovery(deviceId: String, lockDirectory: Path): Boolean {
 +            val directory = lockDirectory.toAbsolutePath().normalize()
 +            val gate = readGate(directory, deviceId) ?: return false
++            HarmonyOsCleanupFenceRecovery.verifyRetained(directory, gate)
 +            return gate.state != "clean" || !existingReceipt(directory, gate).complete
 +        }
 +    }
@@ -4684,6 +5175,9 @@ index 0000000..8831442
 +                mapOf("recoverySessionId" to gate.ownerId)))
 +            if (gate.maintenance != null) throw recoveryRequired(gate,
 +                "This owner is in maintenance recovery. Use the maintenance entry point; ordinary recovery cannot change it.")
++            if (gate.cleanupFence != null) throw recoveryRequired(gate,
++                "This owner uses cleanup-fence recovery. Use harmonyos-cleanup-recovery; keep its retained directories.")
++            HarmonyOsCleanupFenceRecovery.verifyRetained(directory, gate, hdc)
 +            if (gate.state == "clean") return@withDeviceLock existingReceipt(directory, gate)
 +            val journalPath = checkedJournalPath(directory, gate)
 +            val journal = try { HarmonyOSRecoveryJournal.open(journalPath) } catch (error: Exception) {
@@ -4777,6 +5271,8 @@ index 0000000..8831442
 +    val uncertainReason: String? = null,
 +    val unresolvedRecording: Boolean = false,
 +    val maintenance: MaintenanceGate? = null,
++    val cleanupFence: CleanupFenceGate? = null,
++    val retainedFences: List<RetainedCleanupFence> = emptyList(),
 +)
 +
 +private val leaseMapper = jacksonObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -4804,11 +5300,12 @@ index 0000000..8831442
 +        require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && Files.size(path) <= 1024 * 1024)
 +        require(path.toRealPath() == path)
 +        val node = leaseMapper.readTree(path.toFile())
-+        require(node.isObject && node.path("schemaVersion").isIntegralNumber && node.path("schemaVersion").intValue() in 1..2)
++        require(node.isObject && node.path("schemaVersion").isIntegralNumber && node.path("schemaVersion").intValue() in 1..3)
 +        val maintenanceVersion = node["schemaVersion"].intValue() == 2
++        val fenceVersion = node["schemaVersion"].intValue() == 3
 +        require(node.fieldNames().asSequence().toSet() == setOf("schemaVersion", "deviceId", "ownerSessionId", "state", "journalPath",
 +            "updatedAt", "closeFailure", "reportPath", "reportSha256", "requiresRecovery", "uncertainReason", "unresolvedRecording") +
-+            if (maintenanceVersion) setOf("maintenance") else emptySet<String>())
++            (if (maintenanceVersion) setOf("maintenance") else if (fenceVersion) setOf("cleanupFence", "retainedFences") else emptySet<String>()))
 +        fun text(name: String): String = node.get(name).also { require(it != null && it.isTextual && it.asText().isNotBlank()) }.asText()
 +        require(text("deviceId") == deviceId)
 +        val ownerId = HarmonyOsAgentProtocol.uuid(text("ownerSessionId"), "ownerSessionId")
@@ -4845,8 +5342,24 @@ index 0000000..8831442
 +            HarmonyOsMaintenanceEvidence.uuid(value["maintenanceId"].asText())
 +            leaseMapper.treeToValue(value, MaintenanceGate::class.java)
 +        } else null
++        val fence = if (fenceVersion && !node["cleanupFence"].isNull) {
++            require(state != "active" && closeFailure == null && !unresolvedRecording)
++            leaseMapper.treeToValue(node["cleanupFence"], CleanupFenceGate::class.java).also {
++                HarmonyOsMaintenanceEvidence.exactFields(node["cleanupFence"], setOf("recoveryId", "checkpoint", "head"))
++                HarmonyOsMaintenanceEvidence.uuid(it.recoveryId)
++            }
++        } else null
++        val retained = if (fenceVersion) {
++            require(node["retainedFences"].isArray && node["retainedFences"].size() <= 8)
++            node["retainedFences"].map { value ->
++                HarmonyOsMaintenanceEvidence.exactFields(value, setOf("ownerId", "recoveryId", "checkpoint", "receipt"))
++                leaseMapper.treeToValue(value, RetainedCleanupFence::class.java).also {
++                    HarmonyOsMaintenanceEvidence.uuid(it.ownerId); HarmonyOsMaintenanceEvidence.uuid(it.recoveryId)
++                }
++            }.also { require(it.isNotEmpty() || fence != null) }
++        } else emptyList()
 +        return LeaseGate(deviceId, ownerId, state, text("journalPath"), time, closeFailure, reportPath, reportHash,
-+            requiresRecovery, uncertainReason, unresolvedRecording, maintenance)
++            requiresRecovery, uncertainReason, unresolvedRecording, maintenance, fence, retained)
 +            .also { checkedJournalPath(directory, it) }
 +    } catch (error: Exception) {
 +        throw invalidMetadata("The durable device gate is missing required or trustworthy metadata.", null, error)
@@ -4861,12 +5374,15 @@ index 0000000..8831442
 +}
 +
 +internal fun writeGate(directory: Path, gate: LeaseGate) {
-+    val payload = mapOf("schemaVersion" to if (gate.maintenance == null) 1 else 2, "deviceId" to gate.deviceId, "ownerSessionId" to gate.ownerId,
++    val fenced = gate.cleanupFence != null || gate.retainedFences.isNotEmpty()
++    require(!fenced || gate.maintenance == null)
++    val payload = mapOf("schemaVersion" to if (fenced) 3 else if (gate.maintenance == null) 1 else 2, "deviceId" to gate.deviceId, "ownerSessionId" to gate.ownerId,
 +        "state" to gate.state, "journalPath" to gate.journalPath, "updatedAt" to gate.updatedAt,
 +        "closeFailure" to gate.closeFailure, "reportPath" to gate.reportPath, "reportSha256" to gate.reportSha256,
 +        "requiresRecovery" to gate.requiresRecovery, "uncertainReason" to gate.uncertainReason,
 +        "unresolvedRecording" to gate.unresolvedRecording) +
-+        if (gate.maintenance == null) emptyMap() else mapOf("maintenance" to gate.maintenance)
++        (if (fenced) mapOf("cleanupFence" to gate.cleanupFence, "retainedFences" to gate.retainedFences)
++        else if (gate.maintenance == null) emptyMap() else mapOf("maintenance" to gate.maintenance))
 +    writeLeaseFile(gatePath(directory, gate.deviceId), leaseMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(payload))
 +}
 +
@@ -4899,6 +5415,7 @@ index 0000000..8831442
 +}
 +
 +private fun existingReceipt(directory: Path, gate: LeaseGate): RecoveryOutcome {
++    if (gate.cleanupFence != null) return HarmonyOsCleanupFenceRecovery.completedOutcome(directory, gate)
 +    if (gate.maintenance != null) return HarmonyOsMaintenanceRecovery.completedOutcome(directory, gate)
 +    try {
 +        val receipts = ownerDirectory(directory, gate.deviceId, gate.ownerId).resolve("recoveries")
@@ -4980,7 +5497,7 @@ index 0000000..8831442
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..ab8119c
+index 0000000..ec2c9a2
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 @@ -0,0 +1,203 @@
@@ -5092,7 +5609,7 @@ index 0000000..ab8119c
 +    ): T =
 +        withDeviceLock(deviceId, lockDirectory) {
 +            val lease = HarmonyOsSessionLease.begin(deviceId, ownerId, lockDirectory,
-+                requiresRecordingCleanup = config.enableScreenRecording)
++                requiresRecordingCleanup = config.enableScreenRecording, hdc = hdc)
 +            var session: MaestroSessionManager.MaestroSession? = null
 +            val closeGuard = Any()
 +            var closed = false
@@ -12170,6 +12687,166 @@ index 0000000..b7ea2b2
 +    private val CONTAINERS = setOf("minf", "stbl", "edts", "dinf", "udta", "mvex", "moof", "traf", "mfra", "tref", "sinf", "schi", "meco", "hnti", "hinf")
 +
 +    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt
+new file mode 100644
+index 0000000..33a92bd
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt
+@@ -0,0 +1,154 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.nio.file.Files
++import java.security.MessageDigest
++import java.time.Duration
++import java.util.UUID
++
++data class CleanupFenceScope(
++    val deviceId: String, val ownerId: String, val generation: String, val remoteRoot: String,
++    val operationId: String, val operationSha256: String, val target: String,
++    val operationIds: List<String>, val temporaryFiles: List<String>,
++)
++
++data class CleanupFenceObservation(val hostCallId: String?, val action: String, val nonce: String,
++    val phase: String, val stdout: String, val stderr: String)
++data class CleanupFenceCall(val hostCallId: String, val action: String, val nonce: String, val argumentsSha256: String)
++
++/** Fixed filesystem operations. Never launches an application or releases a device lease. */
++class HarmonyOSCleanupFenceTransport(private val hdc: HdcClient, private val calls: HarmonyOSRecoveryJournal? = null) {
++    fun execute(scope: CleanupFenceScope, proof: String, action: String, timeout: Duration,
++                beforeDispatch: (CleanupFenceCall) -> Unit = {}): CleanupFenceObservation {
++        require(timeout > Duration.ZERO && timeout <= Duration.ofSeconds(30))
++        require(calls != null || action == "verify") { "Mutating fence operations require a durable call journal." }
++        calls?.let { require(it.deviceId == scope.deviceId) }
++        val nonce = UUID.randomUUID().toString()
++        val arguments = arguments(scope, proof, action, nonce)
++        var callId: String? = null
++        val result = if (calls == null) hdc.shell(scope.deviceId, arguments, timeout)
++        else hdc.shellRecovery(scope.deviceId, arguments, timeout, calls) { id ->
++            beforeDispatch(CleanupFenceCall(id, action, nonce, hash(mapper.writeValueAsBytes(arguments))))
++            callId = id
++        }
++        val phase = confirmedPhase(result.stdout, result.stderr, nonce)
++        require(action != "claim" || phase in setOf("claimed", "occupied"))
++        require(action != "clean" || phase == "cleaned")
++        return CleanupFenceObservation(callId, action, nonce, phase, result.stdout, result.stderr)
++    }
++
++    companion object {
++        private val mapper = jacksonObjectMapper()
++        private val uuid = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
++        private fun hash(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
++            .joinToString("") { "%02x".format(it) }
++        private fun q(value: String) = HdcClient.quoteShellArgument(value)
++
++        fun inspect(journal: HarmonyOSRecoveryJournal): CleanupFenceScope = synchronized(journal) {
++            journal.maintenanceInventory() // Durable, sealed, finite, stopped, no recording resources.
++            scope(mapper.readTree(Files.readAllBytes(journal.path)))
++        }
++
++        /** Also used when validating immutable snapshots; opening the real journal validates its full schema. */
++        fun scope(node: JsonNode): CleanupFenceScope {
++            require(node["version"].asInt() == 1 && node["sealed"].asBoolean() && !node["rootRemoved"].asBoolean())
++            val owner = node["ownerId"].asText(); val generation = node["generation"].asText()
++            require(uuid.matches(owner) && uuid.matches(generation))
++            val device = node["deviceId"].asText()
++            require(device.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")))
++            val root = node["remoteRoot"].asText()
++            require(root == "/data/local/tmp/maestro-session-$generation")
++            val ops = node["operations"].toList()
++            require(ops.size in 1..16 && ops.all { uuid.matches(it["id"].asText()) })
++            require(ops.map { it["id"].asText() }.distinct().size == ops.size)
++            val pending = ops.filter { !it["completed"].asBoolean() }.single()
++            require(pending["recoverable"].asBoolean() && !pending["markerRemoved"].asBoolean())
++            require(node["hostCalls"].all { it["stopped"].asBoolean() })
++            val paths = node["temporaryFiles"].map { it.asText() }
++            require(paths.size in 1..16 && paths.distinct().size == paths.size)
++            require(paths.all { it.matches(Regex(Regex.escape(root) + "/files/(?:layout-$uuid\\.json|screen-$uuid\\.png)")) })
++            val target = paths.filter { it.endsWith(".json") && hash(mapper.writeValueAsBytes(listOf("rm", "-f", it))) == pending["sha256"].asText() }.single()
++            return CleanupFenceScope(device, owner, generation, root, pending["id"].asText(), pending["sha256"].asText(),
++                target, ops.map { it["id"].asText() }, paths)
++        }
++
++        fun proof(checkpointSha256: String): String {
++            require(checkpointSha256.matches(Regex("[0-9a-f]{64}")))
++            return "MAESTRO_CLEANUP_FENCE_V1:$checkpointSha256"
++        }
++
++        fun confirmedPhase(stdout: String, stderr: String, nonce: String): String {
++            require(uuid.matches(nonce) && stderr.isEmpty()) { "Fence command returned diagnostics." }
++            // HDC can append CR; permit only its terminal newline framing, not arbitrary surrounding text.
++            val output = stdout.removeSuffix("\n").removeSuffix("\r")
++            return when (output) {
++                "MAESTRO_FENCE:$nonce:claimed" -> "claimed"
++                "MAESTRO_FENCE:$nonce:cleaned" -> "cleaned"
++                "MAESTRO_FENCE:$nonce:occupied" -> "occupied"
++                else -> throw HdcException("Cleanup fence completion proof is absent or invalid.")
++            }
++        }
++
++        fun arguments(scope: CleanupFenceScope, proof: String, action: String, nonce: String): List<String> {
++            require(action in setOf("claim", "clean", "verify") && uuid.matches(nonce))
++            require(proof.matches(Regex("MAESTRO_CLEANUP_FENCE_V1:[0-9a-f]{64}")))
++            require(scope.remoteRoot == "/data/local/tmp/maestro-session-${scope.generation}" && uuid.matches(scope.generation))
++            require(scope.operationIds.size in 1..16 && scope.operationIds.all { uuid.matches(it) } && scope.operationId in scope.operationIds)
++            val root = scope.remoteRoot; val files = "$root/files"; val operation = "$root/${scope.operationId}"
++            require(scope.temporaryFiles.size in 1..16 && scope.temporaryFiles.all {
++                it.matches(Regex(Regex.escape(root) + "/files/(?:layout-$uuid\\.json|screen-$uuid\\.png)"))
++            })
++            fun directory(path: String) = "[ -d ${q(path)} ] && [ ! -L ${q(path)} ] || exit 121; "
++            fun allowedChildren(parent: String, allowed: List<String>, directoryChildren: Boolean = false): String {
++                val cases = allowed.joinToString("|", transform = ::q).ifEmpty { "__no_allowed_children__" }
++                return "for __f in ${q(parent)}/* ${q(parent)}/.[!.]* ${q(parent)}/..?*; do " +
++                    "[ -e \"\$__f\" ] || [ -L \"\$__f\" ] || continue; " +
++                    "[ ! -L \"\$__f\" ] || exit 121; case \"\$__f\" in $cases) ;; *) exit 121;; esac; " +
++                    (if (directoryChildren) "[ -d \"\$__f\" ]" else "[ -f \"\$__f\" ]") + " || exit 121; done; "
++            }
++            val expanded = buildString {
++                append("umask 077; ")
++                append(directory(root)); append(directory(files))
++                append(allowedChildren(root, listOf(files) + scope.operationIds.map { "$root/$it" }, true))
++                append(allowedChildren(files, scope.temporaryFiles))
++                // Completed proof directories are preserved, never removed by this recovery.
++                val completed = scope.operationIds.filter { it != scope.operationId }
++                if (completed.isNotEmpty()) {
++                    append("for __d in ${completed.joinToString(" ") { q("$root/$it") }}; do ")
++                    append("if [ -e \"\$__d\" ]; then [ -d \"\$__d\" ] && [ ! -L \"\$__d\" ] || exit 121; ")
++                    append("for __f in \"\$__d\"/* \"\$__d\"/.[!.]* \"\$__d\"/..?*; do ")
++                    append("[ -e \"\$__f\" ] || [ -L \"\$__f\" ] || continue; ")
++                    append("[ -f \"\$__f\" ] && [ ! -L \"\$__f\" ] || exit 121; ")
++                    append("case \"\$__f\" in \"\$__d/done\"|\"\$__d/done.pending\") ;; *) exit 121;; esac; done; fi; done; ")
++                }
++                if (action == "claim") {
++                    append("mkdir ${q(operation)} 2>/dev/null || { printf '%s' ${q("MAESTRO_FENCE:$nonce:occupied")}; exit 0; }; ")
++                    append("printf '%s' ${q(proof)} > ${q("$operation/fence.pending")} && ")
++                    append("mv ${q("$operation/fence.pending")} ${q("$operation/fence")} || exit 124; ")
++                }
++                append(directory(operation))
++                append(allowedChildren(operation, listOf("$operation/fence", "$operation/cleaned", "$operation/cleaned.pending")))
++                append("[ -f ${q("$operation/fence")} ] && [ \"\$(cat ${q("$operation/fence")})\" = ${q(proof)} ] || exit 125; ")
++                if (action == "clean") {
++                    for (file in scope.temporaryFiles) append("rm -f ${q(file)} && [ ! -e ${q(file)} ] || exit 121; ")
++                    append("printf '%s' ${q(proof)} > ${q("$operation/cleaned.pending")} && ")
++                    append("mv ${q("$operation/cleaned.pending")} ${q("$operation/cleaned")} || exit 124; ")
++                }
++                append("if [ -e ${q("$operation/cleaned")} ]; then ")
++                append("[ \"\$(cat ${q("$operation/cleaned")})\" = ${q(proof)} ] || exit 125; ")
++                for (file in scope.temporaryFiles) append("[ ! -e ${q(file)} ] && [ ! -L ${q(file)} ] || exit 121; ")
++                append("printf '%s' ${q("MAESTRO_FENCE:$nonce:cleaned")}; else ")
++                append("printf '%s' ${q("MAESTRO_FENCE:$nonce:claimed")}; fi")
++            }
++            // Keep the bounded wire command small when a session has several completed operations.
++            // All suffixes come from the UUID-only paths above; quote each expanded reference.
++            val script = "__r=${q(root)}; __p=${q(proof)}; " + expanded
++                .replace(Regex("'${Regex.escape(root)}([^']*)'")) { "\"\${__r}${it.groupValues[1]}\"" }
++                .replace(q(proof), "\"\$__p\"")
++            val args = listOf("sh", "-c", script)
++            require(args.joinToString(" ", transform = ::q).toByteArray().size <= 6 * 1024) { "Fence script exceeds its fixed scope budget." }
++            return args
++        }
++    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt
 new file mode 100644

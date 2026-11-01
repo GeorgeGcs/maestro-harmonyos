@@ -179,6 +179,8 @@ pwsh -NoProfile -File scripts/ci/run-device-suite.ps1 `
 
 维护核销仍保留原进程身份检查：身份丢失时不会仅凭重启回执跳过。请保留完整维护响应文件；核销结果会记录该路径及哈希，供后续归档使用，不将核销成功当成证据已经收齐。
 
+唯一未确认操作为已登记布局文件清理时，也可按[不重启恢复说明](cleanup-fence-recovery.md)使用 `harmonyos-cleanup-recovery`。保存完整 JSON 后，仍使用上面的 `-ReconcileOnly -RecoveryReportPath`。核验器检查版本 3 占用记录、版本 4 隔离回执和完整事务链，核销结果为 `recoveryKind=cleanup_fence`。原失败、未知结果和未完成命令不变；目录被登记保留，不能手动删除。此回执不能用于证明原测试执行成功。
+
 若进程身份缺失、原进程仍存活、恢复记录损坏或恢复返回 unknown，核销失败，原占用保留。没有“强制清除”开关。录屏的第二版清理凭据还会核对不可变资源快照及保留原件，确认结束、归属和清理；缺少这些证据时仍可能持续返回 unknown，不能只确认一个提示就继续测试。
 
 验证计划通过同一个预约模块使用 `kind: validation` 的占用记录。该记录绑定整个 matrix 调用的 `unitInvocationId` 和 `controlIndexPath`；每个已派发 attempt 都有单独 runner 控制记录。核销时检查索引身份及所有已派发进程，不能仅凭最后一轮的退出解除整次占用。只有 planned 且没有控制文件的项可以作为未派发处理；launching 项缺少进程身份仍会阻止核销。
@@ -242,6 +244,8 @@ node scripts/ci/collect-artifacts.mjs `
 该参数不能与 `--state-record` 同用，且必须有原 CI 结果。除 `state`、`updatedAt`、`resolution` 外，补充记录的全部字段必须与原记录一致，原执行结果、退出码、输入和运行身份均不能改变。两份记录分别保存在归档中；核销只证明当时核实了资源释放，不会把原执行改成 passed。状态文件已被下一作业覆盖时，应使用此前保存的、属于该次 launch 的恢复状态副本。
 
 维护版本 3 的归档由回执及已核对哈希的完整响应开始，只跟随该 owner/maintenance 目录内的明确引用。收集检查点、阶段链、重启观察、原日志及回执快照、调用前后日志和清理批次，不读取当前 gate、当前日志或历史工具文件，不扫描其他维护目录。缺失响应路径、引用文件或哈希不符时保留已取得材料并返回 incomplete；一个损坏文件不阻止其他可读取材料收集。元数据文件上限为 4 MiB，整组文件仍受下述归档预算限制。`maintenance_receipt_and_chain` 表示引用的维护材料收齐，不是重新执行恢复或独立批准设备接管。
+
+清理隔离版本 4 同样按回执收集事务链和完整响应，标记为 `cleanup_fence_receipt_and_chain`。后续普通会话继承的保留目录凭据单独收集到 `recovery/retained/`，标记为 `retainedFenceEvidence=receipt_and_chain`。换成新 owner 后仍能归档旧证据；归档不会触碰设备目录。
 
 收集范围是选定 CI 目录、精确的 `agentRoot/runs/<runId>/<attemptId>/` 子树（含源码快照和未封存的 partial 文件）、对应控制记录，以及 `resolution` 明确绑定的回执、录屏快照和已登记原件。索引、manifest、源码内容地址和回执引用的哈希另行核对。不会扫描其他 attempt、按当前 gate 猜 owner，或复制整个会话目录。若原生错误指出 `DEVICE_RECOVERY_REQUIRED` 的 owner，却没有绑定回执，报告会列出未收集的恢复材料并返回非零；这不表示该 owner 没有保留原件。
 

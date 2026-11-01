@@ -43,7 +43,7 @@ async function review(context, intervention = 'none') {
 }
 
 test('maintenance verifier changes invalidate a frozen validation plan', async t => {
-  for (const name of ['verify-maintenance.mjs', 'windows-boot.mjs']) await t.test(name, async t => {
+  for (const name of ['verify-maintenance.mjs', 'windows-boot.mjs', 'verify-cleanup-fence.mjs', 'cleanup-fence-scripts.mjs']) await t.test(name, async t => {
     const context = await setup(t);
     const file = path.join(context.project, 'scripts/recovery', name);
     assert.ok(context.plan.toolFiles.some(item => item.path === file));

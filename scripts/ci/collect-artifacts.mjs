@@ -8,6 +8,7 @@ import { readMetadata } from './snapshot-build.mjs';
 import { validateDocument } from '../../examples/agent-client/client.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collectMaintenanceEvidence } from '../recovery/maintenance-archive.mjs';
+import { verifyCleanupFenceReceipt } from '../recovery/verify-cleanup-fence.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const HASH = /^[0-9a-f]{64}$/;
@@ -308,6 +309,44 @@ export async function collectArtifacts({ ciDirectory, outputDirectory, stateReco
     requireValue(uuid(resolved.sessionId) && digest(resolved.reportSha256), 'Invalid recovery reference.');
     const owner = path.resolve(record.recoveryRoot, hash(record.deviceId), resolved.sessionId);
     overlap(owner);
+    if (resolved.deviceGateVersion === 3) {
+      requireValue(Array.isArray(resolved.retainedFences) && resolved.retainedFences.length > 0 && resolved.retainedFences.length <= 8,
+        'A later session omitted its retained fence inventory.');
+      for (const retained of resolved.retainedFences) {
+        const closure = await verifyCleanupFenceReceipt({ deviceId: record.deviceId, recoveryRoot: record.recoveryRoot, retained });
+        const priorOwner = path.resolve(record.recoveryRoot, hash(record.deviceId), retained.ownerId);
+        for (const entry of closure.records) {
+          const relative = path.relative(priorOwner, entry.path);
+          requireValue(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'Retained fence evidence escaped its owner.');
+          overlap(entry.path); await copy(entry.path, `recovery/retained/${retained.ownerId}/` + relative.replaceAll('\\', '/'));
+          await metadata(entry.path, entry.sha256);
+        }
+      }
+      report.retainedFenceEvidence = 'receipt_and_chain';
+    }
+    if (resolved.recoveryKind === 'cleanup_fence') {
+      requireValue(resolved.cleanupFenceId === resolved.retained?.recoveryId && resolved.retained?.ownerId === resolved.sessionId &&
+        uuid(resolved.cleanupFenceId) && digest(resolved.retained?.receipt?.sha256) &&
+        samePath(resolved.reportPath, path.join(owner, 'cleanup-fence', resolved.cleanupFenceId, resolved.retained.receipt.path)) &&
+        resolved.reportSha256 === resolved.retained.receipt.sha256, 'Invalid retained fence recovery reference.');
+      const closure = await verifyCleanupFenceReceipt({ deviceId: record.deviceId, recoveryRoot: record.recoveryRoot, retained: resolved.retained });
+      for (const entry of closure.records) {
+        const relative = path.relative(owner, entry.path);
+        requireValue(relative && !relative.startsWith('..') && !path.isAbsolute(relative), 'Fence evidence escaped its owner.');
+        overlap(entry.path); await copy(entry.path, 'recovery/fence/' + relative.replaceAll('\\', '/'));
+        await metadata(entry.path, entry.sha256);
+      }
+      requireValue(typeof resolved.recoveryResponsePath === 'string' && digest(resolved.recoveryResponseSha256), 'Missing saved fence recovery response.');
+      overlap(resolved.recoveryResponsePath); await copy(resolved.recoveryResponsePath, 'recovery/fence-response.json');
+      const response = await metadata(resolved.recoveryResponsePath, resolved.recoveryResponseSha256);
+      requireValue(response.protocol === 'maestro.harmonyos.cleanup-fence-recovery' && response.schemaVersion === 1 &&
+        response.deviceId === record.deviceId && response.sessionId === resolved.sessionId && response.recoveryId === resolved.cleanupFenceId &&
+        response.handoffReady === true && response.state === 'isolated' && response.originalResult === 'unknown' &&
+        samePath(response.receipt?.path, resolved.reportPath) && response.receipt.sha256 === resolved.reportSha256,
+      'Fence response differs from its archived receipt.');
+      if (unresolved.length === 0) report.recoveryEvidence = 'cleanup_fence_receipt_and_chain';
+      return;
+    }
     requireValue(samePath(path.dirname(resolved.reportPath), path.join(owner, 'recoveries')), 'Receipt is outside its exact owner.');
     const recoveryId = path.basename(resolved.reportPath, '.json');
     requireValue(uuid(recoveryId) && path.basename(resolved.reportPath) === recoveryId + '.json', 'Invalid recovery receipt name.');
