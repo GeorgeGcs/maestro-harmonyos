@@ -4466,10 +4466,10 @@ index 0000000..329ad21
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..8b1757f
+index 0000000..8831442
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,493 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -4545,7 +4545,9 @@ index 0000000..8b1757f
 +        }
 +        try {
 +            journal.seal()
-+            report = if (gate.requiresRecovery || gate.unresolvedRecording) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(10))
++            // Multi-step flows leave several bounded batches of owned proof directories.
++            // Share the explicit recovery budget; timeout still requires a separate recovery.
++            report = if (gate.requiresRecovery || gate.unresolvedRecording) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(30))
 +        } catch (error: Throwable) {
 +            failure = error
 +        } finally {
@@ -8799,10 +8801,10 @@ index 0000000..cfe659a
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
 new file mode 100644
-index 0000000..c041b93
+index 0000000..ab19e9e
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsSessionLeaseTest.kt
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,522 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.node.ObjectNode
@@ -8830,6 +8832,47 @@ index 0000000..c041b93
 +    private val noHdc = HdcClient("test-hdc", HdcCommandRunner { _, _ ->
 +        error("An empty journal must not contact HDC")
 +    })
++
++    @Test fun `large completed session has a shared close budget and a lost cleanup acknowledgement still blocks reuse`() {
++        for (loseAcknowledgement in listOf(false, true)) directory { root ->
++            val owner = uuid()
++            val budgets = mutableListOf<Duration>()
++            val hdc = HdcClient("test-hdc", HdcCommandRunner { command, timeout ->
++                val script = command.last()
++                val ack = Regex("MAESTRO_RECOVERY_[a-f0-9]+=").find(script)?.value
++                if (ack != null) HdcCommandResult(0, "${ack}0\n", "")
++                else {
++                    budgets += timeout
++                    // Model a cleanup transport that needs more than the old ten-second budget.
++                    if (timeout < Duration.ofSeconds(12)) throw maestro.harmonyos.hdc.HdcTimeoutException(timeout)
++                    val nonce = Regex("[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").findAll(script).last().value
++                    HdcCommandResult(0, if (loseAcknowledgement) "" else nonce, "")
++                }
++            })
++            HarmonyOsSessionSupport.withDeviceLock(device, root) {
++                val lease = HarmonyOsSessionLease.begin(device, owner, root)
++                val tracked = hdc.withRecoveryJournal(lease.journal)
++                repeat(148) { tracked.shell(device, listOf("uitest", "dumpLayout")) }
++                if (loseAcknowledgement) assertThrows<AgentProtocolException> { lease.finish(null, hdc) }
++                else lease.finish(null, hdc)
++            }
++            assertThat(budgets).isNotEmpty()
++            assertThat(budgets.all { it > Duration.ZERO && it <= Duration.ofSeconds(30) }).isTrue()
++            assertThat(budgets.zipWithNext().all { (before, after) -> after <= before }).isTrue()
++            assertThat(gate(root)["state"].asText()).isEqualTo(if (loseAcknowledgement) "quarantined" else "clean")
++            val journal = mapper.readTree(Path.of(gate(root)["journalPath"].asText()).toFile())
++            assertThat(journal["operations"].all { it["completed"].asBoolean() }).isTrue()
++            if (loseAcknowledgement) {
++                assertThat(journal["operations"].any { !it["markerRemoved"].asBoolean() }).isTrue()
++                assertThat(HarmonyOsSessionSupport.probeDeviceLock(device, root))
++                    .isEqualTo(HarmonyOsSessionSupport.DeviceLockStatus.RECOVERY_REQUIRED)
++            } else {
++                assertThat(budgets.size).isGreaterThan(1)
++                assertThat(journal["operations"].all { it["markerRemoved"].asBoolean() }).isTrue()
++                normalClose(root, uuid())
++            }
++        }
++    }
 +
 +    @Test fun `normal empty session creates a verified receipt and allows a new owner`() = directory { root ->
 +        val owner = uuid()
