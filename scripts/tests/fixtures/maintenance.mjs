@@ -11,7 +11,7 @@ export function encode(value) {
 }
 
 // Synthetic evidence only. No installed CLI, device state, executable or HDC is accessed.
-export async function maintenanceFixture(root, transform = (_kind, value) => value, { deviceId = 'maintenance-fixture', migrate = false } = {}) {
+export async function maintenanceFixture(root, transform = (_kind, value) => value, { deviceId = 'maintenance-fixture', migrate = false, temporaryNames = [] } = {}) {
   const ownerId = randomUUID(), maintenanceId = randomUUID(), generation = randomUUID();
   const recoveryRoot = path.join(root, 'recovery'), key = sha(Buffer.from(deviceId));
   const owner = path.join(recoveryRoot, key, ownerId), evidence = path.join(owner, 'maintenance', maintenanceId);
@@ -34,14 +34,14 @@ export async function maintenanceFixture(root, transform = (_kind, value) => val
   const hostResume = await put('host-resume', host('2026-10-31T00:00:00.000Z', '2026-10-30T23:58:00.000Z', '120000'));
   const hostComplete = await put('host-complete', host('2026-10-31T00:10:00.000Z', '2026-10-30T23:58:00.000Z', '720000'));
   const remote = '/data/local/tmp/maestro-session-' + generation;
-  const original = { version: 1, deviceId, ownerId, generation, sealed: true, remoteRoot: remote, temporaryFiles: [],
+  const original = { version: 1, deviceId, ownerId, generation, sealed: true, remoteRoot: remote, temporaryFiles: temporaryNames.map(name => `${remote}/files/${name}`),
     operations: [{ id: randomUUID(), completed: false, recoverable: true }],
     hostCalls: [{ id: randomUUID(), returned: true, stopped: true, startTimeTicks: 9007199254740993n }] };
   const journalPath = path.join(owner, 'recovery-journal.json');
   const oldReceipt = { schemaVersion: 1, recoveryId: randomUUID(), deviceId, sessionId: ownerId, observedAt: createdAt,
     reason: 'recovery', previousState: 'quarantined', previousReportPath: null, previousReportSha256: null,
     requiresRecovery: true, uncertainReason: 'fixture', unresolvedRecording: false, closeFailure: null, state: 'unknown',
-    operations: 1, pendingOperations: 1, temporaryFiles: 0, issues: ['fixture'] };
+    operations: 1, pendingOperations: 1, temporaryFiles: original.temporaryFiles.length, issues: ['fixture'] };
   const oldPath = path.join(owner, 'recoveries', oldReceipt.recoveryId + '.json');
   const oldHash = await write(oldPath, oldReceipt);
   const gateBase = { schemaVersion: 1, deviceId, ownerSessionId: ownerId, state: 'quarantined', journalPath, updatedAt: now,
@@ -91,7 +91,7 @@ export async function maintenanceFixture(root, transform = (_kind, value) => val
     originalResult: 'unknown', operationIds: original.operations.map(op => op.id) });
   await publish({ phase: 'terminated', phoneAfter, termination }); await publish({ phase: 'cleaning' });
   const batch = await call('cleanup_owned_paths', id => put('cleanup-batch', { index: 0, hostCallId: id,
-    paths: [...original.operations.flatMap(op => [`${remote}/${op.id}/done`, `${remote}/${op.id}/done.pending`, `${remote}/${op.id}`]), `${remote}/files`, remote] }));
+    paths: [...original.temporaryFiles, ...original.operations.flatMap(op => [`${remote}/${op.id}/done`, `${remote}/${op.id}/done.pending`, `${remote}/${op.id}`]), `${remote}/files`, remote] }));
   await publish({ cleanupBatches: [batch] }); await publish({ phase: 'cleaned' });
   const receipt = { schemaVersion: 3, recoveryId: maintenanceId, deviceId, observedAt: now, sessionId: ownerId,
     reason: 'ordered_restart_maintenance', state: 'complete', originalExecutionResult: 'unknown', operations: 1,

@@ -3,6 +3,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import maestro.cli.harmonyos.AgentProtocolException;
 import maestro.cli.session.*;
 import maestro.harmonyos.hdc.*;
+import maestro.harmonyos.driver.HdcHarmonyOSDevice;
 import kotlin.Unit;
 import java.nio.file.*;
 import java.time.Duration;
@@ -19,6 +20,7 @@ class MaintenanceProducer {
     int hosts, calls;
     final boolean failObservation;
     boolean migrate;
+    boolean retainedImages;
     String powershellVersion = "5.1.1.1";
 
     MaintenanceProducer(Path root, boolean failObservation) throws Exception {
@@ -84,6 +86,13 @@ class MaintenanceProducer {
                 lost.shell(DEVICE, List.of("uitest", "dumpLayout"), Duration.ofSeconds(3));
                 throw new AssertionError("Missing proof was accepted");
             } catch (HdcException expected) { }
+            if (retainedImages) {
+                var adapter = new HdcHarmonyOSDevice(DEVICE, lost);
+                try { adapter.hierarchy(Duration.ofSeconds(2)); throw new AssertionError("Missing layout proof accepted"); }
+                catch (RuntimeException expected) { }
+                try { adapter.screenshot(Duration.ofSeconds(2)); throw new AssertionError("Missing screenshot proof accepted"); }
+                catch (RuntimeException expected) { }
+            }
             HarmonyOsRecoverySupport.INSTANCE.noteUncertainCleanup(owner, "Synthetic original proof loss");
             try { lease.finish(null, forbidden); throw new AssertionError("Unconfirmed session released"); }
             catch (AgentProtocolException expected) { }
@@ -131,10 +140,11 @@ class MaintenanceProducer {
     }
 
     public static void main(String[] args) throws Exception {
-        if (args.length != 2 || !Set.of("complete", "unconfirmed", "migrated").contains(args[1]))
-            throw new IllegalArgumentException("NEW_OUTPUT_DIRECTORY complete|unconfirmed|migrated");
+        if (args.length != 2 || !Set.of("complete", "unconfirmed", "migrated", "retained-images").contains(args[1]))
+            throw new IllegalArgumentException("NEW_OUTPUT_DIRECTORY complete|unconfirmed|migrated|retained-images");
         var producer = new MaintenanceProducer(Path.of(args[0]).toAbsolutePath().normalize(), args[1].equals("unconfirmed"));
         producer.migrate = args[1].equals("migrated");
+        producer.retainedImages = args[1].equals("retained-images");
         producer.run();
     }
 }

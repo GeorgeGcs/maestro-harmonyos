@@ -36,6 +36,23 @@ async function fixture(t, transform, options) {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   return { root, ...await maintenanceFixture(root, transform, options) };
 }
+
+test('JVM retained-image maintenance evidence passes the Node and client verifiers', {
+  skip: !process.env.MAESTRO_TEST_JAVA || !process.env.MAESTRO_TEST_CLI,
+}, async t => {
+  const parent = path.resolve(process.env.MAESTRO_TEST_TEMP ?? os.tmpdir());
+  await fs.mkdir(parent, { recursive: true });
+  const root = await fs.mkdtemp(path.join(parent, 'maestro-retained-images-'));
+  t.after(async () => { assert.equal(path.dirname(root), parent); await fs.rm(root, { recursive: true, force: true }); });
+  const output = path.join(root, 'evidence');
+  await execute(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+    path.resolve('scripts/tests/fixtures/MaintenanceProducer.java'), output, 'retained-images'], { windowsHide: true, timeout: 60000 });
+  const input = JSON.parse(await fs.readFile(path.join(output, 'input.json'), 'utf8'));
+  const result = await verifyMaintenanceRelease(input);
+  assert.equal(result.originalExecutionResult, 'unknown');
+  assert.ok(result.originalPendingOperations > 1);
+  assert.equal((await verifyMaintenanceReport(input)).releaseConfirmed, true);
+});
 test('migrated host evidence permits different PowerShell versions only across the approved restart', async t => {
   const f = await fixture(t, undefined, { migrate: true });
   const result = await verifyMaintenanceRelease(f.input);
@@ -71,6 +88,32 @@ test('completed chain confirms release without rewriting the old unknown result 
   await assert.rejects(verifyMaintenanceReport({ ...f.input, responsePath: null }), /saved complete/);
   await assert.rejects(verifyState({ ...f.input, mode: 'completion', runId: randomUUID(), attemptId: randomUUID() }), /original execution/);
 });
+test('registered layout and screenshot paths require complete cleanup evidence and preserve original unknown results', async t => {
+  const temporaryNames = [`layout-${randomUUID()}.json`, `screen-${randomUUID()}.png`];
+  const f = await fixture(t, undefined, { temporaryNames });
+  const before = await fs.readFile(f.journalPath);
+  const result = await verifyMaintenanceRelease(f.input);
+  assert.equal(result.originalExecutionResult, 'unknown');
+  assert.equal(result.originalPendingOperations, 1);
+  assert.equal((await verifyMaintenanceReport(f.input)).releaseConfirmed, true);
+  assert.deepEqual(await fs.readFile(f.journalPath), before);
+  const incomplete = await fixture(t, (kind, value) => {
+    if (kind === 'cleanup-batch') value.paths.shift();
+    return value;
+  }, { temporaryNames });
+  await assert.rejects(verifyMaintenanceRelease(incomplete.input), /precisely the owned paths/);
+});
+
+for (const [name, temporaryNames] of [
+  ['recording file', [`recording-${randomUUID()}.mp4`]],
+  ['wrong extension', [`layout-${randomUUID()}.mp4`]],
+  ['traversal', [`../layout-${randomUUID()}.json`]],
+  ['duplicate path', Array(2).fill(`layout-${randomUUID()}.json`)],
+]) test(`maintenance rejects ${name} even with a consistent evidence chain`, async t => {
+  const f = await fixture(t, undefined, { temporaryNames });
+  await assert.rejects(verifyMaintenanceRelease(f.input), /outside maintenance scope/);
+});
+
 test('lossless parsing rejects duplicates and retains process identity integer differences', () => {
   assert.throws(() => parseMaintenanceJson('{"state":1,"st\\u0061te":2}'), /Duplicate/);
   assert.notDeepEqual(parseMaintenanceJson('{"ticks":9007199254740992}'), parseMaintenanceJson('{"ticks":9007199254740993}'));

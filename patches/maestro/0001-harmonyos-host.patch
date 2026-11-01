@@ -3930,10 +3930,10 @@ index 0000000..88d0e66
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 new file mode 100644
-index 0000000..329ad21
+index 0000000..3a75228
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
-@@ -0,0 +1,530 @@
+@@ -0,0 +1,545 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -4179,8 +4179,9 @@ index 0000000..329ad21
 +            verifyJournal(original, mapper.readTree(current), step.calls, allowLastPending = false)
 +        }
 +        fun host(reference: MaintenanceReference): HarmonyOsMaintenanceHostBoot.Observation {
-+            val expected = if (checkpoint.transition != null && reference == checkpoint.hostBefore) {
-+                val prior = mapper.treeToValue(evidence.json(checkpoint.transition)["previousCheckpoint"], MaintenanceReference::class.java)
++            val transition = checkpoint.transition
++            val expected = if (transition != null && reference == checkpoint.hostBefore) {
++                val prior = mapper.treeToValue(evidence.json(transition)["previousCheckpoint"], MaintenanceReference::class.java)
 +                readCheckpoint(evidence, prior).tools
 +            } else checkpoint.tools
 +            return HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference), expected.getValue("powershell"), expected.getValue("script"))
@@ -4289,9 +4290,23 @@ index 0000000..329ad21
 +                it.fileName.toString().endsWith(".jar", ignoreCase = true) }.map { it.toString() }.toList().toSet() }
 +            require(actual == jars.map { it.path }.toSet()) { "CLI classpath membership changed." }
 +        }
++        private fun maintenanceTemporaryPaths(node: JsonNode): List<String> {
++            val generation = node["generation"].asText()
++            E.uuid(generation)
++            val root = "/data/local/tmp/maestro-session-$generation"
++            require(node["remoteRoot"].asText() == root && node["temporaryFiles"].isArray)
++            val pattern = Regex(Regex.escape(root) + "/files/(?:layout-[0-9a-f-]{36}\\.json|screen-[0-9a-f-]{36}\\.png)")
++            val paths = node["temporaryFiles"].map {
++                require(it.isTextual && pattern.matches(it.asText())) { "Unsupported maintenance temporary file." }
++                it.asText()
++            }
++            require(paths.distinct().size == paths.size)
++            return paths
++        }
 +        private fun requireScope(node: JsonNode, gate: LeaseGate) {
 +            require(node["version"].asInt() == 1 && node["deviceId"].asText() == gate.deviceId && node["ownerId"].asText() == gate.ownerId)
-+            require(node["sealed"].isBoolean && node["sealed"].booleanValue() && node["temporaryFiles"].isArray && node["temporaryFiles"].isEmpty)
++            require(node["sealed"].isBoolean && node["sealed"].booleanValue())
++            maintenanceTemporaryPaths(node)
 +            require(node["operations"].isArray && node["operations"].all { it["completed"].booleanValue() || it["recoverable"].booleanValue() })
 +            require(pendingIds(node).isNotEmpty()) { "Maintenance is only for pending finite commands." }
 +            require(node["hostCalls"].isArray && node["hostCalls"].all { it["returned"].isBoolean && it["returned"].booleanValue() && it["stopped"].isBoolean && it["stopped"].booleanValue() })
@@ -4311,7 +4326,7 @@ index 0000000..329ad21
 +            val journal = mapper.readTree(E.read(checkedJournalPath(directory, gate)))
 +            require(node["operations"].isIntegralNumber && node["operations"].asInt() == journal["operations"].size() &&
 +                node["pendingOperations"].isIntegralNumber && node["pendingOperations"].asInt() == pendingIds(journal).size &&
-+                node["temporaryFiles"].isIntegralNumber && node["temporaryFiles"].asInt() == 0)
++                node["temporaryFiles"].isIntegralNumber && node["temporaryFiles"].asInt() == maintenanceTemporaryPaths(journal).size)
 +            E.uuid(node["recoveryId"].asText()); require(path.fileName.toString() == node["recoveryId"].asText() + ".json")
 +            return bytes
 +        }
@@ -4407,7 +4422,7 @@ index 0000000..329ad21
 +        private fun validateCleanup(state: State) {
 +            validateTermination(state)
 +            val root = state.original["remoteRoot"].asText()
-+            val expected = state.original["operations"].flatMap { val path = "$root/${it["id"].asText()}"; listOf("$path/done", "$path/done.pending", path) } + listOf("$root/files", root)
++            val expected = maintenanceTemporaryPaths(state.original) + state.original["operations"].flatMap { val path = "$root/${it["id"].asText()}"; listOf("$path/done", "$path/done.pending", path) } + listOf("$root/files", root)
 +            val batches = state.step.cleanupBatches.mapIndexed { index, reference ->
 +                val node = state.evidence.json(reference); E.exactFields(node, setOf("index", "paths", "hostCallId"))
 +                val batch = mapper.treeToValue(node, MaintenanceCleanupBatch::class.java)
@@ -9976,10 +9991,10 @@ index 0000000..c62e2ea
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
 new file mode 100644
-index 0000000..4ceb551
+index 0000000..87b041e
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsMaintenanceRecoveryTest.kt
-@@ -0,0 +1,345 @@
+@@ -0,0 +1,364 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -9991,6 +10006,7 @@ index 0000000..4ceb551
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
 +import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
 +import maestro.utils.TempFileHandler
 +import org.junit.jupiter.api.Test
 +import org.junit.jupiter.api.assertThrows
@@ -10012,7 +10028,7 @@ index 0000000..4ceb551
 +    private val beforePhone = " 23:02:14 up 4 days, 35 min,  0 users,  load average: 12.18, 12.26, 12.44\n"
 +    private val afterPhone = " 23:10:14 up 1 min,  0 users,  load average: 0.18, 0.26, 0.44\n"
 +
-+    private inner class Fixture(val root: Path, recording: Boolean = false) {
++    private inner class Fixture(val root: Path, recording: Boolean = false, retainedImages: Boolean = false) {
 +        val owner = UUID.randomUUID().toString()
 +        var tools: Map<String, MaintenanceTool>
 +        var powershellVersion = "7.5.0"
@@ -10044,6 +10060,11 @@ index 0000000..4ceb551
 +                val lost = HdcClient("fake-original", HdcCommandRunner { _, _ -> HdcCommandResult(0, "missing original proof", "") })
 +                    .withRecoveryJournal(lease.journal)
 +                assertThrows<HdcException> { lost.shell(device, listOf("uitest", "dumpLayout")) }
++                if (retainedImages) {
++                    val adapter = HdcHarmonyOSDevice(device, lost)
++                    assertThrows<Exception> { adapter.hierarchy(java.time.Duration.ofSeconds(2)) }
++                    assertThrows<Exception> { adapter.screenshot(java.time.Duration.ofSeconds(2)) }
++                }
 +                HarmonyOsRecoverySupport.noteUncertainCleanup(owner, "Synthetic original proof loss")
 +                assertThrows<AgentProtocolException> { lease.finish(null, noHdc()) }
 +            }
@@ -10113,8 +10134,7 @@ index 0000000..4ceb551
 +            val before = mapper.readTree(originalJournalBytes).deepCopy<ObjectNode>().apply { remove("hostCalls") }
 +            val after = mapper.readTree(journalPath.toFile()).deepCopy<ObjectNode>().apply { remove("hostCalls") }
 +            assertThat(after).isEqualTo(before)
-+            assertThat(after["operations"].single()["completed"].asBoolean()).isFalse()
-+            assertThat(after["operations"].single()["markerRemoved"].asBoolean()).isFalse()
++            assertThat(after["operations"].all { !it["completed"].asBoolean() && !it["markerRemoved"].asBoolean() }).isTrue()
 +        }
 +    }
 +
@@ -10320,9 +10340,23 @@ index 0000000..4ceb551
 +        assertThat(f.deviceCalls).isEqualTo(3)
 +    }
 +
++    @Test fun `ordered maintenance accepts retained layout and screenshot ownership without changing original journal`() = fixture(retainedImages = true) { f ->
++        val original = mapper.readTree(f.originalJournalBytes)
++        assertThat(original["temporaryFiles"].size()).isEqualTo(2)
++        assertThat(f.recovery().prepare(device, f.owner).phase).isEqualTo("prepared")
++        assertThat(f.deviceCalls).isEqualTo(0)
++        assertThat(f.recovery().resume(device, f.owner).phase).isEqualTo("phone_prepared")
++        assertThat(f.recovery().complete(device, f.owner).complete).isTrue()
++        f.assertOriginalPreserved()
++        val finished = mapper.readTree(Path.of(f.gate()["reportPath"].asText()).toFile())
++        assertThat(finished["originalPendingOperations"].asInt()).isEqualTo(original["operations"].size())
++        assertThat(finished["temporaryFiles"].asInt()).isEqualTo(0)
++        assertThat(f.gate()["state"].asText()).isEqualTo("clean")
++    }
++
 +    private fun noHdc() = HdcClient("forbidden", HdcCommandRunner { _, _ -> error("No HDC call is permitted") })
-+    private fun fixture(recording: Boolean = false, block: (Fixture) -> Unit) = TempFileHandler().use { files ->
-+        block(Fixture(files.createTempDirectory("maintenance-recovery-test").toPath(), recording))
++    private fun fixture(recording: Boolean = false, retainedImages: Boolean = false, block: (Fixture) -> Unit) = TempFileHandler().use { files ->
++        block(Fixture(files.createTempDirectory("maintenance-recovery-test").toPath(), recording, retainedImages))
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
@@ -12214,10 +12248,10 @@ index 0000000..e7ac48d
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt
 new file mode 100644
-index 0000000..c2a147a
+index 0000000..5332d5c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransport.kt
-@@ -0,0 +1,148 @@
+@@ -0,0 +1,150 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -12271,7 +12305,9 @@ index 0000000..c2a147a
 +        val root = inventory.remoteRoot
 +        val files = "$root/files"
 +        val prefix = "[ ! -L ${quote(root)} ] && [ ! -L ${quote(files)} ] || exit 121; "
-+        val steps = inventory.operationIds.chunked(20).map { ids ->
++        val steps = inventory.temporaryFiles.map { remote ->
++            CleanupStep("[ ! -L ${quote(remote)} ] && rm -f ${quote(remote)} && [ ! -e ${quote(remote)} ] || exit 121; ", listOf(remote))
++        } + inventory.operationIds.chunked(20).map { ids ->
 +            val directories = ids.map { "$root/$it" }
 +            val script = "for __maestro_cleanup_dir in ${directories.joinToString(" ", transform = ::quote)}; do " +
 +                "if [ -e \"\$__maestro_cleanup_dir\" ] || [ -L \"\$__maestro_cleanup_dir\" ]; then " +
@@ -12827,10 +12863,10 @@ index 0000000..f8ced01
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..5a89f70
+index 0000000..e70a52f
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,534 @@
+@@ -0,0 +1,545 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -12933,19 +12969,25 @@ index 0000000..5a89f70
 +
 +    @Synchronized fun snapshot(): RecoveryReport = report()
 +
-+    internal data class MaintenanceInventory(val remoteRoot: String, val operationIds: List<String>)
++    internal data class MaintenanceInventory(val remoteRoot: String, val operationIds: List<String>, val temporaryFiles: List<String>)
 +
 +    /** Read-only scope check; a pending finite command is not treated as completed. */
 +    @Synchronized internal fun maintenanceInventory(): MaintenanceInventory {
 +        ensureOpen()
 +        check(state.sealed && activeCalls == 0 && !persistenceUnconfirmed) { "Maintenance requires a sealed, durable, idle journal." }
 +        check(state.hostCalls.all { it.stopped }) { "Maintenance requires confirmed native termination." }
-+        check(state.temporaryFiles.isEmpty() && recordings == null &&
++        check(recordings == null &&
 +            Files.notExists(path.resolveSibling("recording-resources.json"), LinkOption.NOFOLLOW_LINKS)) {
-+            "Maintenance does not handle temporary files or recording resources."
++            "Maintenance does not handle recording resources."
++        }
++        state.temporaryFiles.forEach { remote ->
++            requireOwnedFile(remote)
++            check(remote.substringAfterLast('/').matches(Regex("(?:layout-[0-9a-f-]{36}\\.json|screen-[0-9a-f-]{36}\\.png)"))) {
++                "Maintenance only handles registered layout and screenshot files."
++            }
 +        }
 +        check(state.operations.all { it.completed || it.recoverable }) { "Maintenance requires finite pending commands." }
-+        return MaintenanceInventory(state.remoteRoot, state.operations.map { it.id })
++        return MaintenanceInventory(state.remoteRoot, state.operations.map { it.id }, state.temporaryFiles.toList())
 +    }
 +
 +    @Synchronized internal fun allocateTemporaryFile(kind: String, extension: String): String {
@@ -13300,7 +13342,12 @@ index 0000000..5a89f70
 +            require(Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS) && Files.size(file) <= 32 * 1024 * 1024) { "Invalid recovery journal." }
 +            val tree = mapper.readTree(file.toFile())
 +            validateFields(tree)
-+            val state = mapper.treeToValue(tree, State::class.java)
++            // The maintenance chain compares the original journal, including array order.
++            // Jackson's default MutableSet implementation must not reorder saved ownership.
++            val temporaryPaths = tree["temporaryFiles"].map { it.asText() }
++            require(temporaryPaths.distinct().size == temporaryPaths.size) { "Duplicate temporary resource." }
++            val state = mapper.treeToValue(tree, State::class.java).copy(
++                temporaryFiles = temporaryPaths.toCollection(linkedSetOf()))
 +            require(state.version == 1 && uuid(state.ownerId) && uuid(state.generation) &&
 +                state.remoteRoot == "/data/local/tmp/maestro-session-${state.generation}" &&
 +                state.deviceId.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]*"))) { "Invalid recovery owner or device." }
@@ -17121,10 +17168,10 @@ index 0000000..5304c6f
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt
 new file mode 100644
-index 0000000..8a429d0
+index 0000000..6080ec5
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSMaintenanceTransportTest.kt
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,361 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -17132,10 +17179,12 @@ index 0000000..8a429d0
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import com.google.common.truth.Truth.assertThat
 +import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Assumptions.assumeTrue
 +import org.junit.jupiter.api.Test
 +import org.junit.jupiter.api.io.TempDir
 +import java.io.IOException
 +import java.nio.file.Path
++import java.nio.file.Files
 +import java.security.MessageDigest
 +import java.time.Duration
 +import java.util.UUID
@@ -17346,9 +17395,69 @@ index 0000000..8a429d0
 +        }
 +    }
 +
-+    @Test fun `maintenance refuses active unsealed temporary recording and nonfinite scopes`() {
++    @Test fun `reopening retains temporary resource ordering and rejects duplicate reservations`() {
++        val journal = create()
++        repeat(20) { journal.allocateTemporaryFile(if (it % 2 == 0) "layout" else "screen", if (it % 2 == 0) "json" else "png") }
++        journal.seal()
++        val before = original(journal)
++        val file = journal.path
++        journal.close()
++        repeat(3) {
++            HarmonyOSRecoveryJournal.open(file).use { reopened -> assertThat(original(reopened)).isEqualTo(before) }
++        }
++        val duplicate = mapper.readTree(file.toFile()).deepCopy<ObjectNode>()
++        val resources = duplicate["temporaryFiles"] as com.fasterxml.jackson.databind.node.ArrayNode
++        resources.add(resources.first().asText())
++        Files.write(file, mapper.writeValueAsBytes(duplicate))
++        assertThrows(IllegalArgumentException::class.java) { HarmonyOSRecoveryJournal.open(file) }
++    }
++
++    @Test fun `maintenance removes only registered image files in a real shell and retains original outcomes`() {
++        val shell = System.getenv("MAESTRO_TEST_POSIX_SHELL") ?: "/bin/sh"
++        assumeTrue(Files.isRegularFile(Path.of(shell)), "Set MAESTRO_TEST_POSIX_SHELL on Windows")
++        for (mode in listOf("normal", "unexpected-file", "directory-as-image")) create().use { journal ->
++            val layout = journal.allocateTemporaryFile("layout", "json")
++            val screen = journal.allocateTemporaryFile("screen", "png")
++            pending(journal)
++            journal.seal()
++            val before = original(journal)
++            val remoteRoot = state(journal)["remoteRoot"].asText()
++            val work = Files.createDirectory(directory.resolve(mode))
++            val owned = Files.createDirectory(work.resolve("owned"))
++            val files = Files.createDirectory(owned.resolve("files"))
++            val image = files.resolve(layout.substringAfterLast('/'))
++            if (mode == "directory-as-image") Files.createDirectory(image) else Files.writeString(image, "retained layout")
++            Files.writeString(files.resolve(screen.substringAfterLast('/')), "retained screenshot")
++            if (mode == "unexpected-file") Files.writeString(files.resolve("unregistered.txt"), "keep")
++            Files.writeString(work.resolve("outside.txt"), "keep")
++            val confirmed = mutableListOf<MaintenanceCleanupBatch>()
++            val hdc = HdcClient("fake", HdcCommandRunner { command, _ ->
++                val script = shellArguments(command).last().replace(remoteRoot, "./owned")
++                val process = ProcessBuilder(shell, "-c", script).directory(work.toFile())
++                    .redirectOutput(work.resolve("stdout.txt").toFile()).redirectError(work.resolve("stderr.txt").toFile()).start()
++                check(process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS))
++                HdcCommandResult(process.exitValue(), Files.readString(work.resolve("stdout.txt")), Files.readString(work.resolve("stderr.txt")))
++            })
++            val transport = HarmonyOSMaintenanceTransport(journal, hdc)
++            if (mode == "normal") {
++                transport.cleanupOwnedPaths(timeout, {}, confirmed::add)
++                assertThat(Files.exists(owned)).isFalse()
++                assertThat(confirmed.flatMap { it.paths }.take(2)).containsExactly(layout, screen).inOrder()
++            } else {
++                assertThrows(HdcException::class.java) { transport.cleanupOwnedPaths(timeout, {}, confirmed::add) }
++                assertThat(Files.exists(owned)).isTrue()
++                if (mode == "unexpected-file") assertThat(Files.readString(files.resolve("unregistered.txt"))).isEqualTo("keep")
++            }
++            assertThat(Files.readString(work.resolve("outside.txt"))).isEqualTo("keep")
++            assertThat(original(journal)).isEqualTo(before)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++        }
++    }
++
++    @Test fun `maintenance refuses active unsealed unsupported temporary recording and nonfinite scopes`() {
 +        val fixtures: List<(HarmonyOSRecoveryJournal) -> Unit> = listOf(
-+            {}, { it.allocateTemporaryFile("layout", "json"); it.seal() },
++            {}, { it.allocateTemporaryFile("recording", "mp4"); it.seal() },
++            { it.allocateTemporaryFile("layout", "mp4"); it.seal() },
 +            { it.enableRecordingResources(); it.seal() }, { pending(it, finite = false); it.seal() },
 +            { journal ->
 +                journal.hostCall { observer ->

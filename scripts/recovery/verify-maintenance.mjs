@@ -150,7 +150,10 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
   const original = await ref(cp.originalJournal), originalGate = await ref(cp.originalGate), originalReceipt = await ref(cp.originalReceipt);
   requireValue(original.version === 1 && original.deviceId === deviceId && original.ownerId === ownerId && original.generation === cp.generation &&
     original.remoteRoot === '/data/local/tmp/maestro-session-' + cp.generation && original.sealed === true &&
-    Array.isArray(original.temporaryFiles) && original.temporaryFiles.length === 0 && Array.isArray(original.operations) &&
+    Array.isArray(original.temporaryFiles) && new Set(original.temporaryFiles).size === original.temporaryFiles.length &&
+    original.temporaryFiles.every(file => typeof file === 'string' &&
+      file.startsWith(original.remoteRoot + '/files/') && /^(?:layout-[0-9a-f-]{36}\.json|screen-[0-9a-f-]{36}\.png)$/.test(file.slice((original.remoteRoot + '/files/').length))) &&
+    Array.isArray(original.operations) &&
     original.operations.every(op => uuid(op.id) && typeof op.completed === 'boolean' && (op.completed || op.recoverable === true)) &&
     new Set(original.operations.map(op => op.id)).size === original.operations.length && Array.isArray(original.hostCalls) &&
     original.hostCalls.every(call => call.returned === true && call.stopped === true), 'Original journal is outside maintenance scope.');
@@ -165,7 +168,7 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
     originalGate.reportSha256 === cp.originalReceipt.sha256 && (await read(originalGate.reportPath)).sha256 === cp.originalReceipt.sha256 &&
     originalReceipt.schemaVersion === 1 && originalReceipt.deviceId === deviceId && originalReceipt.sessionId === ownerId &&
     originalReceipt.state === 'unknown' && originalReceipt.closeFailure === null && originalReceipt.unresolvedRecording === false &&
-    originalReceipt.operations === original.operations.length && originalReceipt.pendingOperations === pending.length && originalReceipt.temporaryFiles === 0,
+    originalReceipt.operations === original.operations.length && originalReceipt.pendingOperations === pending.length && originalReceipt.temporaryFiles === original.temporaryFiles.length,
   'Original recovery receipt differs.');
   const chain = []; let cursor = final;
   while (true) {
@@ -231,7 +234,7 @@ export async function verifyMaintenanceRelease({ deviceId, recoveryRoot, created
     requireValue(batch.index === index && Array.isArray(batch.paths) && calls.length === 1, 'Cleanup batch is unconfirmed.'); paths.push(...batch.paths);
   }
   const remote = original.remoteRoot;
-  requireValue(equal(paths, [...original.operations.flatMap(op => [`${remote}/${op.id}/done`, `${remote}/${op.id}/done.pending`, `${remote}/${op.id}`]), `${remote}/files`, remote]) &&
+  requireValue(equal(paths, [...original.temporaryFiles, ...original.operations.flatMap(op => [`${remote}/${op.id}/done`, `${remote}/${op.id}/done.pending`, `${remote}/${op.id}`]), `${remote}/files`, remote]) &&
     final.cleanupBatches.length === final.calls.filter(call => call.phase === 'cleaning').length, 'Cleanup does not cover precisely the owned paths.');
   const receipt = await ref(final.receipt), cleaned = await ref(receipt.evidenceHead);
   requireValue(cleaned.phase === 'cleaned' && chain.some(step => equal(step, cleaned)) &&
