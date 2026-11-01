@@ -1,0 +1,11 @@
+appId: ohos.samples.componentcollection
+name: component-foreground-buttons
+---
+- assertVisible:
+    id: Capsule
+- tapOn:
+    id: Capsule
+    retryTapIfNoChange: false
+- assertVisible:
+    id: Capsule onClickId
+- takeScreenshot: foreground-button

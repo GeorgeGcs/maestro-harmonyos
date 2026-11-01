@@ -186,6 +186,9 @@ test('empty, duplicated, missing, foreign and contradictory native cases cannot 
 
 test('build observation refuses the parent-workspace Git trap and strict metadata rejects duplicate keys', async t => {
   const context = await setup(t);
+  // The enclosing checkout may be a source archive without .git. Create the
+  // parent-repository trap inside the fixture instead of relying on its host.
+  execFileSync('git', ['init', '--quiet', context.root], { windowsHide: true });
   await assert.rejects(gitIdentity(context.project), /parent repository/);
   const file = path.join(context.root, 'duplicates.json'); await fs.writeFile(file, '{"schemaVersion":1,"schemaVersion":2}');
   await assert.rejects(readMetadata(file), /Duplicate/);

@@ -1,0 +1,27 @@
+appId: ohos.samples.componentcollection
+name: component-foreground-dialogs
+---
+- assertVisible:
+    id: test_oneButton
+- assertVisible:
+    id: test_twoButton
+- assertNotVisible: 提示
+- assertNotVisible: 警告
+- tapOn:
+    id: test_oneButton
+    retryTapIfNoChange: false
+- assertVisible: 提示
+- tapOn:
+    text: 确认
+    retryTapIfNoChange: false
+- assertNotVisible: 提示
+- tapOn:
+    id: test_twoButton
+    retryTapIfNoChange: false
+- assertVisible: 警告
+- assertVisible: 您正在执行操作
+- takeScreenshot: foreground-dialog
+- tapOn:
+    text: 取消
+    retryTapIfNoChange: false
+- assertNotVisible: 警告

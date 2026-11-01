@@ -1,0 +1,23 @@
+appId: ohos.samples.componentcollection
+name: component-foreground-scroll
+---
+- assertVisible: 横向滚动
+- swipe:
+    direction: UP
+    duration: 600
+- scrollUntilVisible:
+    element:
+      id: test_input
+    direction: DOWN
+    timeout: 20000
+    centerElement: true
+- tapOn:
+    id: test_input
+    retryTapIfNoChange: false
+- assertVisible:
+    id: test_input
+    focused: true
+- eraseText: 50
+- inputText: panda-scroll
+- assertVisible: panda-scroll
+- takeScreenshot: foreground-scroll-input

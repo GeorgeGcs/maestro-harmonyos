@@ -1,0 +1,17 @@
+appId: ohos.samples.componentcollection
+name: component-foreground-input
+---
+- assertVisible: 当前最大输入12字符
+- tapOn:
+    text: 当前最大输入12字符
+    point: "50%,15%"
+    retryTapIfNoChange: false
+- assertVisible:
+    text: 当前最大输入12字符
+    focused: true
+- eraseText: 12
+- assertVisible: '0/12'
+- inputText: maestro12345
+- assertVisible: maestro12345
+- assertVisible: '12/12'
+- takeScreenshot: foreground-input
