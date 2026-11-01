@@ -18,6 +18,14 @@ name: component-foreground-scroll
     id: test_input
     focused: true
 - eraseText: 50
+- tapOn:
+    id: test_input
+    retryTapIfNoChange: false
+- assertVisible:
+    id: test_input
+    focused: true
 - inputText: panda-scroll
-- assertVisible: panda-scroll
+- assertVisible:
+    id: test_input
+    text: panda-scroll
 - takeScreenshot: foreground-scroll-input

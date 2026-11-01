@@ -12827,10 +12827,10 @@ index 0000000..f8ced01
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..df7efae
+index 0000000..5a89f70
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,526 @@
+@@ -0,0 +1,534 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -12960,6 +12960,14 @@ index 0000000..df7efae
 +    @Synchronized internal fun forgetTemporaryFile(remote: String) {
 +        ensureOpen()
 +        requireOwnedFile(remote)
++        if (remote.substringAfterLast('/').matches(Regex("(?:layout-[0-9a-f-]{36}\\.json|screen-[0-9a-f-]{36}\\.png)"))) {
++            // UITest outputs can remain after an acknowledged eager deletion. Keep
++            // the existing durable reservation until sealed-session cleanup. Never
++            // adopt unregistered files based on their names or directory contents.
++            check(remote in state.temporaryFiles) { "Temporary file is not registered to this session." }
++            return
++        }
++        // Recording resources have their own ownership and archive lifecycle.
 +        state.temporaryFiles.remove(remote)
 +        persist()
 +    }
@@ -18388,10 +18396,10 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..f348982
+index 0000000..514ba03
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,443 @@
+@@ -0,0 +1,453 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -18415,7 +18423,7 @@ index 0000000..f348982
 +    @Test fun `batched cleanup executes named paths and preserves unexpected content in a real shell`() {
 +        val shell = System.getenv("MAESTRO_TEST_POSIX_SHELL") ?: "/bin/sh"
 +        assumeTrue(Files.isRegularFile(Path.of(shell)), "Set MAESTRO_TEST_POSIX_SHELL to exercise the generated shell on Windows")
-+        for (mode in listOf("normal", "missing-directory", "unexpected-file", "not-a-directory")) {
++        for (mode in listOf("normal", "missing-directory", "unexpected-file", "not-a-directory", "recreated-layout")) {
 +            val work = Files.createDirectory(directory.resolve(mode))
 +            val journalPath = work.resolve("journal.json")
 +            HarmonyOSRecoveryJournal.create(journalPath, "fixture-target", UUID.randomUUID().toString()).use { journal ->
@@ -18441,8 +18449,18 @@ index 0000000..f348982
 +                })
 +                val tracked = hdc.withRecoveryJournal(journal)
 +                repeat(3) { tracked.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++                val removedLayout = if (mode == "recreated-layout") {
++                    tracked.allocateTemporaryFile("layout", "json").also { remotePath ->
++                        tracked.shell("fixture-target", listOf("uitest", "dumpLayout", "-p", remotePath))
++                        tracked.shell("fixture-target", listOf("rm", "-f", remotePath))
++                        tracked.forgetTemporaryFile(remotePath)
++                    }
++                } else null
 +                val state = mapper.readTree(journalPath.toFile())
 +                val owned = Files.createDirectory(work.resolve("owned")); Files.createDirectory(owned.resolve("files"))
++                // Model the real device finding: the named layout exists after a
++                // successful eager deletion. Final cleanup must still know its owner.
++                removedLayout?.let { Files.writeString(owned.resolve("files").resolve(it.substringAfterLast('/')), "late layout") }
 +                val ids = state["operations"].map { it["id"].asText() }
 +                for ((index, id) in ids.withIndex()) {
 +                    if (index == 0 && mode == "missing-directory") continue
@@ -18455,7 +18473,7 @@ index 0000000..f348982
 +                Files.writeString(work.resolve("outside"), "keep")
 +                journal.seal()
 +                val report = journal.recover(hdc)
-+                val successful = mode in listOf("normal", "missing-directory")
++                val successful = mode in listOf("normal", "missing-directory", "recreated-layout")
 +                org.junit.jupiter.api.Assertions.assertEquals(if (successful) "complete" else "unknown", report.state) {
 +                    "$mode: ${report.issues}; stderr=${if (Files.exists(work.resolve("stderr.txt"))) Files.readString(work.resolve("stderr.txt")) else "absent"}"
 +                }
