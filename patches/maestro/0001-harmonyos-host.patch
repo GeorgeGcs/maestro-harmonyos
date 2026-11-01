@@ -142,7 +142,7 @@ index 0000000..a7b39b1
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
 new file mode 100644
-index 0000000..7c78d07
+index 0000000..0134fd3
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
 @@ -0,0 +1,90 @@
@@ -163,7 +163,7 @@ index 0000000..7c78d07
 +    description = ["Maintain a quarantined finite-command session across verified Windows and device restarts"])
 +class HarmonyOsRecoveryCommand : Callable<Int> {
 +    @CommandLine.ParentCommand private var parent: App? = null
-+    @CommandLine.Parameters(index = "0", description = ["prepare, resume, or complete"])
++    @CommandLine.Parameters(index = "0", description = ["prepare, resume, complete, plan-host-migration, or migrate-host"])
 +    private lateinit var action: String
 +    @CommandLine.Option(names = ["--session"], required = true, description = ["Original recovery session UUID"])
 +    private lateinit var ownerId: String
@@ -3930,10 +3930,10 @@ index 0000000..88d0e66
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
 new file mode 100644
-index 0000000..83aedff
+index 0000000..329ad21
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsMaintenanceRecovery.kt
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,530 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -3988,7 +3988,9 @@ index 0000000..83aedff
 +        val plan = mapper.readTree(E.read(approval, 1024 * 1024))
 +        E.exactFields(plan, setOf("schemaVersion", "reason", "checkpointSha256", "tools"))
 +        require(plan["schemaVersion"].asInt() == 1 && plan["reason"].asText() == "windows_powershell_update")
-+        require(plan["tools"] == mapper.valueToTree<JsonNode>(tools)) { "Approved tools differ from the running distribution." }
++        // Read both sides as JSON: file sizes deserialize as IntNode when small, while
++        // valueToTree preserves the Kotlin Long and would reject identical manifests.
++        require(plan["tools"] == mapper.readTree(mapper.writeValueAsBytes(tools))) { "Approved tools differ from the running distribution." }
 +        verifyTools(tools)
 +        if (state.checkpoint.schemaVersion == 2) {
 +            val transition = state.evidence.json(requireNotNull(state.checkpoint.transition))
@@ -4270,8 +4272,8 @@ index 0000000..83aedff
 +                previousGate["schemaVersion"].asInt() == 2 && previousGate["state"].asText() == "quarantined" &&
 +                previousGate["deviceId"].asText() == cp.deviceId && previousGate["ownerSessionId"].asText() == cp.ownerId)
 +            val approval = evidence.json(reference("approval"))
-+            require(approval == mapper.valueToTree<JsonNode>(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
-+                "checkpointSha256" to oldRef.sha256, "tools" to cp.tools)))
++            require(approval == mapper.readTree(mapper.writeValueAsBytes(mapOf("schemaVersion" to 1, "reason" to "windows_powershell_update",
++                "checkpointSha256" to oldRef.sha256, "tools" to cp.tools))))
 +            val before = HarmonyOsMaintenanceHostBoot.parse(evidence.json(old.hostBefore), old.tools.getValue("powershell"), old.tools.getValue("script"))
 +            val current = HarmonyOsMaintenanceHostBoot.parse(evidence.json(reference("hostObserved")), cp.tools.getValue("powershell"), cp.tools.getValue("script"))
 +            HarmonyOsMaintenanceHostBoot.requireRestartedAfterToolMigration(before, current)
