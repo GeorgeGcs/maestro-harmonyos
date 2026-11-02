@@ -10,7 +10,7 @@
 manifest.json                  版本、构建记录摘要及逐文件 SHA-256
 source/                        指定提交的全部 tracked 文件
 cli/bin/                       installDist 启动脚本
-cli/lib/                       installDist 的完整 JAR 集合
+cli/lib/                       installDist 的完整依赖文件（JAR 与 POM）
 licenses/upstream/LICENSE      固定上游提交的许可证
 licenses/upstream/NOTICE       固定上游提交存在此文件时一并保留
 ```

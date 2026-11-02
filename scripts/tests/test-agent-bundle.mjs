@@ -45,6 +45,7 @@ test('portable bundle binds committed source, full CLI distribution and safe ZIP
   await write(source, 'LICENSE', 'dirty working tree must not leak\n');
   await write(cli, 'bin/maestro', '# fixture\n'); await write(cli, 'bin/maestro.bat', '@rem fixture\n');
   await write(cli, 'lib/maestro-cli-0.0.0.jar', 'fixture jar\n'); await write(cli, 'lib/dependency.jar', 'fixture dependency\n');
+  await write(cli, 'lib/js-community-24.2.0.pom', '<project>fixture metadata</project>\n');
   const archive = path.join(root, 'input.zip');
   await runGit(source, ['archive','--format=zip','--output',archive,sourceCommit]);
   const originalPatch = path.join(source, 'patches/maestro/0001-harmonyos-host.patch');
@@ -64,6 +65,7 @@ test('portable bundle binds committed source, full CLI distribution and safe ZIP
     assert.equal(verification.selfTest, 'not-requested');
     assert.equal(await fs.readFile(path.join(destination, 'source/LICENSE'), 'utf8'), 'Project fixture license\n');
     assert.equal(await fs.readFile(path.join(destination, 'licenses/upstream/NOTICE'), 'utf8'), 'Upstream fixture notice\n');
+    assert.equal(await fs.readFile(path.join(destination, 'cli/lib/js-community-24.2.0.pom'), 'utf8'), '<project>fixture metadata</project>\n');
     const manifest = await fs.readFile(path.join(destination, 'manifest.json'), 'utf8');
     assert.ok(!manifest.includes(root) && !manifest.includes('DO NOT EXPORT'));
     const value = JSON.parse(manifest);

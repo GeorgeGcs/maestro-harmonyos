@@ -24,7 +24,7 @@ export function safeSource(value) {
 }
 export function safeCli(value) {
   relativePath(value);
-  requireValue(/^bin\/[^/]+$/.test(value) || /^lib\/[^/]+\.jar$/.test(value), 'Unexpected CLI distribution member: ' + value);
+  requireValue(/^bin\/[^/]+$/.test(value) || /^lib\/[^/]+\.(?:jar|pom)$/.test(value), 'Unexpected CLI distribution member: ' + value);
   requireValue(!/(?:^|\/)(?:hdc(?:\.exe)?|sdk)(?:\/|$)/i.test(value), 'HDC and SDK must be installed separately.');
 }
 export function validateRecords(records, validatePath = relativePath) {
