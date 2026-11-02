@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "name": "HMOS代码工坊",
+  "repository": "https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos.git",
+  "commit": "7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6",
+  "license": "Apache-2.0",
+  "licenseFile": "LICENSE",
+  "licenseSha256": "96fd9dba9790d29216d57086cd79309870ecf33b10a51bec3b615b9a29420cfd",
+  "module": "phone",
+  "appId": "com.huawei.hmos.sample",
+  "abilityName": "EntryAbility",
+  "compatibleSdkVersion": "6.1.0(23)",
+  "targetSdkVersion": "6.1.1(24)",
+  "patch": {
+    "file": "patches/foreground-keep-awake.patch",
+    "sha256": "1db4d14804bc9dc5d1f84b112a4a153e7b5f5f0d67137c8b159ac4f4494988cf",
+    "target": "products/phone/src/main/ets/entryability/EntryAbility.ets"
+  }
+}

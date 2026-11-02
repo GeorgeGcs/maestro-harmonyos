@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packageBundle } from '../package-agent-bundle.mjs';
 import { verifyBundle, selfTestPlan } from '../verify-agent-bundle.mjs';
-import { execute, filesUnder, relativePath, zip } from '../agent-bundle.mjs';
+import { execute, filesUnder, relativePath, safeSource, zip } from '../agent-bundle.mjs';
 import { hashFile } from '../validation/io.mjs';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
@@ -21,6 +21,16 @@ async function maliciousZip(file, members, symlink = false) {
   const script = "$zip = [IO.Compression.ZipFile]::Open($env:BUNDLE_TEST_ZIP, [IO.Compression.ZipArchiveMode]::Create); try { foreach ($name in ($env:BUNDLE_TEST_MEMBERS | ConvertFrom-Json)) { $entry = $zip.CreateEntry($name); if ($env:BUNDLE_TEST_SYMLINK -eq 'true') { $entry.ExternalAttributes = -1581514752 }; $stream = $entry.Open(); try { $stream.WriteByte(65) } finally { $stream.Dispose() } } } finally { $zip.Dispose() }";
   await execute(pwsh, ['-NoProfile','-NonInteractive','-Command', script], { windowsHide: true, env: { ...process.env, BUNDLE_TEST_ZIP: file, BUNDLE_TEST_MEMBERS: JSON.stringify(members), BUNDLE_TEST_SYMLINK: String(symlink) } });
 }
+
+test('portable source excludes generated sample projects including IDE signing profiles', () => {
+  for (const file of ['examples/hmos-code-lab/app/build-profile.json5', 'EXAMPLES/HMOS-CODE-LAB/APP/AppScope/app.json5']) {
+    assert.throws(() => safeSource(file), /local or device material/);
+  }
+  for (const file of ['examples/hmos-code-lab/prepare.mjs', 'examples/hmos-code-lab/source.json',
+    'examples/hmos-code-lab/patches/foreground-keep-awake.patch', 'examples/hmos-code-lab/flows/02-input.yaml']) {
+    assert.doesNotThrow(() => safeSource(file));
+  }
+});
 
 test('portable bundle binds committed source, full CLI distribution and safe ZIP extraction', async t => {
   // Missing declared tools fail this suite. No optional skip and no real Java/HDC launch.

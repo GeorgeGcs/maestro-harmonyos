@@ -20,6 +20,7 @@ export function relativePath(value) {
 export function safeSource(value) {
   relativePath(value);
   requireValue(!/(?:^|\/)(?:\.git|\.local|\.upstream|node_modules|artifacts|\.env(?:\..+)?|device\.local\.json|config\.local\.[^/]+)(?:\/|$)/i.test(value) &&
+    !/^examples\/hmos-code-lab\/app(?:\/|$)/i.test(value) &&
     !/\.(?:hap|p12|pfx|jks|keystore|pem|key|cer|p7b|mp4|h264)$/i.test(value), 'Source commit contains local or device material: ' + value);
 }
 export function safeCli(value) {

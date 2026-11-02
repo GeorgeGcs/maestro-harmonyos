@@ -5,6 +5,8 @@
 | 来源 | 使用方式 | 当前状态 |
 | --- | --- | --- |
 | [Maestro](https://github.com/mobile-dev-inc/Maestro) | 固定提交作为适配底座；来源及提交见 `upstream.lock.json` | 已获取上游工作副本，新增代码和测试通过补丁交付；主机测试直接使用上游类型 |
+| [HMOS 代码工坊](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos) | 固定官方提交 `7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6`；通过 [获取脚本](examples/hmos-code-lab/README.md)准备完整工程，并应用本仓前台常亮补丁 | 原工程采用 Apache-2.0，获取后保留原许可证与版权头；源码、依赖、签名及构建产物保存在忽略的 `app/` 中。Flow 和补丁由本仓维护，真机验证状态见示例说明 |
+| [ComponentCollection](https://gitee.com/harmonyos_samples/component-collection) | 本仓编写对应 Maestro Flow；文档引用两张原始页面配图 | 原图采用 Apache-2.0，原许可证及来源记录见 [docs/images](docs/images/README.md)；原图不作为本仓运行结果 |
 | [OpenHarmony UITest 文档](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md) | 接口和命令行为参考 | 已在一台 API 26 真机核实布局、点击、中文输入、返回和截图 |
 | [OpenHarmony UITest 源码](https://github.com/openharmony/testfwk_arkxtest/tree/f59296c77aac5037a9335c317af58de3a0c22ecb) | 核对布局字段、id/key、命令参数及 `uiInput` 的 `No Error` 成功消息；没有复制其 C++ 实现 | 合成样本随补丁提供；真机布局留在本地，未提交个人界面材料 |
 | 本机安装的 DevEco Studio 6.1.1 录屏实现 | 核对 Huawei 系统录屏服务与媒体导出命令；没有复制其实现或分发安装文件 | 仅用于可选 `huawei-system` 后端，不视为通用 OpenHarmony 接口 |

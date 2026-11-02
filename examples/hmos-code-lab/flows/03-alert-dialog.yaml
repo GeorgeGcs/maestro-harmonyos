@@ -1,0 +1,27 @@
+# 状态：已核对官方源码，尚未进行真机验证。界面语言须为简体中文。
+# 手动进入 AlertDialog 详情，保持“点击警告弹窗”可见，起始时不要打开弹窗。
+# 来源：7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6，componentlibrary 的
+# alertdialogview/component/AlertDialogBuilder.ets 及 resources/zh_CN/element/string.json
+# （alert_dialog_tip、title、subtitle、content、button_one、button_two）。
+# 系统弹窗文字能否由设备 UI 树完整读取仍待验证；不依赖关闭后的 Toast。
+appId: com.huawei.hmos.sample
+name: hmos-code-lab-foreground-alert-dialog
+---
+- assertVisible: '^点击警告弹窗$'
+- assertNotVisible: '^按钮1$'
+- assertNotVisible: '^按钮2$'
+- tapOn:
+    text: '^点击警告弹窗$'
+    retryTapIfNoChange: false
+- assertVisible: '^标题$'
+- assertVisible: '^副标题$'
+- assertVisible: '^内容$'
+- assertVisible: '^按钮1$'
+- assertVisible: '^按钮2$'
+- takeScreenshot: hmos-code-lab-alert-dialog
+- tapOn:
+    text: '^按钮1$'
+    retryTapIfNoChange: false
+- assertNotVisible: '^按钮1$'
+- assertNotVisible: '^按钮2$'
+- assertVisible: '^点击警告弹窗$'

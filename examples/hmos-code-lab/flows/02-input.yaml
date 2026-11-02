@@ -1,0 +1,25 @@
+# 状态：已核对官方源码，尚未进行真机验证。界面语言须为简体中文。
+# 手动进入 TextInput 详情，使用默认 Normal 输入类型，并清空预览输入框。
+# 来源：7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6，componentlibrary 的
+# textinput/component/TextInputBuilder.ets 及 resources/zh_CN/element/string.json
+# （text_placeholder）。占位文本、焦点状态及输入结果在设备 UI 树中的呈现仍待验证。
+# 完成后清空本流程写入的 12 个字符，保留应用前台及软键盘。
+appId: com.huawei.hmos.sample
+name: hmos-code-lab-foreground-input
+---
+- assertVisible: '^请输入文字$'
+- tapOn:
+    text: '^请输入文字$'
+    retryTapIfNoChange: false
+- assertVisible:
+    text: '^请输入文字$'
+    focused: true
+- inputText: maestro-hmos
+- assertVisible:
+    text: '^maestro-hmos$'
+    focused: true
+- takeScreenshot: hmos-code-lab-input
+- eraseText: 12
+- assertVisible:
+    text: '^请输入文字$'
+    focused: true

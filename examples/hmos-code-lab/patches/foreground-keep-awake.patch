@@ -1,0 +1,108 @@
+diff --git a/products/phone/src/main/ets/entryability/EntryAbility.ets b/products/phone/src/main/ets/entryability/EntryAbility.ets
+--- a/products/phone/src/main/ets/entryability/EntryAbility.ets
++++ b/products/phone/src/main/ets/entryability/EntryAbility.ets
+@@ -1,65 +1,103 @@
+ /*
+  * Copyright (c) 2024 Huawei Device Co., Ltd.
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+  * You may obtain a copy of the License at
+  *
+  *     http://www.apache.org/licenses/LICENSE-2.0
+  *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ import { AbilityConstant, Configuration, UIAbility, Want } from '@kit.AbilityKit';
+ import { window } from '@kit.ArkUI';
++import { BusinessError } from '@kit.BasicServicesKit';
+ import { Logger, StorageKey, } from '@ohos/common';
+ import { BaseAbilityHelper } from '@ohos/abilitycommon';
+ 
+ const TAG = '[EntryAbility]';
+ 
+ export default class EntryAbility extends UIAbility {
+   private baseAbilityHelper: BaseAbilityHelper = new BaseAbilityHelper();
+ 
++  // Modified by Harmony Panda Workshop for foreground-only UI test keep-awake.
++  private mainWindow: window.Window | undefined;
++  private isForeground: boolean = false;
++  private screenOnUpdate: Promise<void> = Promise.resolve();
++
+   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+     AppStorage.setOrCreate<boolean>(StorageKey.IS_SIDEBAR_LAYOUT, false);
+     this.baseAbilityHelper.doOnCreate(this.context, want, launchParam);
+   }
+ 
+   onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+     Logger.info(TAG, `onNewWant launchReason: ${launchParam.launchReason}`);
+     this.baseAbilityHelper.doOnNewWant(this.context, want, launchParam);
+   }
+ 
+   onDestroy(): void {
+     Logger.info(TAG, 'Ability onDestroy');
++    this.releaseMainWindow();
+     this.baseAbilityHelper.doOnDestroy();
+   }
+ 
+   onWindowStageCreate(windowStage: window.WindowStage): void {
++    try {
++      this.mainWindow = windowStage.getMainWindowSync();
++      this.setKeepScreenOn(this.isForeground);
++    } catch (error) {
++      Logger.error(TAG, 'Failed to obtain main window for keepScreenOn: ' + JSON.stringify(error));
++    }
+     this.baseAbilityHelper.doOnWindowStageCreate(this.context, windowStage);
+   }
+ 
+   onConfigurationUpdate(newConfig: Configuration): void {
+     this.baseAbilityHelper.doOnConfigurationUpdate(newConfig);
+   }
+ 
+   onWindowStageDestroy(): void {
+     Logger.info(TAG, 'Ability onWindowStageDestroy');
++    this.releaseMainWindow();
+     this.baseAbilityHelper.doOnWindowStageDestroy();
+   }
+ 
+   onForeground(): void {
+     // Ability has brought to foreground
+     Logger.info(TAG, 'Ability onForeground');
++    this.isForeground = true;
++    this.setKeepScreenOn(true);
+     this.baseAbilityHelper.doOnForeground();
+   }
+ 
+   onBackground(): void {
+     // Ability has back to background
+     Logger.info(TAG, 'Ability onBackground');
++    this.isForeground = false;
++    this.setKeepScreenOn(false);
+     this.baseAbilityHelper.doOnBackground();
+   }
++
++  private setKeepScreenOn(enabled: boolean): void {
++    const mainWindow = this.mainWindow;
++    if (!mainWindow) {
++      return;
++    }
++    // Serialize native updates; a queued enable must not outlive its foreground window.
++    this.screenOnUpdate = this.screenOnUpdate
++      .then(() => mainWindow.setWindowKeepScreenOn(
++        enabled && this.isForeground && this.mainWindow === mainWindow))
++      .catch((error: BusinessError) => {
++        Logger.error(TAG, `Failed to set keepScreenOn. Code: ${error.code}, message: ${error.message}`);
++      });
++  }
++
++  private releaseMainWindow(): void {
++    this.isForeground = false;
++    this.setKeepScreenOn(false);
++    this.mainWindow = undefined;
++  }
+ }
+\ No newline at end of file

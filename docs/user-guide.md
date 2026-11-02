@@ -1,6 +1,6 @@
 # 使用指南
 
-本文面向第一次使用本项目的应用开发者和测试人员。命令按 Windows PowerShell 编写，路径均从仓库根目录计算。能力和验证状态截至 2026-10-30。
+本文面向第一次使用本项目的应用开发者和测试人员。命令按 Windows PowerShell 编写，路径均从仓库根目录计算。当前能力与验证状态见 [README](../README.md#能力与边界)及[测试记录](acceptance.md)。
 
 ## 这个项目用来做什么
 
@@ -37,6 +37,8 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 首次构建会下载 Gradle、依赖和上游资源，需要联网。CLI 与 VSIX 是两个独立产物；VSIX 不包含 JDK、HDC 或 Maestro CLI。只使用 CLI 时不必安装录制扩展。
 
 应用的 bundle 名称通常从 `AppScope/app.json5` 获取，入口 Ability 和 module 从应用的 `module.json5` 核对。以下示例中的 `org.example.demo`、`EntryAbility`、`entry`、页面文字及工具路径都需要换成自己的值。仓库不附带这个示例包名的可安装应用。
+
+还没有测试应用时，可以按 [HMOS 代码工坊说明](../examples/hmos-code-lab/README.md)获取固定版本的官方工程，用 DevEco 构建、为自己的设备签名并安装。该样例需要 API 24 SDK，兼容 API 23 及以上设备；本仓附带前台常亮补丁和三条待真机验证的单页 Flow。已有 ComponentCollection 应用时，可直接使用[对应场景](../examples/component-collection/README.md)。两组应用的包名、页面和控件不同，不能混用 Flow。
 
 ## 从源码构建 CLI
 

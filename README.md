@@ -1,137 +1,131 @@
 # Maestro HarmonyOS
 
-**用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接鸿蒙设备，自动启动应用、查找控件、点击、输入、滑动、检查结果，并保存截图和运行报告。
+**用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
-例如，应用修改了一个输入页面，可以把“打开页面 → 找到输入框 → 输入中文 → 检查文字 → 保存截图”写成一个 Flow，之后重复执行，检查改动有没有影响原有行为。VSCode 插件可以通过截图和控件树辅助生成这些步骤。
+工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
 
-这套工具运行在开发或测试电脑上，面向鸿蒙应用开发者和测试人员。测试应用需提前安装；使用本工具不需要在应用中加入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
+## 背景与用途
 
-## 背景与定位
+Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。维护页面回归用例时，团队还需要组织测试代码、等待条件、失败处理和公共流程。已有其他移动平台用例的团队，也需要处理测试体系之间的迁移与复用。
 
-Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。对于需要频繁调整页面回归用例的团队，除了编写操作和断言，还需要组织测试代码、处理等待和失败、维护公共流程。页面变化后，这些内容也要随之调整；已有其他移动平台用例的团队，还要处理不同测试体系之间的迁移和复用。
+本项目在 Maestro 中补充 `HarmonyOSDriver` 和 CLI 会话，沿用原有 YAML 解析、Flow 编排与报告。常见操作可以直接写成可读的测试步骤，通过子 Flow、参数、条件分支和显式 `retry` 组织用例，再从命令行或 CI 调用。跨平台可以复用用例组织方式，控件标识、应用配置及平台命令仍需按目标应用调整。
 
-Maestro 用 YAML 描述操作、断言和流程关系，适合把常见的界面检查写成便于阅读和修改的用例。要在鸿蒙设备上执行这些用例，还需要对接设备连接、应用启动、ArkUI 控件定位和输入等平台能力。本项目在 Maestro 架构中补充 `HarmonyOSDriver` 和 CLI 会话，复用原有解析器、流程编排与报告，不另建一套鸿蒙专用的 YAML 语法。
+## 官方示例
 
-项目希望减少常见回归场景中的测试代码，让开发和测试人员能够一起阅读、维护流程；通过子 Flow 和参数复用公共步骤，并把命令行执行、失败证据和报告接入日常构建。跨平台可以沿用 Maestro 的用例组织方式，具体控件标识、应用配置和平台命令仍需按目标应用调整。
-
-## 核心能力
-
-| 能力 | 提供什么 | 当前边界 |
-| --- | --- | --- |
-| 标准 YAML 与控件操作 | `tapOn`、`swipe`、`assertVisible` 等命令，通过 UITest 读取 ArkUI 控件并按文本、ID 或坐标定位 | 已有单机实测；具体命令范围见[已实现与限制](docs/setup.md#已实现与限制)，不代表所有 Maestro 平台命令都已适配 |
-| Flow 编排与复用 | 子 Flow、环境参数、条件分支和显式 `retry`；保留每次尝试及步骤证据 | 重试由用例声明；首次结果与重试后的最终结果分开记录 |
-| 执行留证与失败处理 | 截图、日志、失败信息和可选视频；记录清理状态，未确认释放的会话阻止接管 | 视频录屏默认关闭、仍为实验功能，历史尾部解码问题尚未解决 |
-| 批量执行与 CI | 单命令运行 Flow 或目录，保留原生 Maestro 结果和 JUnit 报告；提供 Windows CI 入口及证据归档 | 已完成本机真机验证，尚未接入实际 CI 服务平台 |
-| VSCode 辅助编写 | 使用编辑器的 YAML 高亮，提供代码片段、截图与控件树点选、动作执行、YAML 生成和回放 | 已有真实面板录制回放记录；只记录插件发出的动作，不捕获手机手工触摸 |
-
-## 项目包含什么
-
-| 部分 | 用途 |
-| --- | --- |
-| Maestro 鸿蒙适配与 CLI | 复用 Maestro 的 YAML 解析、Flow 编排和报告，通过 `HarmonyOSDriver → HDC / UITest` 操作设备 |
-| VSCode 操作录制插件 | 显示设备截图和控件树，选择控件并执行动作，生成 YAML，保存并回放 |
-| 运行与逐台验证脚本 | 运行单个 Flow 或流程目录，按指定设备和轮次顺序执行，保存各轮结果与环境信息 |
-| 智能体调用接口与示例 | 查询执行条件、调用设备动作、读取结果和证据，取消后核对清理并交接设备 |
-
-适合把重复的界面检查写成可执行流程，也适合给应用版本回归保留结果和失败材料。现有测试集中在原生控件可被 UITest 读取的页面；自绘界面、缺少可识别节点的控件及其他系统版本，需要另行验证。
-
-VSCode 的“操作录制”记录通过插件发出的动作，不监听手机上的手工触摸。“视频录屏”是另一个可选功能，当前默认关闭并标为实验性能力。
-
-## 从哪里开始
-
-| 你要做什么 | 阅读入口 |
-| --- | --- |
-| 第一次安装、运行自己的应用测试 | [使用指南](docs/user-guide.md)：环境、源码构建、第一条流程、插件、报告与排错 |
-| 了解实现、接手开发或扩展命令 | [开发设计文档](docs/development-design.md)：模块职责、执行过程、数据转换、会话与错误处理 |
-| 查看工具参数、环境配置和录屏限制 | [环境与运行参考](docs/setup.md) |
-| 使用或开发 VSCode 插件 | [插件说明](packages/vscode/README.md)、[本地通信协议](docs/recorder-protocol.md) |
-| 接入智能体或自动化调用方 | [调用协议](docs/agent-protocol.md)、[可运行的 Node.js 示例](examples/agent-client/README.md)：环境查询、结果、证据和取消恢复；需重新构建本仓库 CLI |
-| 换一台电脑验证 Agent 接入 | [便携联调包](docs/agent-bundle.md)：固定源码和 CLI、文件校验及无设备自测 |
-| 按多台设备或多轮执行同一流程 | [逐台验证说明](docs/device-matrix.md) |
-| 准备 ComponentCollection 的交互验证 | [按钮、弹窗、输入和滚动示例](examples/component-collection/README.md)，四场景预跑及同会话录屏批次已通过；前台单页用例中的按钮、输入已在平板通过 |
-| 冻结场景、核对覆盖并分开统计首次与最终成功 | [重复验证计划](docs/validation-plan.md) |
-| 接入专用 Windows CI 主机 | [CI 入口与设备占用](docs/ci.md) |
-| 检查录屏及恢复保留的媒体 | [录屏检查与恢复](docs/recording-diagnostics.md) |
-| 维护无法确认旧命令结束的设备会话 | [Windows 与手机依次重启的维护流程](docs/session-maintenance.md)，已完成单台真机核验；不覆盖未确认的录屏资源 |
-| 恢复唯一未确认的布局清理，不重启系统 | [清理隔离恢复](docs/cleanup-fence-recovery.md)，已完成平板恢复及新会话收尾验证；须匹配原构建，旧阻挡目录必须保留 |
-| 排查源码构建与资源下载 | [构建复现说明](docs/build-reproducibility.md) |
-| 为项目贡献代码 | [贡献说明](CONTRIBUTING.md)、[主机测试说明](host-tests/README.md) |
-
-当前使用方式是从源码构建包含适配补丁的 CLI，再按需打包安装 VSIX。普通 Maestro 安装包不能替代本项目构建出的鸿蒙版本；VSIX 本身也不包含 Java、HDC 或 CLI。
-
-## 目录
-
-```text
-docs/                   用户指南、开发设计、测试计划与进展
-scripts/                源码准备、补丁、测试、运行及逐台验证
-patches/maestro/         驱动、CLI 和测试补丁
-host-tests/              不依赖设备的编译和测试入口
-packages/vscode/        VSCode 操作录制扩展、测试和打包入口
-examples/flows/          参数化的标准 YAML 示例
-examples/agent-client/   智能体协议客户端和流程示例
-upstream.lock.json      上游来源与固定提交
-.upstream/maestro/      本地上游工作副本（不提交）
-```
-
-本仓用固定上游加补丁的方式交付 Kotlin 实现；VSCode 扩展和辅助脚本直接保存在本仓。修改 `.upstream/maestro` 后必须更新补丁，其他贡献者才能获得同一实现。对应源码位置和更新方法见[开发设计](docs/development-design.md)及[补丁说明](patches/maestro/README.md)。
-
-## 一个使用例子
-
-仓库中的 [input-smoke.yaml](examples/flows/input-smoke.yaml) 执行：启动应用 → 检查标题 → 按提示找到输入框 → 输入文字 → 检查输入内容 → 返回 → 再检查标题 → 截图。
-
-按[使用指南](docs/user-guide.md)完成首次构建后，在仓库根目录运行：
+新增 [HMOS 代码工坊](examples/hmos-code-lab/README.md)的固定版本获取入口。它来自华为 [HarmonyOS_Samples/sample_in_harmonyos](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos)，手机和平板使用同一个 `phone` 模块；本仓补充前台常亮和 Maestro Flow。
 
 ```powershell
-./scripts/run-harmonyos.ps1 `
-  -FlowPath ./examples/flows/input-smoke.yaml `
-  -BundleId org.example.demo -AbilityName EntryAbility -Module entry `
-  -Env @{ START_TEXT = '输入演示'; INPUT_HINT = '请输入姓名'; INPUT_TEXT = '熊猫测试' }
+node examples/hmos-code-lab/prepare.mjs
 ```
 
-包名、Ability、模块名、页面文字和输入提示都要替换为自己的应用信息。运行前解锁手机并准备一个空输入框；此示例假定返回后仍能看到 `START_TEXT`。运行脚本会建立独立产物目录，保留实际 CLI 退出码，不自动安装应用、清除应用数据或修改权限。
+脚本把完整工程准备到 `examples/hmos-code-lab/app`。用 DevEco 打开该目录，为自己的设备配置调试签名并运行，再按[单页用例说明](examples/hmos-code-lab/flows/README.md)执行。固定源码要求兼容 API 23、目标 API 24；源码下载约 360 MB，工程和本机签名配置均由 Git 忽略。无需下载其全部外部 Sample。
 
-定位失败、流程修改和报告查看方法见[使用指南](docs/user-guide.md)。其他示例包括 [scroll-input.yaml](examples/flows/scroll-input.yaml)（滑动后重新定位输入框）、[smoke.yaml](examples/flows/smoke.yaml)（按 ID 点击）及 [recording-smoke.yaml](examples/flows/recording-smoke.yaml)（实验性视频录屏）。
-
-## 当前可用程度
-
-截至 2026-11-01，已有以下验证记录；这些记录来自不同开发阶段，不代替最终同版本的整套验证：
-
-- 一台 ALN-AL80 / API 26 真机通过标准 YAML 的启动、文字定位、中文输入、断言、返回、滑动后重新定位和截图；ComponentCollection 四场景分别通过预跑，同会话录屏批次 4/4 通过、清理完成，四段原视频完整解码通过。
-- VSCode 插件 0.1.0 在 VSCode 1.140 上完成真实面板的 8 步录制、YAML 保存和一键 CLI 回放；逐台验证脚本在同一设备执行 1/1 通过。
-- 智能体 v2 接口及公开客户端在同一设备完成取消、跨进程阻止接管、凭证据恢复和 CLI 接管；截图后的桥接进程退出恢复也通过。
-- 可选 Huawei 系统录屏已验证正常流程和失败收尾；短视频曾出现尾部解码错误，原因尚未查明，仍默认关闭。
-- 通用 CI 入口已在本机连接真机完成固定输入、原生报告核验、视频完整解码和证据归档；尚未接入 CI 服务平台。
-
-上述记录分别使用本地演示应用和使用者构建、签名的 ComponentCollection，不代表所有能力都在同一应用、同一构建中验证。新版执行底座曾完成连续 3 轮启动、断言、截图与释放的短测；第二台设备 MRDI-W00 平板已通过按钮、输入单页验证；跨 API 和完整重复稳定性测试尚未完成，见[平板记录](docs/progress/2026-11-01-tablet.md)。重试证据、保留录屏恢复、通用 CI 入口及隔离构建的结果见 [10-30 进展](docs/progress/2026-10-30.md)；录屏持续时长、组合故障和面板回放的补验见[后续记录](docs/progress/2026-10-30-followup.md)。前期记录见 [10-28 进展](docs/progress/2026-10-28.md)、[10-29 进展](docs/progress/2026-10-29.md)。功能范围见[环境参考](docs/setup.md#已实现与限制)。
-
-目前已补齐验证计划 v3 的静态依赖冻结、会话日志写入容错、依次重启维护的证据核验与 CI 归档。维护恢复已完成单台真机核验，ComponentCollection 的按钮、弹窗、输入和滚动场景也分别通过预跑。批量与录屏的后续验证见 [11-01 记录](docs/progress/2026-11-01.md)。CLI 与 VSIX 已完成带声明缓存的隔离构建，见[构建记录](docs/build-reproducibility.md)。此前阶段记录见[阶段说明](docs/progress/2026-10-30-stage.md)。
-
-固定版本的 20 轮开发验证已尝试，第 2 轮因通知干扰、随后锁屏及录屏启动未确认而停止：1 轮通过、1 轮未知、18 轮未执行。该计划未通过，不能作为重复稳定性达标的证据；原结果和恢复边界见上述记录。
-
-旧手机仍有启动未确认的录屏资源阻止接管，恢复分支待补齐；平板使用独立设备会话。新增前台单页用例中的按钮、输入已在平板通过，弹窗界面步骤通过但首次收尾未知、后续已恢复；滚动首次输入断言失败，补充取焦后的用例已通过；页面之间由使用者手动准备，不算连续自动化批次。主机侧 VSCode 单元回归、真实扩展宿主和 Windows 执行入口检查已通过；Node 回归修复夹具后累计 401 项通过、2 项跳过，详细范围见 [11-01 记录](docs/progress/2026-11-01.md)。这些检查不计入设备稳定性成绩。
-
-平板断连后剩余的一条未确认布局清理，已通过独立入口完成不重启恢复；新会话正常关闭、受控布局残留清理和桥接进程退出后的恢复均通过。原失败及未确认命令保留，阻挡目录跨会话登记，详见[复测记录](docs/progress/2026-11-01-tablet.md#正式恢复与后续会话)。本次收尾验证时平板处于锁屏，不计为应用页面或 YAML 稳定性验证。
-
-目前没有 HAP 安装、权限修改、清除应用数据、Studio/MCP、多设备分片和云端运行支持。每个 CLI 会话只操作一台本机 HDC 设备，逐台验证脚本依次建立这些会话。
-
-## 验证目标
-
-项目以以下目标检查可用性。目标与已取得的结果分别列出，不把主机测试或静态解析计为真机通过。
-
-| 目标 | 当前进展 |
+| 示例 | 用途与状态 |
 | --- | --- |
-| 用标准 Maestro YAML 覆盖鸿蒙官方示例应用的典型交互场景 | ComponentCollection 四场景预跑及同会话录屏批次已通过；参考提交与官方来源的对应关系、安装应用的源码改动及最终覆盖范围仍待核对；前台单页用例中的按钮、输入已在平板通过，弹窗界面步骤通过但首次收尾未知、后续已恢复；滚动首次输入断言失败，补充取焦后的用例已通过 |
-| 固定场景和版本，重复执行 20 次，通过率达到 95% 及以上 | 20 轮开发计划已尝试，1 轮通过、1 轮未知、18 轮未执行，未达标；正式范围及统计口径仍待确认，修复后须重新冻结计划，首次与重试后结果分别报告 |
-| 开源适配实现，提供完整使用文档和开发指南 | 源码、补丁、使用指南、开发设计、示例与构建说明已公开；最终验证结果和支持范围随实测更新 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程，提供按钮、输入、弹窗候选 Flow；真机适配待验证。 |
+| [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；运行前需自行准备应用。 |
 
-重复验证应固定应用、设备、用例和准备条件，保留失败轮次及原始证据。修改代码或执行策略后，应建立新批次，不能将不同版本的通过记录合并。具体方法见[测试计划](docs/acceptance.md)和[重复验证计划](docs/validation-plan.md)。
+### 页面预览
 
-## 测试与维护
+下面是 ComponentCollection 上游项目的原始配图，展示按钮和弹窗的测试页面。[来源与许可证](docs/images/README.md)、[实际运行记录](examples/component-collection/README.md#单机开发预跑)分别记录。
 
-- [测试计划与验证记录](docs/acceptance.md)：测试场景、结果和重复运行的统计方法。
-- [协议与磁盘文件格式](docs/protocol/README.md)：agent、重试、录屏和验证计划的版本与 Schema。
-- [第三方来源与许可证](THIRD_PARTY.md)。
+| Button 按钮 | AlertDialog 警告弹窗示例页 |
+| --- | --- |
+| <img src="docs/images/component-collection-button.png" width="240" alt="上游 ComponentCollection 按钮示例页面预览"> | <img src="docs/images/component-collection-warning-popup.png" width="240" alt="上游 ComponentCollection 警告弹窗示例页面预览"> |
+
+## 跑一个 Flow
+
+先按[使用指南](docs/user-guide.md)准备 JDK 17、Node.js 22.12+、HDC，并从固定上游和本仓补丁构建 CLI。普通 Maestro 安装包不能替代这个适配版本；VSCode 插件需单独构建，也不包含 Java、HDC 或 CLI。资源下载和缓存配置见[构建说明](docs/build-reproducibility.md)。
+
+以 [ComponentCollection 前台按钮用例](examples/component-collection/foreground/01-buttons.yaml)为例：应用已构建、签名并安装后，手动进入 **Button 按钮**页，保持应用前台、设备解锁，且胶囊按钮尚未点击。Flow 通过控件 ID 点击，并检查点击后的 ID：
+
+```yaml
+appId: ohos.samples.componentcollection
+---
+- assertVisible:
+    id: Capsule
+- tapOn:
+    id: Capsule
+    retryTapIfNoChange: false
+- assertVisible:
+    id: Capsule onClickId
+- takeScreenshot: foreground-button
+```
+
+在仓库根目录执行，将 `YOUR_DEVICE_ID` 替换为 HDC 设备标识：
+
+```powershell
+$env:MAESTRO_HARMONYOS_RECORDING = 'off'
+./scripts/run-harmonyos.ps1 `
+  -FlowPath ./examples/component-collection/foreground/01-buttons.yaml `
+  -BundleId ohos.samples.componentcollection -AbilityName MainAbility -Module entry `
+  -DeviceId YOUR_DEVICE_ID -RunTimeoutSeconds 360
+```
+
+此用例停留在当前页面，适合依靠应用前台常亮的设备。再次运行前需恢复按钮初始状态；[前台单页用例](examples/component-collection/foreground/README.md)各有不同起始页面，一次只运行一个文件。需要自动导航和批量执行时，使用[完整场景入口](examples/component-collection/README.md)，按其要求准备应用。
+
+测试自己的应用可从参数化的 [smoke.yaml](examples/flows/smoke.yaml)、[input-smoke.yaml](examples/flows/input-smoke.yaml)和 [scroll-input.yaml](examples/flows/scroll-input.yaml)开始。runner 保存独立产物目录和真实退出码；结果与排错方法见[使用指南](docs/user-guide.md)。
+
+## 实现方式
+
+```mermaid
+flowchart LR
+    YAML[标准 Maestro YAML] --> Orchestra[Maestro Orchestra]
+    Orchestra --> Driver[HarmonyOSDriver]
+    Driver --> HDC[HDC / UITest]
+    HDC --> App[鸿蒙应用 / ArkUI]
+    Orchestra --> Report[结果、截图与报告]
+```
+
+Maestro 负责解析、编排、等待和断言；适配层将 UITest 布局映射为 Maestro 节点，用文本、ID 等选择器定位控件，再调用设备操作。会话记录命令与临时资源的清理状态；无法确认释放时保留 `unknown` 并阻止接管，恢复不会改写原用例结果。
+
+Kotlin 实现采用固定上游加补丁的交付方式；VSCode 扩展、运行脚本和客户端示例直接保存在本仓。上游版本见 [upstream.lock.json](upstream.lock.json)，模块职责与执行过程见[开发设计](docs/development-design.md)，更新实现的方法见[补丁说明](patches/maestro/README.md)。
+
+## Agent 接入
+
+[Node.js 客户端](examples/agent-client/README.md)通过本地 JSONL 协议查询环境、执行动作、校验结果与证据，并确认设备释放。下面的调用检查当前页面文字并截图；先手动打开测试页面，替换设备、应用和断言内容：
+
+```powershell
+node examples/agent-client/run.mjs `
+  --device 'YOUR_DEVICE_ID' `
+  --app 'org.example.demo' --ability 'EntryAbility' `
+  --assert-text '替换为页面上的确定文字' `
+  --artifacts './artifacts/agent-example'
+```
+
+默认使用本仓构建的 CLI；其他分发位置通过 `--cli-dir` 指定包含 `lib` 的目录。示例默认不启动应用，预检存在未知项时会停止。完整 YAML 可在设备释放后通过 `--handoff-flow` 交给 CLI；没有设备时先运行 [`--check-only` 检查](examples/agent-client/README.md#释放后运行-yaml)。协议字段见[调用协议](docs/agent-protocol.md)，换电脑联调见[便携包说明](docs/agent-bundle.md)。
+
+## 能力与边界
+
+| 能力 | 当前范围 |
+| --- | --- |
+| YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
+| 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和 Windows CI 入口；实际 CI 服务平台尚未接入。首次与重试后的最终结果分别记录。 |
+| VSCode 辅助编写 | 提供代码片段、截图与控件树选择、动作执行、YAML 生成和回放；记录插件发出的动作，不监听手机手工触摸。 |
+| 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；历史尾部解码问题和启动未确认资源的恢复仍待解决。清理恢复按证据判定，不能删除占用标记绕过。 |
+
+每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前不提供 HAP 安装、权限修改、清除应用数据、Studio/MCP、多设备分片或云端运行。
+
+源码 `1c13d22` 已完成主机回归、复用已声明依赖缓存的独立 CLI/VSIX 构建，以及便携包的 `version`、`describe`、`check-only` 检查。这些检查未操作设备，不是全冷构建或真机通过证明。此前已有手机和平板上的页面操作、录制回放及会话恢复记录，但来自不同构建；固定版本 20 轮稳定性验证尚未完成，不能合并历史记录计算通过率。
+
+详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[手机批量与录屏记录](docs/progress/2026-11-01.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
+
+## 文档与贡献
+
+- 开始使用：[使用指南](docs/user-guide.md) · [环境与运行参数](docs/setup.md) · [HMOS 代码工坊](examples/hmos-code-lab/README.md) · [ComponentCollection 场景](examples/component-collection/README.md)
+- 编写与接入：[VSCode 插件](packages/vscode/README.md) · [Agent 客户端](examples/agent-client/README.md) · [便携联调包](docs/agent-bundle.md)
+- 开发与维护：[开发设计](docs/development-design.md) · [贡献说明](CONTRIBUTING.md) · [主机测试](host-tests/README.md) · [第三方来源](THIRD_PARTY.md)
+
+<details>
+<summary>运行、协议及历史验证参考</summary>
+
+- 执行：[逐台验证](docs/device-matrix.md) · [CI 入口与设备占用](docs/ci.md) · [构建复现](docs/build-reproducibility.md)
+- 协议：[Agent 协议](docs/agent-protocol.md) · [录制桥接协议](docs/recorder-protocol.md) · [磁盘文件格式与 Schema](docs/protocol/README.md)
+- 恢复：[录屏检查与恢复](docs/recording-diagnostics.md) · [顺序重启维护](docs/session-maintenance.md) · [不重启的清理隔离恢复](docs/cleanup-fence-recovery.md)
+- 记录：[10-28](docs/progress/2026-10-28.md) · [10-29](docs/progress/2026-10-29.md) · [10-30](docs/progress/2026-10-30.md) · [10-30 补验](docs/progress/2026-10-30-followup.md) · [阶段说明](docs/progress/2026-10-30-stage.md)
+
+</details>
 
 ## 许可证
 
-本仓新增内容采用 [Apache-2.0](LICENSE)。保留所有引入的上游许可证、版权声明和 NOTICE；参见 [贡献说明](CONTRIBUTING.md)。
+本仓新增内容采用 [Apache-2.0](LICENSE)。引入内容保留原许可证、版权声明及适用的 NOTICE；文档图片的来源见[图片说明](docs/images/README.md)。
