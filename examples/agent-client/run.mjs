@@ -9,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { AgentClient, validateDocument } from './client.mjs';
 import { verifyEvidence } from './evidence.mjs';
 import { runWorkflow, saveJson } from './workflow.mjs';
+import { flowEnvironment, prepareHandoff, verifyHandoff } from './handoff.mjs';
 
 const help = `Usage:
   node examples/agent-client/run.mjs --device <hdc-target> --app <bundle-id>
@@ -20,6 +21,10 @@ Options:
   --allow-unknown          Permit unknown preflight checks after reviewing them; failed checks still block.
   --cancel-after-ms <n>     Cancel the assertion n milliseconds after it starts; does not retry it.
   --handoff-flow <file>     Run this YAML only after confirmed release/recovery. Ctrl+C never starts it.
+  --flow-root <dir>         Root containing the Flow and all static YAML/JS dependencies (default: Flow parent).
+  --handoff-asset <file>    Repeatable extra data file, relative to --flow-root; copied for script file access.
+  --env, -e NAME=value      Repeatable YAML parameters. APP_ID defaults to --app and must match it.
+  --check-only             Check and snapshot the handoff Flow without starting a bridge or using a device.
   --no-recover              Leave unknown cleanup for manual inspection.
   --recovery-root <dir>     Explicit trusted root for recovery audit files (default: ~/.maestro/harmonyos-sessions).
   --cli-dir <dir>           Built Maestro installDist directory.
@@ -36,11 +41,13 @@ async function main() {
     device: { type: 'string' }, app: { type: 'string' }, ability: { type: 'string' }, module: { type: 'string' },
     artifacts: { type: 'string' }, 'assert-text': { type: 'string' }, launch: { type: 'boolean' },
     'allow-unknown': { type: 'boolean' }, 'cancel-after-ms': { type: 'string' }, 'handoff-flow': { type: 'string' },
+    'flow-root': { type: 'string' }, 'handoff-asset': { type: 'string', multiple: true },
+    env: { type: 'string', short: 'e', multiple: true }, 'check-only': { type: 'boolean' },
     'no-recover': { type: 'boolean' }, 'recovery-root': { type: 'string' }, 'cli-dir': { type: 'string' },
     java: { type: 'string' }, 'timeout-ms': { type: 'string' }, help: { type: 'boolean' },
   } });
   if (values.help) { process.stdout.write(help); return; }
-  for (const required of ['device', 'app', 'ability', 'artifacts', 'assert-text']) {
+  for (const required of values['check-only'] ? ['app', 'artifacts', 'handoff-flow'] : ['device', 'app', 'ability', 'artifacts', 'assert-text']) {
     if (!values[required]?.trim()) throw new Error(`Missing --${required}. Use --help for the complete example.`);
   }
   const integer = (name, fallback) => {
@@ -51,6 +58,8 @@ async function main() {
   const timeoutMs = integer('timeout-ms', 90_000);
   if (timeoutMs < 100 || timeoutMs > 3_600_000) throw new Error('--timeout-ms must be between 100 and 3600000.');
   const cancelAfterMs = integer('cancel-after-ms', undefined);
+  if (!values['handoff-flow'] && (values.env?.length || values['flow-root'] || values['handoff-asset']?.length)) throw new Error('--env, --flow-root and --handoff-asset require --handoff-flow.');
+  const flowEnv = flowEnvironment(values.app, values.env);
   const repo = fileURLToPath(new URL('../../', import.meta.url));
   const cliDirectory = path.resolve(values['cli-dir'] ?? path.join(repo, '.upstream/maestro/maestro-cli/build/install/maestro'));
   const library = path.join(cliDirectory, 'lib');
@@ -65,22 +74,32 @@ async function main() {
   const invocationId = randomUUID();
   const directory = path.join(artifactsRoot, 'client', invocationId);
   await fsp.mkdir(directory, { recursive: true });
+  const handoffPlan = values['handoff-flow'] ? await prepareHandoff({ flow: values['handoff-flow'], sourceRoot: values['flow-root'],
+    assets: values['handoff-asset'],
+    java, cliDirectory, environment: flowEnv, processEnvironment: env, directory: path.join(directory, 'handoff-input'),
+    timeoutMs: Math.min(timeoutMs, 60000) }) : undefined;
+  if (values['check-only']) {
+    process.stdout.write(`Handoff inputs checked; no bridge or device commands started.\nPlan: ${path.join(directory, 'handoff-input/plan.json')}\n`);
+    return;
+  }
   const diagnostics = fs.createWriteStream(path.join(directory, 'bridge.stderr.log'), { flags: 'wx' });
   await new Promise((resolve, reject) => { diagnostics.once('open', resolve); diagnostics.once('error', reject); });
   const abort = new AbortController();
   const stop = () => abort.abort();
   process.on('SIGINT', stop); process.on('SIGTERM', stop);
   const client = AgentClient.spawn(java, [...args, 'harmonyos-bridge'], { env, diagnostics, requestTimeoutMs: Math.min(timeoutMs, 30_000) });
-  const handoff = values['handoff-flow'] ? async ({ deviceId, signal }) => {
-    const flow = path.resolve(values['handoff-flow']);
+  const handoff = handoffPlan ? async ({ deviceId, signal }) => {
+    await verifyHandoff(handoffPlan);
+    const flow = handoffPlan.flow;
     const source = await fsp.readFile(flow);
     const root = path.join(artifactsRoot, 'cli');
     const runId = randomUUID(), attemptId = randomUUID();
     await saveJson(path.join(directory, 'handoff.request.json'), { runId, attemptId, attemptNo: 1, deviceId, flow,
-      sha256: createHash('sha256').update(source).digest('hex') });
+      sha256: createHash('sha256').update(source).digest('hex'), env: handoffPlan.env,
+      inputPlan: path.join(directory, 'handoff-input/plan.json') });
     if (signal?.aborted) return { exitCode: null, reason: 'Caller stopped before CLI startup.' };
     const child = spawn(java, [...args, '--device', deviceId, 'test', '--harmonyos-agent-output', root,
-      '--harmonyos-run-id', runId, '--harmonyos-attempt-id', attemptId, '--harmonyos-attempt-no', '1', flow],
+      '--harmonyos-run-id', runId, '--harmonyos-attempt-id', attemptId, '--harmonyos-attempt-no', '1', ...handoffPlan.envArgs, flow],
     { env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const log = fs.createWriteStream(path.join(directory, 'handoff.log'), { flags: 'wx' });
     child.stdout.pipe(log, { end: false }); child.stderr.pipe(log, { end: false });

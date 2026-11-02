@@ -13081,10 +13081,10 @@ index 0000000..5332d5c
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
-index 0000000..f8ced01
+index 0000000..7e0dd69
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,461 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -13139,7 +13139,9 @@ index 0000000..f8ced01
 +            check(resource.uri == null || resource.uri == uri) { "Recording media identity changed." }
 +            resource.uri = uri
 +        }
-+        fun archive(source: Path, timeout: Duration = Duration.ofSeconds(30)) = archiveResource(resource, source, deadline(timeout))
++        fun archive(source: Path, timeout: Duration = Duration.ofSeconds(30)) = archive(source, timeout, System::nanoTime)
++        internal fun archive(source: Path, timeout: Duration, nanoTime: () -> Long) =
++            archiveResource(resource, source, deadline(timeout, nanoTime))
 +        /** In-memory metadata, not a fresh validation. Read only after the archive call returned successfully. */
 +        fun latestArchive(): Archive? = synchronized(this@HarmonyOSRecordingResourceJournal) {
 +            resource.archives.lastOrNull()?.copy()
@@ -13176,9 +13178,9 @@ index 0000000..f8ced01
 +        }
 +        val readiness = journal.snapshot().issues.filter { it.code != "OWNED_RESOURCES_REMAIN" }
 +        if (readiness.isNotEmpty()) return readiness
-+        val deadline = System.nanoTime() + timeout.toNanos()
++        val deadline = ArchiveDeadline(timeout, System::nanoTime)
 +        fun remaining(): Duration {
-+            val left = deadline - System.nanoTime()
++            val left = deadline.expiresAt - deadline.nanoTime()
 +            if (left <= 0) throw HdcTimeoutException(timeout)
 +            return Duration.ofNanos(left)
 +        }
@@ -13296,7 +13298,7 @@ index 0000000..f8ced01
 +
 +    private fun preserveInitialArchive(
 +        device: HdcHarmonyOSDevice, client: HdcClient, journal: HarmonyOSRecoveryJournal,
-+        resource: Resource, uri: String, deadline: Long, remaining: () -> Duration,
++        resource: Resource, uri: String, deadline: ArchiveDeadline, remaining: () -> Duration,
 +    ) {
 +        if (!scratchExists(client, journal, resource, remaining)) exportMedia(device, resource, uri, remaining)
 +        receiveScratch(device, client, journal, resource, deadline, remaining) { local, _, _ ->
@@ -13333,7 +13335,7 @@ index 0000000..f8ced01
 +
 +    private fun <T> receiveScratch(
 +        device: HdcHarmonyOSDevice, client: HdcClient, journal: HarmonyOSRecoveryJournal,
-+        resource: Resource, deadline: Long, remaining: () -> Duration, allowEmpty: Boolean = false, consume: (Path, Long, String) -> T,
++        resource: Resource, deadline: ArchiveDeadline, remaining: () -> Duration, allowEmpty: Boolean = false, consume: (Path, Long, String) -> T,
 +    ): T = TempFileHandler().use { temporary ->
 +            val local = temporary.createTempDirectory("maestro-recording-recovery-").toPath().resolve(resource.fileName)
 +            val before = device.execute(listOf("stat", "-c", "%s", resource.remotePath), remaining()).trim().toLong()
@@ -13380,7 +13382,7 @@ index 0000000..f8ced01
 +        return lines[2].substring(1, lines[2].length - 1).also { check(mediaUri(resource.fileName, it)) }
 +    }
 +
-+    @Synchronized private fun archiveResource(resource: Resource, source: Path, deadline: Long) {
++    @Synchronized private fun archiveResource(resource: Resource, source: Path, deadline: ArchiveDeadline) {
 +        check(resource.captureEnded && resource.uri != null) { "Capture end and media identity must precede archival." }
 +        require(Files.isRegularFile(source, LinkOption.NOFOLLOW_LINKS))
 +        val archives = path.parent.resolve("recording-originals")
@@ -13415,7 +13417,7 @@ index 0000000..f8ced01
 +        persist()
 +    }
 +
-+    private fun archiveValid(resource: Resource, deadline: Long = deadline(Duration.ofSeconds(30))): Boolean {
++    private fun archiveValid(resource: Resource, deadline: ArchiveDeadline = deadline(Duration.ofSeconds(30))): Boolean {
 +        val name = resource.archiveName ?: return false
 +        val archives = path.parent.resolve("recording-originals")
 +        return try {
@@ -13437,6 +13439,10 @@ index 0000000..f8ced01
 +            FileOutputStream(staging.toFile()).use { output -> output.write(mapper.writeValueAsBytes(state)); output.fd.sync() }
 +            Files.move(staging, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
 +        } finally { Files.deleteIfExists(staging) }
++    }
++
++    private class ArchiveDeadline(val timeout: Duration, val nanoTime: () -> Long) {
++        val expiresAt = nanoTime() + timeout.toNanos()
 +    }
 +
 +    companion object {
@@ -13501,15 +13507,17 @@ index 0000000..f8ced01
 +        }
 +        private fun mediaUri(name: String, uri: String) = uri.matches(Regex("file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/${Regex.escape(name)}"))
 +        private const val MAX_ARCHIVE_BYTES = 1024L * 1024 * 1024
-+        private fun deadline(timeout: Duration): Long {
++        private fun deadline(timeout: Duration, nanoTime: () -> Long = System::nanoTime): ArchiveDeadline {
 +            require(timeout > Duration.ZERO)
-+            return System.nanoTime() + timeout.toNanos()
++            return ArchiveDeadline(timeout, nanoTime)
 +        }
-+        private fun checkDeadline(deadline: Long) {
++        private fun checkDeadline(deadline: ArchiveDeadline) {
 +            if (Thread.currentThread().isInterrupted) throw InterruptedException("Recording archival interrupted")
-+            if (System.nanoTime() >= deadline) throw HdcException("Recording archive or hash exceeded the shared operation deadline.")
++            if (deadline.nanoTime() >= deadline.expiresAt) {
++                throw HdcTimeoutException(deadline.timeout, "Recording archive or hash exceeded the shared operation deadline.")
++            }
 +        }
-+        private fun digest(file: Path, deadline: Long): String {
++        private fun digest(file: Path, deadline: ArchiveDeadline): String {
 +            val hash = MessageDigest.getInstance("SHA-256")
 +            Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS).use { input ->
 +                val buffer = ByteArray(65536)
@@ -14368,10 +14376,10 @@ index 0000000..7aa89ba
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
 new file mode 100644
-index 0000000..bff79c8
+index 0000000..9167a6c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,184 @@
 +package maestro.harmonyos.hdc
 +
 +import java.io.ByteArrayOutputStream
@@ -14392,7 +14400,10 @@ index 0000000..bff79c8
 +
 +open class HdcException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
 +
-+class HdcTimeoutException(val timeout: Duration) : HdcException("HDC command exceeded ${timeout.toMillis()} ms")
++class HdcTimeoutException @JvmOverloads constructor(
++    val timeout: Duration,
++    message: String = "HDC command exceeded ${timeout.toMillis()} ms",
++) : HdcException(message)
 +
 +class HdcOutputLimitException(stream: String, limit: Int) :
 +    HdcException("HDC $stream exceeded the $limit byte output limit")
@@ -18212,10 +18223,10 @@ index 0000000..6080ec5
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
-index 0000000..5943dcf
+index 0000000..4a29210
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
-@@ -0,0 +1,686 @@
+@@ -0,0 +1,743 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -18234,6 +18245,63 @@ index 0000000..5943dcf
 +    @TempDir lateinit var directory: Path
 +    private val mapper = jacksonObjectMapper()
 +    private fun create() = HarmonyOSRecoveryJournal.create(directory.resolve("recovery-journal.json"), "device", UUID.randomUUID().toString())
++
++    @Test fun `archive and hash deadline boundaries retain timeout semantics and registered originals`(): Unit {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            recording.media("file://media/Photo/123/VID_123/${recording.fileName}")
++            val original = directory.resolve("original.mp4")
++            Files.writeString(original, "registered bytes")
++            recording.archive(original)
++            val retained = checkNotNull(recording.latestArchive())
++            val stateBefore = Files.readString(resources.path)
++            Files.writeString(original, "replacement bytes")
++            val timeout = Duration.ofSeconds(2)
++            // Read 1 creates the deadline. Reads 2, 4 and 6 precede copying, destination hashing and source hashing.
++            for (expiredRead in listOf(2, 4, 6)) {
++                var reads = 0
++                val failure = assertThrows<HdcTimeoutException> {
++                    recording.archive(original, timeout) { if (++reads >= expiredRead) timeout.toNanos() else 0L }
++                }
++                assertThat(reads).isEqualTo(expiredRead)
++                assertThat(failure.timeout).isEqualTo(timeout)
++                assertThat(failure.message).isEqualTo("Recording archive or hash exceeded the shared operation deadline.")
++                assertThat(Files.readString(resources.path)).isEqualTo(stateBefore)
++                assertThat(recording.latestArchive()).isEqualTo(retained)
++                assertThat(Files.readString(directory.resolve("recording-originals").resolve(retained.name))).isEqualTo("registered bytes")
++                assertThat(Files.readString(original)).isEqualTo("replacement bytes")
++                assertThat(resources.isComplete()).isFalse()
++            }
++        }
++    }
++
++    @Test fun `interruption remains cancellation even when an archive deadline has expired`(): Unit {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting(); recording.started(51); recording.stopping(); recording.ended()
++            recording.media("file://media/Photo/123/VID_123/${recording.fileName}")
++            val original = directory.resolve("original.mp4")
++            Files.writeString(original, "original bytes")
++            val stateBefore = Files.readString(resources.path)
++            var reads = 0
++            Thread.currentThread().interrupt()
++            try {
++                assertThrows<InterruptedException> {
++                    recording.archive(original, Duration.ofSeconds(2)) { if (++reads == 1) 0L else Long.MAX_VALUE }
++                }
++                assertThat(Thread.currentThread().isInterrupted).isTrue()
++                assertThat(reads).isEqualTo(1)
++            } finally {
++                Thread.interrupted()
++            }
++            assertThat(Files.readString(resources.path)).isEqualTo(stateBefore)
++            assertThat(recording.latestArchive()).isNull()
++            assertThat(Files.readString(original)).isEqualTo("original bytes")
++        }
++    }
 +
 +    @Test fun `latest archive metadata is a copy of registered values and does not revalidate files`(): Unit {
 +        create().use { journal ->

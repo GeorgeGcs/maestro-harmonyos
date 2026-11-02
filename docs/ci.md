@@ -245,7 +245,9 @@ node scripts/ci/collect-artifacts.mjs `
 
 维护版本 3 的归档由回执及已核对哈希的完整响应开始，只跟随该 owner/maintenance 目录内的明确引用。收集检查点、阶段链、重启观察、原日志及回执快照、调用前后日志和清理批次，不读取当前 gate、当前日志或历史工具文件，不扫描其他维护目录。缺失响应路径、引用文件或哈希不符时保留已取得材料并返回 incomplete；一个损坏文件不阻止其他可读取材料收集。元数据文件上限为 4 MiB，整组文件仍受下述归档预算限制。`maintenance_receipt_and_chain` 表示引用的维护材料收齐，不是重新执行恢复或独立批准设备接管。
 
-清理隔离版本 4 同样按回执收集事务链和完整响应，标记为 `cleanup_fence_receipt_and_chain`。后续普通会话继承的保留目录凭据单独收集到 `recovery/retained/`，标记为 `retainedFenceEvidence=receipt_and_chain`。换成新 owner 后仍能归档旧证据；归档不会触碰设备目录。
+清理隔离版本 4 按已绑定的检查点、回执和完整响应逐文件收集事务链，材料齐全时标记为 `cleanup_fence_receipt_and_chain`。一份文件缺失、哈希不符或格式错误时，保留已取得的原始字节和其他可读取材料，标记 `cleanup_fence_incomplete`；不沿损坏文件继续读取新引用。后续普通会话继承的凭据分别收集到 `recovery/retained/<owner>/`，全部齐全才标记 `retainedFenceEvidence=receipt_and_chain`，否则为 `incomplete`。一个 owner 损坏不会中断其他 owner 和当前普通回执的收集。
+
+收集使用同一组文件数、大小、总量和耗时预算，不先用另一套预算预读完整恢复链；不扫描未引用文件、其他会话或历史工具。换成新 owner 后仍能归档旧证据。归档不触碰设备目录，也不重新批准交接：严格的释放核验仍要求完整且一致的证据，部分归档不能用于核销设备占用。
 
 收集范围是选定 CI 目录、精确的 `agentRoot/runs/<runId>/<attemptId>/` 子树（含源码快照和未封存的 partial 文件）、对应控制记录，以及 `resolution` 明确绑定的回执、录屏快照和已登记原件。索引、manifest、源码内容地址和回执引用的哈希另行核对。不会扫描其他 attempt、按当前 gate 猜 owner，或复制整个会话目录。若原生错误指出 `DEVICE_RECOVERY_REQUIRED` 的 owner，却没有绑定回执，报告会列出未收集的恢复材料并返回非零；这不表示该 owner 没有保留原件。
 

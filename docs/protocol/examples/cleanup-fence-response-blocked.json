@@ -1,0 +1,7 @@
+{
+  "protocol": "maestro.harmonyos.cleanup-fence-recovery",
+  "schemaVersion": 1,
+  "state": "unknown",
+  "handoffReady": false,
+  "error": "CLEANUP_FENCE_BLOCKED"
+}

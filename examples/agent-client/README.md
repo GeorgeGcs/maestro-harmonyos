@@ -54,7 +54,7 @@ appId: org.example.demo
 - takeScreenshot: agent-handoff
 ```
 
-在普通调用中加上 `--handoff-flow`：
+在普通调用中加上 `--handoff-flow`。入口会先用所选 CLI 的 Maestro 解析器检查 YAML 和静态子 Flow / JS 依赖，保存本次副本，检查完成后才启动桥接：
 
 ```powershell
 node examples/agent-client/run.mjs `
@@ -70,6 +70,23 @@ node examples/agent-client/run.mjs `
 
 CLI 使用新的任务与尝试标识。示例保存 CLI 的实际退出码，并读取、核对它的结果文件；超时或中断不自动重跑 YAML。YAML 的应用和前置页面应与本次测试相符，接管不会自动重置应用状态。
 
+参数化 Flow 使用可重复的 `--env NAME=value`（简写 `-e`）；`APP_ID` 默认来自 `--app`，不能另传不一致的值。参数通过原生进程参数传给 CLI，不经 shell 解释。例如可在另一台电脑先运行以下检查，不需要设备、HDC 或应用：
+
+```powershell
+node examples/agent-client/run.mjs `
+  --check-only --app 'org.example.demo' `
+  --cli-dir 'D:\tools\maestro-harmonyos\cli' `
+  --handoff-flow './examples/flows/input-smoke.yaml' `
+  --env 'START_TEXT=输入演示' --env 'INPUT_HINT=请输入姓名' --env 'INPUT_TEXT=熊猫测试' `
+  --artifacts './artifacts/agent-check'
+```
+
+检查通过后去掉 `--check-only`，补齐 `--device`、`--ability` 和 `--assert-text` 才会实际执行。使用前台单页 Flow 时按其说明手动准备页面。默认依赖根为 Flow 所在目录；子 Flow 位于相邻目录时用 `--flow-root` 指定共同上级，例如录屏包装的根为 `examples/component-collection`。Flow/JS 依赖必须使用静态相对路径；动态路径、绝对路径或越出该根的依赖均拒绝接管。
+
+直接的 `${NAME}` 引用会检查是否由命令行、Flow 局部环境或 Maestro 环境提供。复杂 JavaScript 表达式和运行时变量不在静态保证范围内，检查过程不执行 JavaScript。不要把该检查当作完整执行沙箱。静态 YAML/JS 副本及解析工具在 CLI 接管前再次校验；原文件后续编辑不影响已保存的本次副本。参数值保存在本地调用材料中，分享前检查是否包含凭据。
+
+脚本需要相对路径的数据文件时，必须逐个加 `--handoff-asset data/payload.txt`，路径相对 `--flow-root`。这些文件按原相对路径保存并校验；不会自动分析 JavaScript 的文件访问，也不会复制整个工程。未列出的数据文件不在执行副本中。每个文件最多 4 MiB，全部输入合计最多 32 MiB；链接、越界路径和重复文件会被拒绝。
+
 ## 产物与结果
 
 `--artifacts` 应使用稳定的本地目录，同一目录可重复使用。每次调用另建目录，不覆盖前一次结果：
@@ -79,6 +96,7 @@ CLI 使用新的任务与尝试标识。示例保存 CLI 的实际退出码，�
 | `client/<invocationId>/invocation.json` | 调用参数及预先生成的动作标识 |
 | `client/<invocationId>/preflight-*.json` | 首次及恢复后的预检原文 |
 | `client/<invocationId>/*.request.json` | 派发前保存的请求；包含可选 CLI 接管请求 |
+| `client/<invocationId>/handoff-input/` | 派发前的解析请求、诊断、依赖副本、参数与摘要；`--check-only` 也保存此目录 |
 | `client/<invocationId>/*.result.json`、`*.evidence.json` | 动作结果、证据索引及可选 CLI 结果 |
 | `client/<invocationId>/connected.json`、`released.json` | 已连接及已释放会话 |
 | `client/<invocationId>/recovery-*.json` | 返回的恢复报告，保留失败或矛盾报告供检查 |

@@ -9,6 +9,7 @@ import { collectArtifacts } from '../ci/collect-artifacts.mjs';
 import { maintenanceFixture } from './fixtures/maintenance.mjs';
 import { verifyMaintenanceRelease } from '../recovery/verify-maintenance.mjs';
 import { verifyState, verifyDeviceRelease } from '../ci/verify-state.mjs';
+import { collectCleanupFenceEvidence } from '../recovery/cleanup-fence-archive.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const parent = path.join(repo, 'artifacts/ci-archive-tests');
@@ -58,6 +59,88 @@ test('later ordinary session archives its inherited cleanup barriers', {
   assert.equal(report.status, 'complete', JSON.stringify(report.issues));
   assert.equal(report.retainedFenceEvidence, 'receipt_and_chain');
   assert.ok(report.files.some(file => file.path.startsWith('recovery/retained/')));
+});
+
+const fenceProducerEnabled = Boolean(process.env.MAESTRO_TEST_JAVA && process.env.MAESTRO_TEST_CLI && process.env.MAESTRO_TEST_BASH);
+async function withFence(t, mode = 'complete') {
+  const f = await fixture(t, 'failed', 'unknown', 'cleanup-fence-fixture');
+  const produced = spawnSync(process.env.MAESTRO_TEST_JAVA, ['--class-path', path.join(process.env.MAESTRO_TEST_CLI, 'lib', '*'),
+    path.join(repo, 'scripts/tests/fixtures/CleanupFenceProducer.java'), f.record.recoveryRoot, process.env.MAESTRO_TEST_BASH, mode],
+  { encoding: 'utf8', windowsHide: true, timeout: 90000 });
+  assert.equal(produced.status, 0, produced.stderr);
+  const input = JSON.parse(await fs.readFile(path.join(f.record.recoveryRoot, 'input.json'), 'utf8'));
+  const checked = mode === 'complete' ? await verifyState({ ...input, mode: 'recovery', recoveryReportPath: input.responsePath }) : await verifyDeviceRelease(input);
+  f.record.createdAt = input.createdAt; f.record.resolution = checked;
+  const retained = checked.retained ?? checked.retainedFences[0];
+  const owner = path.join(f.record.recoveryRoot, hash(input.deviceId), retained.ownerId);
+  const base = path.join(owner, 'cleanup-fence', retained.recoveryId);
+  const cp = JSON.parse(await fs.readFile(path.join(base, retained.checkpoint.path), 'utf8'));
+  const receipt = JSON.parse(await fs.readFile(path.join(base, retained.receipt.path), 'utf8'));
+  await f.persist();
+  return { ...f, input, checked, retained, owner, base, cp, receipt };
+}
+
+for (const mode of ['missing-receipt', 'missing-checkpoint', 'changed-journal', 'missing-head', 'missing-response', 'missing-live-calls', 'limited-budget']) {
+  test(`cleanup-fence archive retains readable evidence after ${mode}`, { skip: !fenceProducerEnabled }, async t => {
+    const f = await withFence(t), before = await fileHash(f.resultPath);
+    if (mode === 'missing-receipt') await fs.unlink(path.join(f.base, f.retained.receipt.path));
+    if (mode === 'missing-checkpoint') await fs.unlink(path.join(f.base, f.retained.checkpoint.path));
+    if (mode === 'changed-journal') await fs.appendFile(path.join(f.base, f.cp.originalJournal.path), ' ');
+    if (mode === 'missing-head') await fs.unlink(path.join(f.base, f.receipt.verifiedHead.path));
+    if (mode === 'missing-response') await fs.unlink(f.input.responsePath);
+    if (mode === 'missing-live-calls') await fs.unlink(path.join(f.base, 'calls.json'));
+    const report = await f.collect(mode === 'limited-budget' ? { limits: { files: 27 } } : {});
+    assert.equal(report.status, 'incomplete');
+    assert.equal(report.recoveryEvidence, 'cleanup_fence_incomplete');
+    assert.equal(report.scope.deviceReleaseAssessment, 'not_performed');
+    assert.equal(report.originals.ci.execution, 'failed');
+    assert.equal(await fileHash(f.resultPath), before);
+    assert.ok(report.files.some(file => file.path.endsWith('unfinished.partial') && file.status === 'copied'));
+    if (mode === 'limited-budget') assert.ok(report.files.length <= 27);
+    else {
+      const available = mode === 'missing-checkpoint' ? f.retained.receipt.path : f.cp.originalReceipt.path;
+      assert.ok(report.files.some(file => path.basename(file.source) === available && file.status === 'copied'), available);
+    }
+    if (mode === 'changed-journal') {
+      const damaged = report.files.find(file => path.basename(file.source) === f.cp.originalJournal.path);
+      assert.equal(damaged.status, 'copied'); assert.notEqual(damaged.copySha256, damaged.expectedSha256);
+    }
+  });
+}
+
+test('missing retained owner does not prevent later owner or current receipt collection', { skip: !fenceProducerEnabled }, async t => {
+  const f = await withFence(t, 'new-lease');
+  f.record.resolution.retainedFences.unshift({ ...f.retained, ownerId: randomUUID(), recoveryId: randomUUID() });
+  await f.persist();
+  const report = await f.collect();
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.retainedFenceEvidence, 'incomplete');
+  assert.ok(report.files.some(file => file.source === f.checked.reportPath && file.status === 'copied'));
+  assert.ok(report.files.some(file => file.source === path.join(f.base, f.retained.receipt.path) && file.status === 'copied'));
+  assert.ok(report.files.some(file => file.source === path.join(f.base, f.cp.originalJournal.path) && file.status === 'copied'));
+});
+
+test('cleanup-fence archive never follows corrupt or escaping graph references', { skip: !fenceProducerEnabled }, async t => {
+  const f = await withFence(t);
+  const outside = path.join(f.owner, 'outside.json'); await write(outside, { secret: 'not part of this recovery' });
+  f.cp.originalJournal = { path: '../outside.json', sha256: await fileHash(outside) };
+  await write(path.join(f.base, f.retained.checkpoint.path), f.cp);
+  // This changes the bound checkpoint only; the historical receipt will report a mismatch.
+  f.retained.checkpoint.sha256 = await fileHash(path.join(f.base, f.retained.checkpoint.path));
+  await f.persist();
+  const report = await f.collect();
+  assert.equal(report.status, 'incomplete');
+  assert.equal(report.files.some(file => file.source === outside), false);
+  assert.ok(report.files.some(file => file.source === path.join(f.base, f.cp.originalReceipt.path) && file.status === 'copied'));
+});
+
+test('cleanup-fence traversal checks the caller budget before reading any document', async () => {
+  const reads = [], issues = [], id = randomUUID(), ref = { path: `checkpoint-${randomUUID()}.json`, sha256: 'a'.repeat(64) };
+  const result = await collectCleanupFenceEvidence({ deviceId: 'fixture', ownerDirectory: path.resolve('fixture', id),
+    retained: { ownerId: id, recoveryId: randomUUID(), checkpoint: ref, receipt: { ...ref, path: `receipt-${randomUUID()}.json` } },
+    prefix: 'recovery/fence', read: async file => { reads.push(file); throw Error('Unexpected read'); },
+    issue: (...args) => issues.push(args), checkBudget: () => { throw Error('Collection time budget exceeded.'); } });
+  assert.equal(result.complete, false); assert.equal(reads.length, 0); assert.equal(issues.length, 1);
 });
 
 async function withMaintenance(t, producer = false) {

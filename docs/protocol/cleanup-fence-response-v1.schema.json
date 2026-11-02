@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:cleanup-fence-response:1",
+  "title": "Cleanup fence CLI response v1",
+  "$comment": "JSON emitted after entering harmonyos-cleanup-recovery. Argument-parser errors may have no JSON response. The successful shape never proves original execution success.",
+  "oneOf": [{"$ref": "#/$defs/isolated"}, {"$ref": "#/$defs/blocked"}],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "isolated": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "schemaVersion", "deviceId", "sessionId", "recoveryId", "state", "handoffReady", "originalResult", "disposition", "retainedDirectories", "receipt"],
+      "properties": {
+        "protocol": {"const": "maestro.harmonyos.cleanup-fence-recovery"},
+        "schemaVersion": {"const": 1},
+        "deviceId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+        "sessionId": {"$ref": "#/$defs/uuid"},
+        "recoveryId": {"$ref": "#/$defs/uuid"},
+        "state": {"const": "isolated"},
+        "handoffReady": {"const": true},
+        "originalResult": {"const": "unknown"},
+        "disposition": {"const": "prevented_before_dispatch"},
+        "retainedDirectories": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {"type": "string", "pattern": "^/data/local/tmp/maestro-session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+        },
+        "receipt": {
+          "type": "object", "additionalProperties": false, "required": ["path", "sha256", "schemaVersion"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "schemaVersion": {"const": 4}
+          }
+        }
+      }
+    },
+    "blocked": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "schemaVersion", "state", "handoffReady", "error"],
+      "properties": {
+        "protocol": {"const": "maestro.harmonyos.cleanup-fence-recovery"},
+        "schemaVersion": {"const": 1},
+        "state": {"const": "unknown"},
+        "handoffReady": {"const": false},
+        "error": {"const": "CLEANUP_FENCE_BLOCKED"}
+      }
+    }
+  }
+}

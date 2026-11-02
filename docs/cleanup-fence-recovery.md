@@ -19,6 +19,8 @@
 
 成功输出为 `maestro.harmonyos.cleanup-fence-recovery` v1，包含 `state=isolated`、`handoffReady=true`、`originalResult=unknown` 及版本 4 回执的路径和摘要。含义是旧清理已被隔离、设备允许新会话；不是原用例通过，也不是所有旧目录已删除。CLI 返回非零或没有完整回执时继续保留隔离。
 
+完整字段、成功与阻塞示例及 JSON Schema 见[清理隔离格式](protocol/cleanup-fence.md)。结构检查不能代替身份、证据链和设备目录核验。
+
 占用记录使用版本 3，包含 `cleanupFence` 和 `retainedFences`。后续普通会话保留这份清单，并在取得设备锁后、打开驱动前重新检查设备上的阻挡目录。旧 CLI 拒绝版本 3；普通 `agent.recover` 和顺序重启维护也不会接管正在进行的清理恢复。
 
 恢复命令使用独立调用日志，原会话日志和原回执保持原字节。完成前保留完整阶段链、每次调用的参数摘要、原始应答和本机进程终态。目录创建或图片清理应答丢失时，续办只发送固定核验命令；取得匹配本事务的远端标记后才继续。清理标记缺失时不重放删除。

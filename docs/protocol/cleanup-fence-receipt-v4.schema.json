@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:cleanup-fence-receipt:4",
+  "title": "Cleanup fence isolation receipt v4",
+  "$comment": "Shape only. Original command completion stays unknown. Independently verify the evidence chain, owner, hashes and retained device directories before a new session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "recoveryId", "deviceId", "sessionId", "observedAt", "state", "handoffReady", "disposition", "originalResult", "pendingOperations", "temporaryFiles", "checkpoint", "verifiedHead", "retainedDirectories"],
+  "properties": {
+    "schemaVersion": {"const": 4},
+    "recoveryId": {"$ref": "#/$defs/uuid"},
+    "deviceId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+    "sessionId": {"$ref": "#/$defs/uuid"},
+    "observedAt": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"},
+    "state": {"const": "isolated"},
+    "handoffReady": {"const": true},
+    "disposition": {"const": "prevented_before_dispatch"},
+    "originalResult": {"const": "unknown"},
+    "pendingOperations": {"const": 1},
+    "temporaryFiles": {"const": 0},
+    "checkpoint": {"$ref": "#/$defs/reference"},
+    "verifiedHead": {"$ref": "#/$defs/reference"},
+    "retainedDirectories": {"$ref": "#/$defs/retainedDirectories"}
+  },
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "reference": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^[a-z][a-z-]{0,40}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.json$"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "retainedDirectories": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {"type": "string", "pattern": "^/data/local/tmp/maestro-session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+    }
+  }
+}

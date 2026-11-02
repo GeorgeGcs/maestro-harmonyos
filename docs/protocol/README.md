@@ -15,6 +15,8 @@
 | 内部恢复凭据 | [v1/v2](recovery-receipt.schema.json) | v2 增加不可变录屏资源快照引用 |
 | 依次重启维护凭据 | [v3](maintenance-receipt-v3.schema.json) | 独立维护分支；原执行结果保持 unknown |
 | 依次重启维护响应 | [v1](maintenance-response-v1.schema.json) | prepare/resume/complete 的成功命令响应；见[维护格式](maintenance.md) |
+| 清理隔离恢复回执 | [v4](cleanup-fence-receipt-v4.schema.json) | 保留阻挡目录，原命令仍未确认；见[清理隔离格式](cleanup-fence.md) |
+| 清理隔离 CLI 响应 | [v1](cleanup-fence-response-v1.schema.json) | 已隔离与阻塞响应；与 agent v1/v2 分别版本化 |
 | 完整解码报告 | [v1](recording-verification-v1.schema.json) | [解码命令与检查范围](../recording-diagnostics.md) |
 | 录屏阶段诊断 | [v1](recording-diagnostics-v1.schema.json) | [来源、事件与视频关联](recording-diagnostics.md) |
 

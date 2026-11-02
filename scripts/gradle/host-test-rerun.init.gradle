@@ -1,0 +1,11 @@
+// Rerun test tasks without rebuilding every dependency or redownloading resources.
+allprojects {
+    tasks.withType(org.gradle.api.tasks.testing.Test).configureEach {
+        outputs.upToDateWhen { false }
+        outputs.cacheIf { false }
+        if (System.getProperty('os.name').startsWith('Windows') && project.path == ':maestro-client') {
+            // This upstream test declares @EnabledOnOs(LINUX, MAC); report the boundary before running.
+            filter.excludeTestsMatching('maestro.harmonyos.driver.Mp4RecordingValidatorTest.rejects symlinks even when their target is a valid recording')
+        }
+    }
+}
