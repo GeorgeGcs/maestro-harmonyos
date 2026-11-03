@@ -33,7 +33,7 @@ node examples/hmos-code-lab/prepare.mjs --check-only
 ## 在 DevEco 中运行
 
 1. 打开 `examples/hmos-code-lab/app` **工程根目录**，等待工程同步。
-2. 选择 `phone` 运行配置。手机、折叠屏和平板共用这个入口，不要单独打开 `products/phone` 子目录。
+2. 在顶部运行配置中明确选择 `phone`。手机、折叠屏和平板共用这个入口；`pc` 对应 `PcAbility`，不包含本仓的前台常亮补丁。不要单独打开 `products/phone` 子目录。
 3. 在 DevEco 中配置自己的调试签名，选择设备并运行。
 4. 完成首次引导，把界面设为简体中文，按[用例说明](flows/README.md)手动进入对应组件详情页，再运行一条 Flow。
 
@@ -42,6 +42,8 @@ node examples/hmos-code-lab/prepare.mjs --check-only
 这三条用例使用应用内置的组件展示页，**无需执行 `hmosword-build` 的全量 Samples 下载**，也不需要配置多 HAP 部署。应用包名为 `com.huawei.hmos.sample`，模块为 `phone`，Ability 为 `EntryAbility`。
 
 补丁只修改 `products/phone/src/main/ets/entryability/EntryAbility.ets`：应用在前台时请求窗口常亮，进入后台或窗口销毁时释放。运行期间保持应用前台；补丁不修改系统锁屏设置。
+
+如果已误装 `pc`，预检会提示 `MODULE_NOT_FOUND`。同一包名下直接改装 `phone` 可能返回 `install entry already exist`，即使 HDC 进程退出码为 0 也不代表安装成功。此时先决定是否保留示例应用的数据；允许清除时，再手动卸载旧示例并运行 `phone` 配置。安装后应确认模块为 `phone`、入口为 `EntryAbility`。
 
 ## 执行一个 Flow
 
@@ -70,7 +72,9 @@ node examples/agent-client/run.mjs --check-only `
 
 2026-11-02，固定版本原配置和应用常亮补丁后的配置均已在上述 DevEco / SDK 环境构建出 `phone` 未签名 HAP。使用了本机已安装的工具链和依赖缓存，这不是全新电脑的完整复现。
 
-三条 Flow 已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查；**这个样例尚未完成签名安装和真机执行**。现有 ComponentCollection 的设备测试结果不能代替本样例的验证。具体起始页面、选择器来源和运行限制见 [Flow 说明](flows/README.md)。
+2026-11-03，`phone` 签名包已在 API 26 平板安装。输入和弹窗 Flow 各通过一次；按钮 Flow 已执行，但未通过“按钮被点击”的 Toast 可见性断言。三条用例收尾均完成，设备释放回执核验通过。按钮失败原因及两次独立导航失败见[本次记录](../../docs/progress/2026-11-03-hmos.md)。这不是 20 轮稳定性结果。
+
+三条 Flow 均已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)。
 
 获取脚本的主机回归测试可单独执行，无需设备：
 

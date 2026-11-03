@@ -22,16 +22,16 @@ node examples/hmos-code-lab/prepare.mjs
 
 | 示例 | 用途与状态 |
 | --- | --- |
-| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程，提供按钮、输入、弹窗候选 Flow；真机适配待验证。 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在 API 26 平板上单次通过，按钮 Flow 未通过短暂 Toast 的可见性断言，见[验证记录](docs/progress/2026-11-03-hmos.md)。 |
 | [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；运行前需自行准备应用。 |
 
 ### 页面预览
 
-下面是 ComponentCollection 上游项目的原始配图，展示按钮和弹窗的测试页面。[来源与许可证](docs/images/README.md)、[实际运行记录](examples/component-collection/README.md#单机开发预跑)分别记录。
+下面是 2026-11-03 在平板运行 HMOS 输入和弹窗 Flow 时保存的原始截图。测试条件与结果见[验证记录](docs/progress/2026-11-03-hmos.md)，图片来源见[图片说明](docs/images/README.md)。
 
-| Button 按钮 | AlertDialog 警告弹窗示例页 |
+| TextInput 输入验证 | AlertDialog 弹窗验证 |
 | --- | --- |
-| <img src="docs/images/component-collection-button.png" width="240" alt="上游 ComponentCollection 按钮示例页面预览"> | <img src="docs/images/component-collection-warning-popup.png" width="240" alt="上游 ComponentCollection 警告弹窗示例页面预览"> |
+| <img src="docs/images/hmos-code-lab-input-tablet.png" width="480" alt="HMOS 平板输入用例的原始截图，输入内容为 maestro-hmos"> | <img src="docs/images/hmos-code-lab-dialog-tablet.png" width="480" alt="HMOS 平板弹窗用例的原始截图，显示标题、正文和两个按钮"> |
 
 ## 跑一个 Flow
 

@@ -1,9 +1,9 @@
-# 状态：已核对官方源码，尚未进行真机验证。界面语言须为简体中文。
+# 状态：2026-11-03 API 26 平板实测，Toast 可见性断言失败。界面语言须为简体中文。
 # 手动进入 Button 详情，保持预览中的“按钮示例”可见，operation 使用默认 Click。
 # 来源：7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6，componentlibrary 的
 # buttonview/component/ButtonBuilder.ets、buttonview/entity/ButtonAttributeMapping.ets
 # 及 resources/zh_CN/element/string.json（button_text、btn_click）。
-# 点击反馈是 Toast；“按钮被点击”能否被设备 UI 树读取仍待验证。
+# 点击反馈为 2 秒 Toast；本次未读到“按钮被点击”，保留断言用于后续时序排查。
 appId: com.huawei.hmos.sample
 name: hmos-code-lab-foreground-button
 ---

@@ -1,5 +1,13 @@
 # 文档图片来源
 
+## HMOS 代码工坊实测截图
+
+`hmos-code-lab-input-tablet.png` 与 `hmos-code-lab-dialog-tablet.png` 来自 2026-11-03 平板测试的 `takeScreenshot` 步骤，分别记录输入 `maestro-hmos` 和系统弹窗展开时的页面。图片按原字节复制，没有裁剪或修改。
+
+应用源码来自 [HMOS 代码工坊](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos)固定提交 `7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6`，使用本仓的前台常亮补丁。上游许可证保存在 [examples/hmos-code-lab/LICENSE](../../examples/hmos-code-lab/LICENSE)，运行条件及结果见[测试记录](../progress/2026-11-03-hmos.md)。
+
+## ComponentCollection 上游配图
+
 本目录保存 ComponentCollection 上游项目的两张原始配图，用于说明测试页面。实际运行结果见 [ComponentCollection 记录](../../examples/component-collection/README.md#单机开发预跑)。
 
 | 本目录文件 | 上游文件 |
