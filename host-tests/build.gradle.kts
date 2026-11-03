@@ -8,8 +8,15 @@ kotlin {
         main {
             kotlin.srcDir("../.upstream/maestro/maestro-client/src/main/java")
             kotlin.srcDir("../.upstream/maestro/maestro-utils/src/main/kotlin")
-            kotlin.include("maestro/harmonyos/**", "maestro/TreeNode.kt", "TempFileHandler.kt")
-            kotlin.exclude("maestro/harmonyos/driver/**")
+            // Recording-resource recovery uses the HDC device adapter and recorder support.
+            // Keep these dependencies without compiling the complete Maestro SDK.
+            kotlin.include(
+                "maestro/harmonyos/**",
+                "maestro/TreeNode.kt",
+                "maestro/ScreenRecording.kt",
+                "maestro/debuglog/RecordingDiagnosticContext.kt",
+                "TempFileHandler.kt",
+            )
         }
         test {
             kotlin.srcDir("../.upstream/maestro/maestro-client/src/test/kotlin")
@@ -29,6 +36,8 @@ sourceSets.test {
 dependencies {
     implementation(libs.jackson.core.databind)
     implementation(libs.jackson.module.kotlin)
+    implementation(libs.square.okio.jvm)
+    implementation(libs.logging.sl4j)
     testImplementation(libs.junit.jupiter.api)
     testImplementation(libs.junit.jupiter.params)
     testImplementation(libs.google.truth)

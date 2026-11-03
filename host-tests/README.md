@@ -51,12 +51,15 @@ JVM 组使用本地 Gradle 程序和 `--offline`，强制重新运行测试任�
 
 ```powershell
 ./scripts/prepare-upstream.ps1
+$env:MAESTRO_TEST_POSIX_SHELL = 'D:\tools\Git\bin\bash.exe'
 ./scripts/test-host.ps1
 ```
 
 测试脚本会检查并应用补丁。已有适配改动时不要重复执行 `prepare-upstream.ps1`，后续直接运行测试。首次运行需要下载 Gradle 与依赖，缓存完整后可加 `-Offline`。
 
-默认入口只编译 HDC、布局解析、上游 `TreeNode` 和 `TempFileHandler`，不要求 Android SDK，也不编译完整驱动或 CLI。报告位于 `host-tests/build/reports/tests/test/index.html`。补丁脚本的检查入口是 `./scripts/tests/test-patch-scripts.ps1`。
+两项清理脚本测试还需要 POSIX shell；Windows 上在首次运行测试前用 `MAESTRO_TEST_POSIX_SHELL` 指定已有的 Git Bash，示例路径须替换为本机实际文件。未配置时这两项会标记为跳过，不能计为通过；其他测试仍运行。
+
+默认入口编译 HDC、布局解析及录屏资源恢复所需的设备适配和录屏支持类，并包含上游 `TreeNode`、`ScreenRecording`、`RecordingDiagnosticContext` 和 `TempFileHandler`；Okio 与日志依赖复用上游版本目录。它不要求 Android SDK，也不编译完整 `HarmonyOSDriver` 或 CLI。录屏资源恢复测试使用模拟 HDC 响应，不操作设备。报告位于 `host-tests/build/reports/tests/test/index.html`。补丁脚本的检查入口是 `./scripts/tests/test-patch-scripts.ps1`。
 
 完整客户端测试：
 

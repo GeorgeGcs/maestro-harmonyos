@@ -13641,10 +13641,10 @@ index 0000000..c67676f
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..fdaf5dd
+index 0000000..b7e00e7
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,570 @@
+@@ -0,0 +1,578 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -13994,20 +13994,28 @@ index 0000000..fdaf5dd
 +            // owned paths and share the caller's deadline. A partial cleanup remains retryable.
 +            if (state.temporaryFiles.isNotEmpty() || state.operations.any { !it.markerRemoved } || !state.rootRemoved) {
 +                val steps = mutableListOf<Pair<String, () -> Unit>>()
-+                for (remote in state.temporaryFiles) {
-+                    requireOwnedFile(remote)
-+                    steps += "[ ! -L ${quote(remote)} ] && rm -f ${quote(remote)} && [ ! -e ${quote(remote)} ] || exit 121; " to
-+                        { state.temporaryFiles.remove(remote); Unit }
++                for (resources in state.temporaryFiles.toList().chunked(80)) {
++                    resources.forEach(::requireOwnedFile)
++                    // The journal validates these basenames: no whitespace, slash or glob.
++                    // Send the shared root once instead of repeating it for every check.
++                    val names = resources.joinToString(" ") { it.substringAfterLast('/') }
++                    val script = "set -f; IFS=' '; __maestro_cleanup_root=${quote(state.remoteRoot + "/files")}; " +
++                        "__maestro_cleanup_names=${quote(names)}; " +
++                        "for __maestro_cleanup_name in \$__maestro_cleanup_names; do " +
++                        "__maestro_cleanup_file=\"\$__maestro_cleanup_root/\$__maestro_cleanup_name\"; " +
++                        "[ ! -L \"\$__maestro_cleanup_file\" ] && rm -f \"\$__maestro_cleanup_file\" && " +
++                        "[ ! -e \"\$__maestro_cleanup_file\" ] || exit 121; done; "
++                    steps += script to { state.temporaryFiles.removeAll(resources.toSet()); Unit }
 +                }
-+                for (operations in state.operations.filterNot { it.markerRemoved }.chunked(20)) {
-+                    // List each owned directory once. Repeating its full path for every check
-+                    // made ordinary multi-recording sessions require too many HDC round trips.
-+                    // State validation restricts these paths to the generated UUID namespace:
-+                    // no whitespace or glob characters. Split only on spaces with globbing off.
-+                    val directories = operations.joinToString(" ") { "${state.remoteRoot}/${it.id}" }
-+                    val script = "set -f; IFS=' '; __maestro_cleanup_dirs=${quote(directories)}; " +
++                for (operations in state.operations.filterNot { it.markerRemoved }.chunked(100)) {
++                    // UUIDs alone keep long suites within the same bounded HDC budget.
++                    // Never enumerate or recursively remove unregistered directories.
++                    val ids = operations.joinToString(" ") { it.id }
++                    val script = "set -f; IFS=' '; __maestro_cleanup_root=${quote(state.remoteRoot)}; " +
++                        "__maestro_cleanup_ids=${quote(ids)}; " +
 +                        "__maestro_cleanup_files=''; __maestro_cleanup_existing=''; " +
-+                        "for __maestro_cleanup_dir in \$__maestro_cleanup_dirs; do " +
++                        "for __maestro_cleanup_id in \$__maestro_cleanup_ids; do " +
++                        "__maestro_cleanup_dir=\"\$__maestro_cleanup_root/\$__maestro_cleanup_id\"; " +
 +                        "if [ -e \"\$__maestro_cleanup_dir\" ] || [ -L \"\$__maestro_cleanup_dir\" ]; then " +
 +                        "[ -d \"\$__maestro_cleanup_dir\" ] && [ ! -L \"\$__maestro_cleanup_dir\" ] || exit 121; " +
 +                        "__maestro_cleanup_files=\"\$__maestro_cleanup_files \$__maestro_cleanup_dir/done \$__maestro_cleanup_dir/done.pending\"; " +
@@ -19422,10 +19430,10 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..63148a7
+index 0000000..d0efc66
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,482 @@
+@@ -0,0 +1,513 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -19536,7 +19544,8 @@ index 0000000..63148a7
 +            assertThat(recovered.state).isEqualTo("complete")
 +            assertThat(recovered.temporaryFiles).isEqualTo(0)
 +            assertThat(remote.dispatched).isEqualTo(1)
-+            assertThat(remote.cleanup.single()).contains(temporary)
++            assertThat(remote.cleanup.single()).contains(temporary.substringBeforeLast('/'))
++            assertThat(remote.cleanup.single()).contains(temporary.substringAfterLast('/'))
 +            assertThat(remote.cleanup.single()).doesNotContain("rm -r")
 +            assertThat(remote.cleanup.single()).doesNotContain("kill")
 +            assertThat(remote.cleanup.single()).doesNotContain("*")
@@ -19575,7 +19584,8 @@ index 0000000..63148a7
 +            assertThat(observed.temporaryFiles).isEqualTo(1)
 +            assertThat(remote.cleanup).isEmpty()
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
-+            assertThat(remote.cleanup.single()).contains(path)
++            assertThat(remote.cleanup.single()).contains(path.substringBeforeLast('/'))
++            assertThat(remote.cleanup.single()).contains(path.substringAfterLast('/'))
 +        }
 +    }
 +
@@ -19646,7 +19656,7 @@ index 0000000..63148a7
 +            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
 +            repeat(89) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
 +            val state = mapper.readTree(file().toFile())
-+            val owned = state["operations"].map { state["remoteRoot"].asText() + "/" + it["id"].asText() }
++            val owned = state["operations"].map { it["id"].asText() }
 +            journal.seal()
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
 +            assertThat(remote.cleanup.size).isAtMost(3)
@@ -19657,6 +19667,35 @@ index 0000000..63148a7
 +            assertThat(cleanup).doesNotContain("*")
 +            val after = mapper.readTree(file().toFile())
 +            assertThat(after["operations"].all { it["markerRemoved"].asBoolean() }).isTrue()
++            assertThat(after["rootRemoved"].asBoolean()).isTrue()
++        }
++    }
++
++    @Test fun `full component suite sized cleanup keeps all registered resources in bounded calls`() {
++        create().use { journal ->
++            val remote = FakeRemote(file())
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            repeat(727) { hdc.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            val resources = List(240) { hdc.allocateTemporaryFile("layout", "json") }
++            resources.forEach(hdc::forgetTemporaryFile)
++            val before = mapper.readTree(file().toFile())
++            journal.seal()
++            assertThat(journal.recover(hdc, Duration.ofSeconds(30)).state).isEqualTo("complete")
++            assertThat(remote.dispatched).isEqualTo(727)
++            assertThat(remote.cleanup.size).isAtMost(12)
++            assertThat(remote.cleanup.all { it.length < 7 * 1024 }).isTrue()
++            val cleanup = remote.cleanup.joinToString("\n")
++            before["operations"].forEach { operation ->
++                assertThat(Regex(Regex.escape(operation["id"].asText())).findAll(cleanup).count()).isEqualTo(1)
++            }
++            resources.forEach { resource ->
++                assertThat(Regex(Regex.escape(resource.substringAfterLast('/'))).findAll(cleanup).count()).isEqualTo(1)
++            }
++            assertThat(cleanup).doesNotContain("rm -r")
++            assertThat(cleanup).doesNotContain("*")
++            val after = mapper.readTree(file().toFile())
++            assertThat(after["operations"].all { it["markerRemoved"].asBoolean() }).isTrue()
++            assertThat(after["temporaryFiles"].isEmpty).isTrue()
 +            assertThat(after["rootRemoved"].asBoolean()).isTrue()
 +        }
 +    }
@@ -19679,14 +19718,14 @@ index 0000000..63148a7
 +        val hdc = HdcClient("fake", remote)
 +        create().use { journal ->
 +            val tracked = hdc.withRecoveryJournal(journal)
-+            repeat(120) { tracked.shell("fixture-target", listOf("uitest", "dumpLayout")) }
++            repeat(240) { tracked.shell("fixture-target", listOf("uitest", "dumpLayout")) }
 +            journal.seal()
 +            assertThat(journal.recover(hdc).state).isEqualTo("unknown")
 +            val state = mapper.readTree(file().toFile())
 +            assertThat(remote.cleanup).hasSize(2)
 +            val completed = state["operations"].filter { it["markerRemoved"].asBoolean() }
 +            assertThat(completed.size).isGreaterThan(0)
-+            assertThat(completed.size).isLessThan(120)
++            assertThat(completed.size).isLessThan(240)
 +            state["operations"].forEach { operation ->
 +                assertThat(operation["markerRemoved"].asBoolean())
 +                    .isEqualTo(remote.cleanup.first().contains(operation["id"].asText()))
@@ -19699,7 +19738,7 @@ index 0000000..63148a7
 +            assertThat(journal.recover(hdc).state).isEqualTo("complete")
 +            val resumed = remote.cleanup.drop(2).joinToString("\n")
 +            preserved.forEach { assertThat(resumed).doesNotContain(it) }
-+            assertThat(remote.dispatched).isEqualTo(120)
++            assertThat(remote.dispatched).isEqualTo(240)
 +        }
 +    }
 +
