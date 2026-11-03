@@ -9,9 +9,9 @@
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
 - **当前进度：** 约 70%（更新于 2026 年 11 月 3 日，按交付准备度估算）。
 
-Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过。
+Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过，按钮样式 Flow 已在手机上单次通过。
 
-接下来需要完成官方样例的按钮问题与完整场景验证、正式固定版本 20 轮、录屏历史故障排查、真实 CI 平台联测，以及最终干净检出复现。测试结果与范围见[手机验证记录](docs/progress/2026-11-03-phone.md)。
+接下来需要完成官方样例的按钮 Toast 问题与完整场景验证、固定版本 20 轮、录屏历史故障排查、真实 CI 平台联测，以及最终干净检出复现。测试结果与范围见[手机验证记录](docs/progress/2026-11-03-phone.md)及[HMOS 稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
 ## 背景与用途
 
@@ -31,7 +31,7 @@ node examples/hmos-code-lab/prepare.mjs
 
 | 示例 | 用途与状态 |
 | --- | --- |
-| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次，按钮 Flow 在两台设备上均未通过短暂 Toast 的可见性断言，见[手机记录](docs/progress/2026-11-03-phone.md)与[平板记录](docs/progress/2026-11-03-hmos.md)。 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次。原按钮 Flow 在两台设备上均未通过短暂 Toast 断言；新增按钮样式 Flow 已在手机单次通过，见[手机记录](docs/progress/2026-11-03-phone.md)、[平板记录](docs/progress/2026-11-03-hmos.md)与[稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。 |
 | [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；手机前台单 Flow 连续 20/20 轮通过。运行前需自行准备应用。 |
 
 ### 页面预览

@@ -4968,10 +4968,10 @@ index 0000000..a3dbcb6
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..db4af0c
+index 0000000..4baba89
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,536 @@
+@@ -0,0 +1,537 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -5049,7 +5049,8 @@ index 0000000..db4af0c
 +            journal.seal()
 +            // Multi-step flows leave several bounded batches of owned proof directories.
 +            // Share the explicit recovery budget; timeout still requires a separate recovery.
-+            report = if (gate.requiresRecovery || gate.unresolvedRecording) journal.snapshot() else journal.recover(hdc, Duration.ofSeconds(30))
++            report = if (gate.requiresRecovery || gate.unresolvedRecording) journal.snapshot() else
++                journal.recover(hdc, Duration.ofSeconds(30), hostProcessGrace = Duration.ofSeconds(10))
 +        } catch (error: Throwable) {
 +            failure = error
 +        } finally {
@@ -13640,10 +13641,10 @@ index 0000000..c67676f
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..e70a52f
+index 0000000..fdaf5dd
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,545 @@
+@@ -0,0 +1,570 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -13917,9 +13918,11 @@ index 0000000..e70a52f
 +    }
 +
 +    /** Requires the caller's exclusive device lease. Does not issue input, launch, or retry commands. */
-+    @Synchronized fun recover(hdc: HdcClient, timeout: Duration = Duration.ofSeconds(10), cleanupResources: Boolean = true): RecoveryReport {
++    @Synchronized fun recover(hdc: HdcClient, timeout: Duration = Duration.ofSeconds(10), cleanupResources: Boolean = true,
++                              hostProcessGrace: Duration = Duration.ZERO): RecoveryReport {
 +        ensureOpen()
 +        require(timeout > Duration.ZERO && timeout <= Duration.ofMinutes(1))
++        require(!hostProcessGrace.isNegative && hostProcessGrace <= Duration.ofSeconds(10))
 +        if (!state.sealed || activeCalls != 0) return report()
 +        if (state.operations.isEmpty() && state.rootRemoved && state.hostCalls.all { it.stopped }) {
 +            // Allocating a path is local bookkeeping; no remote directory is created before shell dispatch.
@@ -13938,11 +13941,34 @@ index 0000000..e70a52f
 +            if (result.stderr.isNotBlank()) throw HdcException("Recovery query returned diagnostics.")
 +            return result.stdout.trim()
 +        }
-+        state.hostCalls.filterNot { it.stopped }.forEach { call ->
-+            val owned = ownedProcesses(call)
-+            if (owned.isNotEmpty() && owned.all(::processStopped)) call.stopped = true
++        fun refreshHostCalls() {
++            var changed = false
++            state.hostCalls.filterNot { it.stopped }.forEach { call ->
++                val owned = ownedProcesses(call)
++                if (owned.isNotEmpty() && owned.all(::processStopped)) {
++                    call.stopped = true
++                    changed = true
++                }
++            }
++            if (changed) persist()
 +        }
-+        persist()
++        refreshHostCalls()
++        // A finite HDC client may finish just before its console child exits. Recheck only
++        // identities already in the durable journal, within the existing cleanup budget.
++        // Missing identities and processes that remain alive still require explicit recovery.
++        val hostDeadline = minOf(deadline, System.nanoTime() + hostProcessGrace.toNanos())
++        while (state.hostCalls.any { !it.stopped } &&
++            state.hostCalls.none { !it.stopped && it.processes.isEmpty() } && System.nanoTime() < hostDeadline) {
++            val waitNanos = minOf(hostDeadline - System.nanoTime(), 50_000_000L)
++            if (waitNanos <= 0) break
++            try {
++                java.util.concurrent.TimeUnit.NANOSECONDS.sleep(waitNanos)
++            } catch (error: InterruptedException) {
++                Thread.currentThread().interrupt()
++                return report(listOf(RecoveryIssue("RECOVERY_INTERRUPTED", "Native process confirmation was interrupted.")))
++            }
++            refreshHostCalls()
++        }
 +        if (state.hostCalls.any { !it.stopped }) return report()
 +        try {
 +            for (operation in state.operations.filterNot { it.completed }) {
@@ -19396,10 +19422,10 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..514ba03
+index 0000000..63148a7
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,482 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -19713,6 +19739,35 @@ index 0000000..514ba03
 +            assertThat(journal.recover(hdc).issues.map { it.code }).contains("HOST_PROCESS_UNCONFIRMED")
 +            assertThat(current.isAlive).isTrue()
 +        }
++    }
++
++    @Test fun `a recorded child exiting during the bounded close grace is confirmed`() {
++        create().close()
++        val child = ProcessBuilder(HdcProcessTestChild.command("sleep", directory.resolve("grace-child.pid").toString())).start()
++        try {
++            val identity = HarmonyOSRecoveryJournal.HostProcess(
++                child.pid(), child.info().startInstant().orElseThrow().toString())
++            val tree = mapper.readTree(file().toFile())
++            val call = HarmonyOSRecoveryJournal.HostCall(UUID.randomUUID().toString(), mutableListOf(identity), returned = true)
++            (tree["hostCalls"] as com.fasterxml.jackson.databind.node.ArrayNode).add(mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(call))
++            mapper.writeValue(file().toFile(), tree)
++            HarmonyOSRecoveryJournal.open(file()).use { journal ->
++                val hdc = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device query is needed") })
++                assertThat(journal.recover(hdc, Duration.ofSeconds(2), hostProcessGrace = Duration.ofMillis(100)).issues.map { it.code })
++                    .contains("HOST_PROCESS_UNCONFIRMED")
++                assertThat(child.isAlive).isTrue()
++                val stopper = Thread {
++                    Thread.sleep(200)
++                    child.destroyForcibly().waitFor()
++                }
++                stopper.start()
++                try {
++                    assertThat(journal.recover(hdc, Duration.ofSeconds(3), hostProcessGrace = Duration.ofSeconds(2)).state)
++                        .isEqualTo("complete")
++                } finally { stopper.join(3000) }
++            }
++            assertThat(mapper.readTree(file().toFile())["hostCalls"][0]["stopped"].asBoolean()).isTrue()
++        } finally { if (child.isAlive) child.destroyForcibly().waitFor() }
 +    }
 +
 +    @Test fun `ownership corruption is rejected before any recovery action`() {
