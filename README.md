@@ -4,6 +4,15 @@
 
 工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
 
+## 交付进度
+
+- **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
+- **当前进度：** 约 70%（更新于 2026 年 11 月 3 日，按交付准备度估算）。
+
+Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过。
+
+接下来需要完成官方样例的按钮问题与完整场景验证、正式固定版本 20 轮、录屏历史故障排查、真实 CI 平台联测，以及最终干净检出复现。测试结果与范围见[手机验证记录](docs/progress/2026-11-03-phone.md)。
+
 ## 背景与用途
 
 Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。维护页面回归用例时，团队还需要组织测试代码、等待条件、失败处理和公共流程。已有其他移动平台用例的团队，也需要处理测试体系之间的迁移与复用。
@@ -22,8 +31,8 @@ node examples/hmos-code-lab/prepare.mjs
 
 | 示例 | 用途与状态 |
 | --- | --- |
-| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在 API 26 平板上单次通过，按钮 Flow 未通过短暂 Toast 的可见性断言，见[验证记录](docs/progress/2026-11-03-hmos.md)。 |
-| [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；运行前需自行准备应用。 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次，按钮 Flow 在两台设备上均未通过短暂 Toast 的可见性断言，见[手机记录](docs/progress/2026-11-03-phone.md)与[平板记录](docs/progress/2026-11-03-hmos.md)。 |
+| [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；手机前台单 Flow 连续 20/20 轮通过。运行前需自行准备应用。 |
 
 ### 页面预览
 
@@ -102,13 +111,13 @@ node examples/agent-client/run.mjs `
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和 Windows CI 入口；实际 CI 服务平台尚未接入。首次与重试后的最终结果分别记录。 |
 | VSCode 辅助编写 | 提供代码片段、截图与控件树选择、动作执行、YAML 生成和回放；记录插件发出的动作，不监听手机手工触摸。 |
-| 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；历史尾部解码问题和启动未确认资源的恢复仍待解决。清理恢复按证据判定，不能删除占用标记绕过。 |
+| 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；历史尾部解码问题待定位。已确认锁屏拒绝、且未产生采集与媒体的旧资源可受控恢复；其他未知状态仍须逐案核查，不能删除占用标记绕过。 |
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前不提供 HAP 安装、权限修改、清除应用数据、Studio/MCP、多设备分片或云端运行。
 
-源码 `1c13d22` 已完成主机回归、复用已声明依赖缓存的独立 CLI/VSIX 构建，以及便携包的 `version`、`describe`、`check-only` 检查。这些检查未操作设备，不是全冷构建或真机通过证明。此前已有手机和平板上的页面操作、录制回放及会话恢复记录，但来自不同构建；固定版本 20 轮稳定性验证尚未完成，不能合并历史记录计算通过率。
+源码 `1c13d22` 已完成主机回归、复用已声明依赖缓存的独立 CLI/VSIX 构建，以及便携包的 `version`、`describe`、`check-only` 检查。后续使用新构建的 CLI，在手机上完成 ComponentCollection 前台单 Flow 的 20/20 轮开发验证和一次完整解码的录屏；HMOS 官方样例的完整场景及正式 20 轮验收尚未完成。不同构建、应用和场景的结果分别保留，不合并计算通过率。
 
-详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[手机批量与录屏记录](docs/progress/2026-11-01.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
+详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[最新手机记录](docs/progress/2026-11-03-phone.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
 
 ## 文档与贡献
 
