@@ -116,6 +116,7 @@ export async function freezePlan(planPath, outputDirectory, projectRoot, environ
   const applicationFiles = await fingerprintFiles(plan.applicationFingerprint, base, plan.purpose === 'formal');
   const toolFiles = [];
   for (const name of ['scripts/run-harmonyos.ps1', 'scripts/test-device-matrix.ps1', 'scripts/test-validation-plan.ps1',
+    'scripts/test-stop-control.ps1', 'scripts/stop-test-run.ps1',
     'scripts/validation/main.mjs', 'scripts/validation/plan.mjs', 'scripts/validation/io.mjs', 'scripts/validation/retry-evidence.mjs',
     'scripts/validation/runtime.mjs', 'scripts/validation/preparation.mjs', 'scripts/validation/static-flows.mjs',
     'scripts/validation/static-plan.mjs', 'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',

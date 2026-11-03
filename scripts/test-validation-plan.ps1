@@ -15,7 +15,10 @@ $summaryPath = $null
 $outputDirectory = $null
 $interrupted = $true
 $exitCode = 1
+$stopControl = $null
+$stopRequest = $null
 . (Join-Path $PSScriptRoot 'ci/device-reservation.ps1')
+. (Join-Path $PSScriptRoot 'test-stop-control.ps1')
 
 function ConvertTo-ValidationArgument {
     param([string]$Value)
@@ -68,9 +71,17 @@ try {
     $frozen = Invoke-ValidationHelper @{ operation = 'freeze'; planPath = $planFile; outputDirectory = $outputDirectory; projectRoot = $projectRoot;
         powershellPath = (Get-Process -Id $PID).Path }
     $summaryPath = $frozen.summaryPath
+    $frozenState = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $stopControl = New-TestStopControl -Directory $outputDirectory -Kind validation -InvocationId ([guid]::NewGuid().ToString()) -PlanId $frozenState.planId -PlanSha256 $frozenState.planSha256
     Write-Output ('Validation plan: ' + $summaryPath)
+    Write-Output ('Stop control: ' + $stopControl.path)
     $stoppedDevices = @{}
     foreach ($batch in @($frozen.batches)) {
+        if (-not $stopRequest) { $stopRequest = Read-TestStopRequest $stopControl }
+        if ($stopRequest) {
+            $null = Invoke-ValidationHelper @{ operation = 'skip'; summaryPath = $summaryPath; batchId = $batch.batchId; started = $false; reason = ('Operator stop: ' + $stopRequest.value.reason) }
+            continue
+        }
         if ($stoppedDevices.ContainsKey($batch.deviceId)) {
             $null = Invoke-ValidationHelper @{ operation = 'skip'; summaryPath = $summaryPath; batchId = $batch.batchId; started = $false; reason = $stoppedDevices[$batch.deviceId] }
             continue
@@ -110,6 +121,8 @@ try {
                 DeviceIds = @($batch.deviceId); Env = $variables; Artifacts = $batchDirectory; Repeat = [int]$prepared.repeat;
                 ReportPointerPath = $pointerPath; ControlRecordDirectory = $controlDirectory; MatrixInvocationId = $batch.batchId;
                 RunTimeoutSeconds = [int]$prepared.runTimeoutSeconds }
+            $parameters.StopControlPath = $stopControl.path
+            $parameters.StopControlSha256 = $stopControl.sha256
             if ($null -ne $prepared.profile.moduleName) { $parameters.Module = $prepared.profile.moduleName }
             $batchState.state = 'running'; $batchState.updatedAt = [DateTime]::UtcNow.ToString('o')
             Write-DeviceReservationState $reservation $batchState
@@ -120,9 +133,15 @@ try {
             if ($null -eq $matrixCode) { throw 'Matrix invocation did not report an exit code.' }
             $result = Invoke-ValidationHelper @{ operation = 'import'; summaryPath = $summaryPath; batchId = $batch.batchId;
                 matrixExitCode = [int]$matrixCode; recoveryRoot = $trustedRecoveryRoot }
+            if ($result.stopRequest) {
+                $stopRequest = $result.stopRequest
+                $confirmedRequest = Read-TestStopRequest $stopControl
+                if (-not $confirmedRequest) { throw 'The accepted stop request disappeared; later batches remain stopped.' }
+                $stopRequest = $confirmedRequest
+            }
             $batchState.wrapperExitCode = [int]$matrixCode
             $batchState.agentRoot = $result.agentRoot
-            $batchState.execution = if ($result.status -eq 'completed' -and $result.releaseConfirmed -eq $true -and $result.stopDevice -eq $false) {
+            $batchState.execution = if ($result.status -eq 'completed' -and $result.releaseConfirmed -eq $true -and ($result.stopDevice -eq $false -or $null -ne $result.stopRequest)) {
                 if ($matrixCode -eq 0) { 'passed' } else { 'failed' }
             } else { 'unknown' }
             $batchState.state = if ($result.releaseConfirmed) { 'released' } else { 'needs_inspection' }
@@ -148,7 +167,11 @@ try {
 finally {
     if ($summaryPath) {
         try {
-            $final = Invoke-ValidationHelper @{ operation = 'finish'; summaryPath = $summaryPath; interrupted = $interrupted }
+            if ($stopControl) {
+                try { if (-not $stopRequest) { $stopRequest = Read-TestStopRequest $stopControl } }
+                catch { $interrupted = $true; $stopRequest = $null; Write-Error -Message $_.Exception.Message -ErrorAction Continue }
+            }
+            $final = Invoke-ValidationHelper @{ operation = 'finish'; summaryPath = $summaryPath; interrupted = $interrupted; stopControl = $stopControl; stopRequest = $stopRequest }
             if ($final.originalExecutionSucceeded -and $final.qualified) { $exitCode = 0 }
             Write-Output ('Validation summary: ' + $summaryPath + '; qualified=' + $final.qualified + '. Manual and video evidence review remain explicit.')
         } catch { Write-Error -Message $_.Exception.Message -ErrorAction Continue }

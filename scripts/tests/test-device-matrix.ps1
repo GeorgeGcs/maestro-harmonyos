@@ -4,6 +4,7 @@ param([string]$TestArtifactsRoot)
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $source = Join-Path $projectRoot 'scripts/test-device-matrix.ps1'
+. (Join-Path $projectRoot 'scripts/test-stop-control.ps1')
 # Keep UUID attempt bundles below Windows PowerShell 5.1's file API path limit.
 # Script and Flow inputs still exercise Unicode and spaces in the separate fixture tree.
 $testParent = if ($TestArtifactsRoot) { [IO.Path]::GetFullPath($TestArtifactsRoot) } else { Join-Path ([IO.Path]::GetTempPath()) 'mh-matrix' }
@@ -46,6 +47,7 @@ try {
     foreach ($directory in @($fixtureScripts, $libraryDirectory)) { $null = [IO.Directory]::CreateDirectory($directory) }
     $matrixScript = Join-Path $fixtureScripts 'test-device-matrix.ps1'
     Copy-Item -LiteralPath $source -Destination $matrixScript
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'scripts/test-stop-control.ps1') -Destination (Join-Path $fixtureScripts 'test-stop-control.ps1')
     $flowFile = Join-Path $fixture 'input flow.yaml'
     $stateFile = Join-Path $fixture 'state.json'
     $outputDirectory = Join-Path $testRoot 'output space'
@@ -123,6 +125,13 @@ if ($ControlRecordPath) {
 }
 [IO.File]::WriteAllText($env:MATRIX_FIXTURE_STATE, ($state | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
 if ($state.scenario -eq 'cancel') { throw [OperationCanceledException]::new('fixture cancelled') }
+if ($state.scenario -in @('operator-stop', 'invalid-stop')) {
+    $request = Request-TestStop -ControlPath $stopControl.path -Reason 'Host fixture stop during the current round.'
+    if ($state.scenario -eq 'invalid-stop') {
+        $request.value.invocationId = [guid]::NewGuid().ToString()
+        [IO.File]::WriteAllText($request.path, ($request.value | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    }
+}
 $resultDirectory = Join-Path $AgentRoot ('runs/' + $RunId + '/' + $AttemptId)
 $captureDirectory = Join-Path $resultDirectory 'takeScreenshot'
 $null = [IO.Directory]::CreateDirectory($captureDirectory)
@@ -167,6 +176,29 @@ exit $exitCode
     Assert-Test (@($result.Report.build.implementationJars | Where-Object { $_.file -like 'third-party*' }).Count -eq 0) 'Third-party files were unnecessarily included in implementation identity.'
     Assert-Test (Test-Path -LiteralPath (Join-Path $result.Directory 'matrix.md')) 'The Markdown summary is missing.'
     Assert-Test (@(Get-ChildItem -LiteralPath $result.Directory -File -Filter '*.tmp').Count -eq 0) 'A completed report retained temporary output.'
+    $passed++
+
+    $stopRoot = Join-Path $testRoot 'stop-before-first'
+    $null = [IO.Directory]::CreateDirectory($stopRoot)
+    $beforeControl = New-TestStopControl -Directory $stopRoot -Kind matrix -InvocationId ([guid]::NewGuid().ToString())
+    $firstRequest = Request-TestStop -ControlPath $beforeControl.path -Reason 'Do not dispatch.'
+    $again = Request-TestStop -ControlPath $beforeControl.path -Reason 'Repeated request must retain the original.'
+    Assert-Test ($firstRequest.sha256 -ceq $again.sha256) 'Repeated stop changed the original request.'
+    $result = Invoke-Fixture 'pass' -Rounds 2 -Extra @{ StopControlPath = $beforeControl.path; MatrixInvocationId = $beforeControl.value.invocationId }
+    Assert-Test ($result.ExitCode -eq 1 -and $result.Report.status -eq 'stopped' -and $result.State.calls.Count -eq 0) 'Pre-dispatch stop executed a round.'
+    Assert-Test ($result.Report.summary.planned -eq 4 -and $result.Report.summary.notRun -eq 4 -and $result.State.discoveries -eq 0) 'Pre-dispatch stop changed the denominator or queried devices.'
+    $passed++
+
+    $result = Invoke-Fixture 'operator-stop' -Rounds 3
+    Assert-Test ($result.ExitCode -eq 1 -and $result.Report.status -eq 'stopped' -and $result.State.calls.Count -eq 1) 'Stop during a round dispatched another invocation.'
+    Assert-Test ($result.Report.summary.planned -eq 6 -and $result.Report.summary.passed -eq 1 -and $result.Report.summary.notRun -eq 5) 'Stop discarded the current outcome or reduced the denominator.'
+    Assert-Test ($result.Report.runs[0].cliExitCode -eq 0 -and $result.Report.runs[0].cleanup.state -eq 'complete') 'Current round was killed or relabelled after the stop request.'
+    Assert-Test ($result.Report.stopRequest.value.reason -eq 'Host fixture stop during the current round.') 'Stop reason was not retained.'
+    $passed++
+
+    $result = Invoke-Fixture 'invalid-stop' -Rounds 2
+    Assert-Test ($result.ExitCode -eq 1 -and $result.Report.status -eq 'interrupted' -and $result.State.calls.Count -eq 1) 'Mismatched stop request was accepted or dispatch continued.'
+    Assert-Test ($result.Report.summary.passed -eq 1 -and $result.Report.summary.notRun -eq 3 -and $result.Report.error -match 'Stop request') 'Rejected request changed an original result.'
     $passed++
 
     $result = Invoke-Fixture 'multiple-commands' -Targets @('fixture-a')

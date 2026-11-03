@@ -48,7 +48,7 @@ try {
     foreach ($directory in @('scripts/validation', 'scripts/ci', 'scripts/recovery', 'scripts/tests', 'examples/agent-client')) {
         $null = [IO.Directory]::CreateDirectory((Join-Path $fixture $directory))
     }
-    foreach ($relative in @('scripts/test-validation-plan.ps1', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-state.mjs',
+    foreach ($relative in @('scripts/test-validation-plan.ps1', 'scripts/test-stop-control.ps1', 'scripts/stop-test-run.ps1', 'scripts/ci/device-reservation.ps1', 'scripts/ci/verify-state.mjs',
         'scripts/ci/snapshot-build.mjs', 'scripts/ci/InspectFlows.java',
         'scripts/recovery/verify-maintenance.mjs', 'scripts/recovery/windows-boot.mjs',
         'scripts/recovery/verify-cleanup-fence.mjs', 'scripts/recovery/cleanup-fence-scripts.mjs',
@@ -62,16 +62,28 @@ try {
     $null = & node (Join-Path $fixture 'scripts/tests/validation-fixture.mjs') $runtimeRequest
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the synthetic runtime and static parser.' }
     $matrix = @'
-param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts, $Repeat, $ReportPointerPath, $ControlRecordDirectory, $MatrixInvocationId, $RunTimeoutSeconds)
+param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts, $Repeat, $ReportPointerPath, $ControlRecordDirectory, $MatrixInvocationId, $RunTimeoutSeconds, $StopControlPath, $StopControlSha256)
 $ErrorActionPreference = 'Stop'
 [IO.File]::AppendAllText((Join-Path $env:VALIDATION_FIXTURE_ROOT 'calls.txt'), "called`n")
 if ($env:VALIDATION_FIXTURE_MODE -eq 'hard-stop') { [Environment]::Exit(87) }
-$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } 'unconfirmed' { @('unknown-cleanup', 'not-run') } default { @('pass', 'pass') } }
+$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'operator-stop' { @('pass', 'not-run') } 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } 'unconfirmed' { @('unknown-cleanup', 'not-run') } default { @('pass', 'pass') } }
 $request = Join-Path $Artifacts 'fixture-request.json'
 $value = @{ artifacts=$Artifacts; flowPath=$FlowPath; repeat=[int]$Repeat; deviceId=$DeviceIds[0]; pointerPath=$ReportPointerPath;
     controlDirectory=$ControlRecordDirectory; invocationId=$MatrixInvocationId; recoveryRoot=$env:VALIDATION_FIXTURE_RECOVERY; modes=@($modes) }
 [IO.File]::WriteAllText($request, ($value | ConvertTo-Json -Depth 10), [Text.UTF8Encoding]::new($false))
 & node (Join-Path $PSScriptRoot 'tests/validation-fixture.mjs') $request
+if ($env:VALIDATION_FIXTURE_MODE -eq 'operator-stop') {
+    . (Join-Path $PSScriptRoot 'test-stop-control.ps1')
+    $control = Get-TestStopControl $StopControlPath
+    $stop = Request-TestStop -ControlPath $StopControlPath -Reason 'Stop fixture after first round.'
+    $pointer = Get-Content -LiteralPath $ReportPointerPath -Raw | ConvertFrom-Json
+    $report = Get-Content -LiteralPath $pointer.reportPath -Raw | ConvertFrom-Json
+    $report.status = 'stopped'
+    $report | Add-Member -NotePropertyName stopControl -NotePropertyValue @{path=$control.path;sha256=$control.sha256}
+    $report | Add-Member -NotePropertyName stopRequest -NotePropertyValue $stop
+    [IO.File]::WriteAllText($pointer.reportPath, ($report | ConvertTo-Json -Depth 30), [Text.UTF8Encoding]::new($false))
+    exit 1
+}
 exit $LASTEXITCODE
 '@
     [IO.File]::WriteAllText((Join-Path $fixture 'scripts/test-device-matrix.ps1'), $matrix, $utf8)
@@ -81,6 +93,12 @@ exit $LASTEXITCODE
     Assert-Test ($result.code -eq 1 -and -not $result.summary.qualified -and $result.reservation.state -eq 'released') 'Unreviewed successful execution must remain unqualified with a released device.'
     Assert-Test ($result.reservation.execution -eq 'passed') 'Confirmed clean success must retain passed execution.'
     $passed++; Write-Output 'PASS all units, persistent release, and explicit review'
+
+    $result = Invoke-Case 'operator-stop' 'operator-stop'
+    Assert-Test ($result.calls -eq 1 -and $result.code -eq 1 -and $result.summary.status -eq 'stopped') ('Operator stop must prevent later units: ' + $result.output)
+    Assert-Test ($result.summary.slots.Count -eq 4 -and $result.summary.groups[0].firstPassCount -eq 1 -and $result.summary.groups[0].notRun -eq 1 -and $result.summary.groups[1].notRun -eq 2) 'Stop did not retain original results and planned denominator.'
+    Assert-Test ($result.reservation.state -eq 'released' -and $result.reservation.execution -eq 'failed') 'Cleanly stopped execution must release the device without reporting success.'
+    $passed++; Write-Output 'PASS operator stop retains results, stops later units, and releases clean ownership'
 
     $result = Invoke-Case 'cancel' 'cancel'
     Assert-Test ($result.calls -eq 1 -and $result.summary.slots.Count -eq 4) ('Cancelled batch should stop the next unit: ' + $result.output)

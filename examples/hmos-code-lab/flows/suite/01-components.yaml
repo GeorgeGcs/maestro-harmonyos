@@ -4,12 +4,15 @@ name: hmos-code-lab-component-suite
 ---
 - launchApp:
     stopApp: false
-- assertVisible: '^组件$'
+- runFlow: common/prepare-components.yaml
 - runFlow:
     file: common/input.yaml
     env:
       INPUT_TEXT: 鸿蒙测试
 - runFlow: common/button.yaml
 - runFlow: common/dialog.yaml
+- assertVisible:
+    text: '^组件$'
+    selected: true
 - assertVisible: '^单行文本输入$'
 - takeScreenshot: hmos-suite-complete

@@ -1,13 +1,21 @@
 appId: com.huawei.hmos.sample
 ---
-- assertVisible: '^组件$'
-- repeat:
-    times: 12
-    while:
-      notVisible: ${TARGET}
-    commands:
-      - swipe:
-          start: '50%,82%'
-          end: '50%,32%'
-          duration: 650
-- assertVisible: ${TARGET}
+- assertVisible:
+    text: '^组件$'
+    selected: true
+- scrollUntilVisible:
+    element:
+      text: ${TARGET}
+      above:
+        text: '^组件$'
+        selected: true
+    direction: DOWN
+    timeout: 180000
+    speed: 40
+    visibilityPercentage: 100
+    centerElement: true
+- assertVisible:
+    text: ${TARGET}
+    above:
+      text: '^组件$'
+      selected: true

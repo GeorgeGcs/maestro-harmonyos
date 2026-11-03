@@ -1,0 +1,35 @@
+appId: com.huawei.hmos.sample
+---
+# Only unwind pages owned by this suite; never press Back on a root tab.
+- runFlow:
+    when:
+      visible: '^按钮1$'
+    commands:
+      - tapOn:
+          text: '^按钮1$'
+          retryTapIfNoChange: false
+- repeat:
+    times: 3
+    while:
+      visible: '^预览区域$'
+      notVisible:
+        text: '^(组件|样例|实践|我的)$'
+        selected: true
+    commands:
+      - back
+- assertVisible:
+    text: '^(组件|样例|实践|我的)$'
+    selected: true
+- runFlow:
+    when:
+      notVisible:
+        text: '^组件$'
+        selected: true
+    commands:
+      - tapOn:
+          text: '^组件$'
+          selected: false
+          retryTapIfNoChange: false
+- assertVisible:
+    text: '^组件$'
+    selected: true

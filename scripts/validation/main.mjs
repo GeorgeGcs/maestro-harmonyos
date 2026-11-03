@@ -62,7 +62,7 @@ export async function startBatch(input, { beforeSummarySave } = {}) {
 }
 
 function matrixIdentity(matrix, unit, profile, batch, plan) {
-  requireValue(matrix.schemaVersion === 1 && ['completed', 'interrupted'].includes(matrix.status) && matrix.finishedAt &&
+  requireValue(matrix.schemaVersion === 1 && ['completed', 'interrupted', 'stopped'].includes(matrix.status) && matrix.finishedAt &&
     matrix.devices?.length === 1 && matrix.devices[0].id === batch.deviceId && matrix.runs?.length === plan.repeat,
     'Matrix is incomplete or belongs to another planned device/round count.');
   requireValue(samePath(matrix.input?.flowPath, unit.entry) && matrix.input.repeat === plan.repeat &&
@@ -123,6 +123,25 @@ async function controlEntry(entry, run, controlIndexPath) {
   return record;
 }
 
+async function checkedStopRequest(controlReference, requestReference, state) {
+  const controlPath = path.join(path.dirname(state.planPath), 'stop-control.json');
+  const requestPath = path.join(path.dirname(state.planPath), 'stop-request.json');
+  requireValue(controlReference && requestReference && samePath(controlReference.path, controlPath) &&
+    samePath(requestReference.path, requestPath), 'Stop request must belong to this frozen plan directory.');
+  const control = await readJson(controlPath), request = await readJson(requestPath);
+  const target = control.value, value = request.value;
+  requireValue(control.sha256 === controlReference.sha256 && request.sha256 === requestReference.sha256 &&
+    canonical(value) === canonical(requestReference.value) && target.protocol === 'maestro.harmonyos.stop-control' &&
+    target.schemaVersion === 1 && target.kind === 'validation' && uuid.test(target.invocationId) &&
+    target.planId === state.planId && target.planSha256 === state.planSha256 &&
+    value.protocol === 'maestro.harmonyos.stop-request' && value.schemaVersion === 1 && value.kind === target.kind &&
+    value.invocationId === target.invocationId && value.controlSha256 === control.sha256 &&
+    value.boundary === 'after-current-round' && typeof value.reason === 'string' && value.reason.trim() && value.reason.length <= 1000 &&
+    Number.isFinite(Date.parse(target.createdAt)) && Number.isFinite(Date.parse(value.requestedAt)) &&
+    Date.parse(value.requestedAt) >= Date.parse(target.createdAt), 'Stop request identity or evidence differs.');
+  return { path: request.path, sha256: request.sha256, value };
+}
+
 export async function importBatch(input, recheck = null) {
   const { state, plan } = recheck ?? await load(input.summaryPath);
   const batch = state.batches.find(value => value.batchId === input.batchId);
@@ -152,6 +171,11 @@ export async function importBatch(input, recheck = null) {
       controls.invocationId === batch.batchId && samePath(controls.matrixRoot, value.matrixDirectory) && controls.entries?.length === plan.repeat,
       'Control index belongs to another batch.');
     matrixIdentity(matrix, unit, profile, batch, plan);
+    if (matrix.stopRequest) {
+      requireValue(matrix.status === 'stopped' && input.matrixExitCode !== 0, 'Operator stop cannot report successful execution.');
+      batch.stopRequest = await checkedStopRequest(matrix.stopControl, matrix.stopRequest, state);
+      batch.stopDevice = true;
+    } else requireValue(matrix.status !== 'stopped', 'Stopped matrix has no bound operator request.');
     batch.matrixPath = document.path; batch.matrixSha256 = document.sha256; batch.pointerSha256 = pointer.sha256;
     batch.controlIndexSha256 = indexDocument.sha256; batch.agentRoot = path.join(value.matrixDirectory, 'agent');
     batch.observedHost = matrix.host; batch.observedDevice = matrix.devices[0].info; batch.observedBuild = matrix.build;
@@ -264,10 +288,11 @@ export async function finishPlan(input) {
     slot.manualIntervention = 'unknown'; slot.reviewNotes = null;
     if (hasRuntimeContract(plan)) slot.preparationVerification = unknownPreparationReview(preparationFor(plan, slot));
   }
-  state.status = input.interrupted ? 'interrupted' : 'completed'; state.endedAt = new Date().toISOString();
+  if (input.stopRequest) state.stopRequest = await checkedStopRequest(input.stopControl, input.stopRequest, state);
+  state.status = input.interrupted ? 'interrupted' : state.stopRequest ? 'stopped' : 'completed'; state.endedAt = new Date().toISOString();
   await saveSummary(input.summaryPath, state, plan);
   return { qualified: state.qualified, formalQualified: hasRuntimeContract(plan) && state.formalQualified === true,
-    originalExecutionSucceeded: state.batches.every(batch => batch.matrixExitCode === 0), summaryPath: input.summaryPath };
+    originalExecutionSucceeded: !state.stopRequest && state.batches.every(batch => batch.matrixExitCode === 0), summaryPath: input.summaryPath };
 }
 
 function preparationFor(plan, slot) {

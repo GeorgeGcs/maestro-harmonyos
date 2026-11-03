@@ -6,7 +6,12 @@ appId: com.huawei.hmos.sample
       TARGET: '^按钮$'
 - tapOn:
     text: '^按钮$'
+    above:
+      text: '^组件$'
+      selected: true
     retryTapIfNoChange: false
 - runFlow: ../../04-button-style.yaml
 - back
-- assertVisible: '^组件$'
+- assertVisible:
+    text: '^组件$'
+    selected: true

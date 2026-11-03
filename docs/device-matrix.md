@@ -38,6 +38,18 @@ Windows PowerShell 5.1 受旧版 .NET 路径长度限制影响。仓库或输出
 | `ControlRecordDirectory` | 可选的新目录，用于每轮 runner 控制记录及独立 control-index.json；不能复用 |
 | `MatrixInvocationId` | 调用方预分配的 UUID，用于把 control-index 与外层持久预约对应；默认生成新 ID |
 
+## 轮间停止
+
+运行开始后记录输出中的 `Stop control` 路径，在另一个终端调用：
+
+```powershell
+pwsh -NoProfile -File .\scripts\stop-test-run.ps1 `
+  -ControlPath 'D:\tests\matrix-本次运行目录\stop-control.json' `
+  -Reason '停止本批并检查失败原因'
+```
+
+当前轮会继续运行并收尾；下一轮开始前检查停止请求，剩余设备和轮次记为 `not-run`。报告状态为 `stopped`，退出码非零，原结果及计划分母保留。该操作不强杀 Java/HDC，不执行额外的设备动作；当前轮若无法正常结束，仍受原来的超时和恢复约束。重复请求不会覆盖原请求。通过验证计划启动时，应使用验证计划输出的控制路径，具体规则见[验证计划](validation-plan.md#请求停止)。
+
 ## 结果和证据
 
 每次调用生成 `matrix.json` 和 `matrix.md`；每台设备、每一轮都有单独的目录、`runner.log` 和 Maestro 产物。各设备对应独立 `runId`，每一轮生成新 `attemptId`，统一结果存于本次矩阵的 `agent/runs/`。JSON 记录 UTC 起止时间、原 CLI 退出码、设备及系统信息、输入文件哈希、上游提交、补丁哈希，以及实际分发包中 CLI、客户端驱动、Orchestra 和模型 JAR 的 SHA-256。主机工具信息也随报告保存。传入的环境参数只记录名称，不把值复制到汇总报告；原 CLI 日志和本地输入归档仍可能含输入内容。

@@ -120,6 +120,20 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 
 每个 unit/device 只调用一次矩阵。CLI 内部的 `retry` 沿用该轮的 `attemptId`，不会额外产生矩阵轮次。原 `matrix.json` v1 和 agent v1/v2 不变，新统计放在独立报告中。
 
+## 请求停止
+
+启动时会打印 `Stop control: .../stop-control.json`。需要结束本次计划时，在另一个终端执行：
+
+```powershell
+pwsh -NoProfile -File .\scripts\stop-test-run.ps1 `
+  -ControlPath 'D:\tests\validation-本次运行目录\stop-control.json' `
+  -Reason '停止本批，保留结果并检查失败原因'
+```
+
+请求会绑定本次计划和运行标识，重复请求保留第一份记录。当前已派发的一轮继续运行并正常收尾；脚本在下一次派发前停止，后续轮次及其他单元记为 `not-run`，仍保留在计划分母中。请求返回不等于设备已经释放，需要查看最终报告和预约状态。若当前轮卡住，仍按原有 `RunTimeoutSeconds` 及恢复规则处理。
+
+完整报告标记 `stopped`，保存请求时间和原因，进程返回非零；已执行轮次的结果、退出码和证据不改写。当前轮正常退出且清理凭据通过核验时，设备预约会释放；清理未知时继续阻止接管。停止请求损坏、指向其他计划或经过目录链接时拒绝继续派发。该入口需要本次运行由包含停止功能的新脚本启动，不能控制旧脚本进程。
+
 ## 看结果
 
 | 字段 | 含义 |

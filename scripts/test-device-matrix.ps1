@@ -12,6 +12,8 @@ param(
     [ValidateRange(1, 60)][int]$ProbeTimeoutSeconds = 10,
     [string]$ReportPointerPath,
     [string]$ControlRecordDirectory,
+    [string]$StopControlPath,
+    [string]$StopControlSha256,
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$MatrixInvocationId = [guid]::NewGuid().ToString(),
     [ValidateRange(0, 86400)][int]$RunTimeoutSeconds = 0
 )
@@ -28,6 +30,8 @@ $pointerPath = $null
 $controlDirectory = $null
 $controlIndex = $null
 $controlIndexPath = $null
+$stopControl = $null
+. (Join-Path $PSScriptRoot 'test-stop-control.ps1')
 
 function Get-MatrixTimestamp { return [DateTimeOffset]::UtcNow.ToString('o') }
 
@@ -294,6 +298,12 @@ try {
     $matrixDirectory = Join-Path $artifactsRoot ('matrix-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
     $agentDirectory = Join-Path $matrixDirectory 'agent'
     $null = [IO.Directory]::CreateDirectory($matrixDirectory)
+    $stopControl = if ($StopControlPath) { Get-TestStopControl $StopControlPath } else {
+        New-TestStopControl -Directory $matrixDirectory -Kind matrix -InvocationId $MatrixInvocationId
+    }
+    if ($stopControl.value.kind -eq 'matrix' -and $stopControl.value.invocationId -cne $MatrixInvocationId) { throw 'Stop control belongs to another matrix invocation.' }
+    if ($stopControl.value.kind -eq 'validation' -and ($stopControl.sha256 -cne $StopControlSha256 -or -not $ControlRecordDirectory)) { throw 'Validation stop control requires the parent identity and durable dispatch records.' }
+    Write-Output ('Stop control: ' + $stopControl.path)
     $flowFiles = if ($flowItem.PSIsContainer) { @(Get-ChildItem -LiteralPath $flowItem.FullName -Recurse -File | Where-Object { $_.Extension -in @('.yaml', '.yml', '.js') } | Sort-Object FullName) } else { @($flowItem) }
     $hashes = @($flowFiles | ForEach-Object { [ordered]@{ path = $_.FullName; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
     $upstreamFile = Join-Path $projectRoot 'upstream.lock.json'
@@ -309,6 +319,7 @@ try {
     $implementationJars = @(Get-ChildItem -LiteralPath $cliLibraries -Filter '*.jar' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^maestro-(?:cli|client|orchestra(?:-models)?)(?:-[0-9][A-Za-z0-9._+-]*)?\.jar$' } | Sort-Object Name | ForEach-Object { [ordered]@{ file = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
     $report = [ordered]@{
         schemaVersion = 1; status = 'running'; startedAt = Get-MatrixTimestamp; finishedAt = $null; error = $null
+        stopControl = @{ path = $stopControl.path; sha256 = $stopControl.sha256 }; stopRequest = $null
         host = [ordered]@{ os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString(); javaVersion = $javaVersion; hdcVersion = (Invoke-MatrixNative $hdc @('-v')) }
         build = [ordered]@{ projectCommit = $commit; workingTree = $dirty; upstreamCommit = $upstreamCommit; patchSha256 = $patchHash; implementationJars = $implementationJars }
         input = [ordered]@{ flowPath = $flowItem.FullName; files = $hashes; bundleId = $BundleId; abilityName = $AbilityName; moduleName = $Module; environmentKeys = @($Env.Keys | Sort-Object); repeat = $Repeat; recordingBackend = $env:MAESTRO_HARMONYOS_RECORDING; manualIntervention = 'unknown' }
@@ -346,6 +357,13 @@ try {
     foreach ($device in $report.devices) {
         $deviceUnavailable = $null
         foreach ($run in @($report.runs | Where-Object { $_.deviceKey -eq $device.key })) {
+            $request = if ($report.stopRequest) { $report.stopRequest } else { Read-TestStopRequest $stopControl }
+            if ($request) {
+                $report.stopRequest = $request
+                $run.status = 'not-run'; $run.reason = 'Operator stop: ' + $request.value.reason; $run.finishedAt = Get-MatrixTimestamp
+                Write-MatrixReport
+                continue
+            }
             if (-not $deviceUnavailable) {
                 try {
                     $targets = @(Get-MatrixTargets)
@@ -358,6 +376,14 @@ try {
                 continue
             }
             if ($null -eq $device.info) { $device.info = Get-MatrixDeviceInfo $device.id }
+            # A request may arrive while discovery/metadata probes are running.
+            $request = Read-TestStopRequest $stopControl
+            if ($request) {
+                $report.stopRequest = $request
+                $run.status = 'not-run'; $run.reason = 'Operator stop: ' + $request.value.reason; $run.finishedAt = Get-MatrixTimestamp
+                Write-MatrixReport
+                continue
+            }
             $null = [IO.Directory]::CreateDirectory($run.artifactDirectory)
             $run.log = Join-Path $run.artifactDirectory 'runner.log'
             $run.status = 'running'; $run.startedAt = Get-MatrixTimestamp
@@ -398,8 +424,10 @@ try {
             }
         }
     }
-    $report.status = 'completed'
-    $matrixExit = if (@($report.runs | Where-Object { $_.status -ne 'passed' }).Count -eq 0) { 0 } else { 1 }
+    $request = if ($report.stopRequest) { $report.stopRequest } else { Read-TestStopRequest $stopControl }
+    if ($request) { $report.stopRequest = $request }
+    $report.status = if ($report.stopRequest) { 'stopped' } else { 'completed' }
+    $matrixExit = if (-not $report.stopRequest -and @($report.runs | Where-Object { $_.status -ne 'passed' }).Count -eq 0) { 0 } else { 1 }
 } catch {
     if ($null -ne $report) { $report.error = $_.Exception.Message; $report.status = 'interrupted' }
     Write-Error -Message $_.Exception.Message -ErrorAction Continue

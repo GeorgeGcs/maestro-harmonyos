@@ -6,6 +6,9 @@ appId: com.huawei.hmos.sample
       TARGET: '^单行文本输入$'
 - tapOn:
     text: '^单行文本输入$'
+    above:
+      text: '^组件$'
+      selected: true
     retryTapIfNoChange: false
 - assertVisible: '^请输入文字$'
 - tapOn:
@@ -30,4 +33,6 @@ appId: com.huawei.hmos.sample
       visible: '^请输入文字$'
     commands:
       - back
-- assertVisible: '^组件$'
+- assertVisible:
+    text: '^组件$'
+    selected: true
