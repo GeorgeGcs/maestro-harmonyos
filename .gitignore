@@ -39,3 +39,24 @@ config.local.*
 
 # Local working notes
 /.local/
+
+# Local AI coding assistant configuration
+AGENTS.md
+AGENTS.local.md
+CLAUDE.md
+CLAUDE.local.md
+GEMINI.md
+
+.agents/
+.codex/
+.claude/
+.cursor/
+.gemini/
+.windsurf/
+.cursorrules
+.windsurfrules
+
+/.mcp.json
+/.github/copilot-instructions.md
+/.github/instructions/
+/.github/prompts/
