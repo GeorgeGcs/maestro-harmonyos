@@ -76,7 +76,7 @@ node examples/agent-client/run.mjs --check-only `
 
 同日，`phone` 签名包也在一台手机上安装运行。输入和弹窗 Flow 各通过一次；按钮再次在短 Toast 断言处失败。三条单页用例均完成清理，引用证据哈希核验通过。自动进入页面的操作与单页用例分开统计；见[手机记录](../../docs/progress/2026-11-03-phone.md)。
 
-原三条 Flow 已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。新增的[按钮样式 Flow](flows/04-button-style.yaml)已在手机上单次通过，收尾为 `complete`；正式 20 轮结果尚未产生。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)。
+原三条 Flow 已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。新增的[按钮样式 Flow](flows/04-button-style.yaml)在手机上固定版本单 Flow 20/20 轮首次通过、每轮清理 `complete`；该结果不能替代完整场景套件的 20 轮。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)及[稳定性记录](../../docs/progress/2026-11-03-hmos-stability.md)。
 
 获取脚本的主机回归测试可单独执行，无需设备：
 

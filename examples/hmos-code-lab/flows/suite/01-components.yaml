@@ -1,0 +1,15 @@
+# Development candidate: run the whole scenario before freezing a repeated plan.
+appId: com.huawei.hmos.sample
+name: hmos-code-lab-component-suite
+---
+- launchApp:
+    stopApp: false
+- assertVisible: '^组件$'
+- runFlow:
+    file: common/input.yaml
+    env:
+      INPUT_TEXT: 鸿蒙测试
+- runFlow: common/button.yaml
+- runFlow: common/dialog.yaml
+- assertVisible: '^单行文本输入$'
+- takeScreenshot: hmos-suite-complete

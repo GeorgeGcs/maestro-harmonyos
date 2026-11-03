@@ -1,0 +1,13 @@
+appId: com.huawei.hmos.sample
+---
+- assertVisible: '^组件$'
+- repeat:
+    times: 12
+    while:
+      notVisible: ${TARGET}
+    commands:
+      - swipe:
+          start: '50%,82%'
+          end: '50%,32%'
+          duration: 650
+- assertVisible: ${TARGET}

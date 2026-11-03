@@ -7,11 +7,11 @@
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度：** 约 75%（更新于 2026 年 11 月 3 日，按交付准备度估算）。
+- **当前进度：** 约 70%（更新于 2026 年 11 月 3 日 21:43，北京时间，按完整场景套件的交付准备度重新估算）。
 
-Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过，按钮样式 Flow 在手机上固定版本连续 20/20 轮首次通过，人工干预与准备状态复核尚未完成。
+Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过，按钮样式 Flow 在手机上固定版本连续 20/20 轮首次通过。两组 20 轮均为**单 Flow 开发稳定性记录**，不能代替完整场景套件的重复验证。
 
-接下来需要完成官方样例 20 轮的人工复核、按钮 Toast 问题与完整场景验证、录屏历史故障排查、真实 CI 平台联测，以及最终干净检出复现。测试结果与范围见[手机验证记录](docs/progress/2026-11-03-phone.md)及[HMOS 稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
+[完整场景套件](examples/hmos-code-lab/flows/suite/README.md)已串联中文输入、按钮样式和弹窗，首次真机预跑的 UI 步骤全部通过；正常收尾清理超时，整轮尚不能算通过。剩余资源已通过恢复入口清理。接下来先解决收尾问题，再完成固定版本整套 20 轮首次通过率验证、录屏留证和交付文档整理。测试结果与范围见[手机验证记录](docs/progress/2026-11-03-phone.md)及[HMOS 稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
 ## 背景与用途
 
@@ -31,7 +31,7 @@ node examples/hmos-code-lab/prepare.mjs
 
 | 示例 | 用途与状态 |
 | --- | --- |
-| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次。原按钮 Flow 在两台设备上均未通过短暂 Toast 断言；新增按钮样式 Flow 在手机固定版本 20/20 轮首次通过，人工复核待完成，见[手机记录](docs/progress/2026-11-03-phone.md)、[平板记录](docs/progress/2026-11-03-hmos.md)与[稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次。原按钮 Flow 在两台设备上均未通过短暂 Toast 断言；新增按钮样式 Flow 在手机固定版本单 Flow 20/20 轮首次通过，完整套件待验证，见[手机记录](docs/progress/2026-11-03-phone.md)、[平板记录](docs/progress/2026-11-03-hmos.md)与[稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。 |
 | [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；手机前台单 Flow 连续 20/20 轮通过。运行前需自行准备应用。 |
 
 ### 页面预览

@@ -1,0 +1,33 @@
+appId: com.huawei.hmos.sample
+---
+- runFlow:
+    file: find-above.yaml
+    env:
+      TARGET: '^单行文本输入$'
+- tapOn:
+    text: '^单行文本输入$'
+    retryTapIfNoChange: false
+- assertVisible: '^请输入文字$'
+- tapOn:
+    text: '^请输入文字$'
+    retryTapIfNoChange: false
+- runFlow:
+    when:
+      visible:
+        text: '^请输入文字$'
+        focused: true
+    commands:
+      - inputText: ${INPUT_TEXT}
+- assertVisible:
+    text: ${INPUT_TEXT}
+    focused: true
+- takeScreenshot: hmos-suite-input
+- eraseText: 4
+- assertVisible: '^请输入文字$'
+- back
+- runFlow:
+    when:
+      visible: '^请输入文字$'
+    commands:
+      - back
+- assertVisible: '^组件$'

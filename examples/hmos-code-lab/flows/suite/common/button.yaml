@@ -1,0 +1,12 @@
+appId: com.huawei.hmos.sample
+---
+- runFlow:
+    file: find-below.yaml
+    env:
+      TARGET: '^按钮$'
+- tapOn:
+    text: '^按钮$'
+    retryTapIfNoChange: false
+- runFlow: ../../04-button-style.yaml
+- back
+- assertVisible: '^组件$'

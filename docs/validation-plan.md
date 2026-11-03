@@ -13,7 +13,7 @@
 | `per-flow` | 一个 YAML 文件 | 执行一个顶层 Flow，包括它调用的子 Flow |
 | `suite` | 一个目录 | Maestro 完成整个目录中声明的顶层 Flow |
 
-每个 unit、每台设备都有独立统计，分母固定为 `repeat`。两个 Flow 各跑三轮，产生两个分母为三的统计；包含两个 Flow 的套件跑三轮，产生一个分母为三的统计。不同设备也不合并平均。
+每个 unit、每台设备都有独立统计，分母固定为 `repeat`。两个 Flow 各跑三轮，产生两个分母为三的统计；包含两个 Flow 的套件跑三轮，产生一个分母为三的统计。不同设备也不合并平均。本项目的完整场景重复验证以 `suite` 为计数单位：整套顶层 Flow 全部完成才算该轮通过，不能把单 Flow 的轮次相加。
 
 所有槽位在第一次设备操作前写入 `plan.json` 和 `validation-summary.json`。取消、未知、未执行的槽位都保留。工具没有续跑或补跑入口；修复问题后创建新计划，旧结果仍然保留。
 
@@ -136,7 +136,7 @@ pwsh -NoProfile -File .\scripts\test-validation-plan.ps1 `
 | `formalEligible` | 正式计划具备范围确认，运行环境与准备证据完整；v3 还要求静态检查完整 |
 | `formalQualified` | 在 `formalEligible` 的基础上，`qualified` 也成立 |
 
-分母始终是计划槽位数。`minimumRate` 使用十进制字符串，最小成功次数按向上取整计算。缺 trace、trace 截断、身份或哈希不匹配时，首次成功记 `unknown`，不从最终 passed 推断首次成功。optional retry 只要实际进入第二次，也不算首次成功；可选步骤只出现 Warned 不会单独推翻原始最终结果，但不能充当必测覆盖。
+分母始终是计划槽位数。`minimumRate` 使用十进制字符串，最小成功次数按向上取整计算。缺 trace、trace 截断、身份或哈希不匹配时，首次成功记 `unknown`，不从最终 passed 推断首次成功。optional retry 只要实际进入第二次，也不算首次成功；可选步骤只出现 Warned 不会单独推翻原始最终结果，但不能充当必测覆盖。完整场景的交付记录按整套 20 轮、首次通过至少 19 轮计算；重试后通过率单列。轮前人工准备允许，轮中人工干预计为该轮不通过并记录原因，设备、系统和环境版本在 20 轮内保持一致。
 
 必测步骤还要匹配具体源码文件，不能仅凭相同内容和命令索引认定覆盖。当前 retry trace v2 保存输入登记中的原始文件身份，因此同内容的 A.yaml、B.yaml 可分别核对。旧 v1 只有在本次登记来源唯一时才能计入覆盖；同内容的多个来源无法区分时，保留未完成。格式与兼容规则见[Retry 协议](protocol/retry-and-validation.md)。
 

@@ -1,0 +1,16 @@
+appId: com.huawei.hmos.sample
+---
+- runFlow:
+    file: find-below.yaml
+    env:
+      TARGET: '^警告弹窗$'
+- tapOn:
+    text: '^警告弹窗$'
+    retryTapIfNoChange: false
+- runFlow: ../../03-alert-dialog.yaml
+- back
+- assertVisible: '^组件$'
+- runFlow:
+    file: find-above.yaml
+    env:
+      TARGET: '^单行文本输入$'
