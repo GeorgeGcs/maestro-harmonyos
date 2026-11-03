@@ -39,6 +39,17 @@ foreach ($key in @('startRequested', 'startAcknowledged', 'captureEnded', 'media
 foreach ($key in @('ownerPid', 'uri', 'archiveName', 'archiveSize', 'archiveSha256')) { $r[$key] = $null }
 $r.archives = @()
 Check-Shape $registered $resourceSchema $true 'registered before dispatch'
+$rejected = Copy-Document $registered
+$rejected.schemaVersion = 2
+$rejected.resources[0].startRequested = $true
+$rejected.resources[0].clean = $true
+$rejected.resources[0].failureFingerprint = $digest
+$rejected.resources[0].rejectedStart = @{ errorCode = 10106102; failureFingerprint = $digest
+    firstObservedAt = '2026-11-03T01:00:00Z'; secondObservedAt = '2026-11-03T01:00:02Z' }
+Check-Shape $rejected 'recording-resources-v2.schema.json' $true 'rejected start with no capture or media'
+$badRejected = Copy-Document $rejected
+$badRejected.resources[0].captureEnded = $true
+Check-Shape $badRejected 'recording-resources-v2.schema.json' $false 'rejected start cannot claim capture ended'
 foreach ($mutation in @(
     { param($d) $d.resources[0].startAcknowledged = $false },
     { param($d) $d.resources[0].ownerPid = $null },
@@ -89,7 +100,10 @@ foreach ($mutation in @(
 if ($SessionRoot) {
     foreach ($file in Get-ChildItem -LiteralPath $SessionRoot -File -Recurse -Filter '*.json') {
         if ($file.Name -eq 'recording-resources.json' -or $file.Name -like '*-recordings.json') {
-            Check-Shape (Get-Content -LiteralPath $file.FullName -Raw) $resourceSchema $true 'stored recording resource'
+            $stored = Get-Content -LiteralPath $file.FullName -Raw
+            $version = ($stored | ConvertFrom-Json).schemaVersion
+            $storedSchema = if ($version -eq 2) { 'recording-resources-v2.schema.json' } else { $resourceSchema }
+            Check-Shape $stored $storedSchema $true 'stored recording resource'
         } elseif ($file.Directory.Name -eq 'recoveries' -and $file.BaseName -match '^[0-9a-f-]{36}$') {
             Check-Shape (Get-Content -LiteralPath $file.FullName -Raw) $receiptSchema $true 'stored cleanup receipt'
         }

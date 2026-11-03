@@ -74,6 +74,8 @@ node examples/agent-client/run.mjs --check-only `
 
 2026-11-03，`phone` 签名包已在 API 26 平板安装。输入和弹窗 Flow 各通过一次；按钮 Flow 已执行，但未通过“按钮被点击”的 Toast 可见性断言。三条用例收尾均完成，设备释放回执核验通过。按钮失败原因及两次独立导航失败见[本次记录](../../docs/progress/2026-11-03-hmos.md)。这不是 20 轮稳定性结果。
 
+同日，`phone` 签名包也在一台手机上安装运行。输入和弹窗 Flow 各通过一次；按钮再次在短 Toast 断言处失败。三条单页用例均完成清理，引用证据哈希核验通过。自动进入页面的操作与单页用例分开统计；见[手机记录](../../docs/progress/2026-11-03-phone.md)。
+
 三条 Flow 均已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)。
 
 获取脚本的主机回归测试可单独执行，无需设备：

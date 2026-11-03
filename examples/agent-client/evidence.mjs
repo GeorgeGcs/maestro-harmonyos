@@ -149,7 +149,7 @@ export async function verifyRecordingResources(audit, reportPath, recoveryRoot) 
   const snapshotFile = await checkedRecordingFile(root, expectedSnapshot, 4 * 1024 * 1024, true);
   if (snapshotFile.sha256 !== reference.sha256) throw new Error('Recording snapshot hash differs.');
   const snapshot = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(snapshotFile.bytes));
-  if (!fields(snapshot, ['schemaVersion', 'deviceId', 'ownerId', 'generation', 'remoteRoot', 'resources']) || snapshot.schemaVersion !== 1 ||
+  if (!fields(snapshot, ['schemaVersion', 'deviceId', 'ownerId', 'generation', 'remoteRoot', 'resources']) || ![1, 2].includes(snapshot.schemaVersion) ||
       snapshot.deviceId !== audit.deviceId || snapshot.ownerId !== audit.sessionId || !uuid.test(snapshot.generation) ||
       snapshot.remoteRoot !== `/data/local/tmp/maestro-session-${snapshot.generation}` || !Array.isArray(snapshot.resources)) {
     throw new Error('Recording snapshot belongs to another owner or has invalid metadata.');
@@ -158,8 +158,10 @@ export async function verifyRecordingResources(audit, reportPath, recoveryRoot) 
   const remotes = new Set();
   let checkedFiles = 1;
   for (const resource of snapshot.resources) {
-    if (!fields(resource, ['id', 'fileName', 'remotePath', 'startRequested', 'startAcknowledged', 'ownerPid', 'stopRequested',
-      'captureEnded', 'uri', 'archiveName', 'archiveSize', 'archiveSha256', 'mediaRemoved', 'clean', 'failureFingerprint', 'archives']) ||
+    const required = ['id', 'fileName', 'remotePath', 'startRequested', 'startAcknowledged', 'ownerPid', 'stopRequested',
+      'captureEnded', 'uri', 'archiveName', 'archiveSize', 'archiveSha256', 'mediaRemoved', 'clean', 'failureFingerprint', 'archives'];
+    const rejectedStart = Object.hasOwn(resource, 'rejectedStart');
+    if (!(fields(resource, required) || snapshot.schemaVersion === 2 && fields(resource, [...required, 'rejectedStart'])) ||
         !uuid.test(resource.id) || ids.has(resource.id) || resource.fileName !== `maestro-recording-${resource.id.replaceAll('-', '')}.mp4` ||
         typeof resource.remotePath !== 'string' || !resource.remotePath.startsWith(`${snapshot.remoteRoot}/files/recording-`) ||
         !/^recording-[0-9a-f-]{36}\.mp4$/.test(path.posix.basename(resource.remotePath)) ||
@@ -170,13 +172,27 @@ export async function verifyRecordingResources(audit, reportPath, recoveryRoot) 
       throw new Error('Invalid recording resource identity or state.');
     }
     ids.add(resource.id); remotes.add(resource.remotePath);
+    if (rejectedStart) {
+      const rejection = resource.rejectedStart;
+      if (!fields(rejection, ['errorCode', 'failureFingerprint', 'firstObservedAt', 'secondObservedAt']) ||
+          rejection.errorCode !== 10106102 || rejection.failureFingerprint !== resource.failureFingerprint ||
+          !hash.test(rejection.failureFingerprint) || !Number.isFinite(Date.parse(rejection.firstObservedAt)) ||
+          !Number.isFinite(Date.parse(rejection.secondObservedAt)) ||
+          Date.parse(rejection.secondObservedAt) <= Date.parse(rejection.firstObservedAt) ||
+          !resource.startRequested || resource.startAcknowledged || resource.ownerPid !== null ||
+          resource.stopRequested || resource.captureEnded || resource.uri !== null ||
+          resource.archiveName !== null || resource.archiveSize !== null || resource.archiveSha256 !== null ||
+          resource.archives.length !== 0 || resource.mediaRemoved || !resource.clean) {
+        throw new Error('Rejected recording start lacks bounded absence evidence or has contradictory state.');
+      }
+    }
     const nullableText = ['uri', 'archiveName', 'archiveSha256'].every(key => resource[key] === null || typeof resource[key] === 'string');
     const uriSuffix = typeof resource.uri === 'string' ? resource.uri.slice(resource.uri.lastIndexOf('/') + 1) : null;
     if (!nullableText || resource.startAcknowledged && (!resource.startRequested || resource.ownerPid === null) ||
         resource.captureEnded && !resource.startAcknowledged || resource.stopRequested && !resource.startAcknowledged ||
         resource.uri !== null && (!/^file:\/\/media\/Photo\/[0-9]+\/[A-Za-z0-9_.-]+\/maestro-recording-[0-9a-f]{32}\.mp4$/.test(resource.uri) || uriSuffix !== resource.fileName) ||
         resource.mediaRemoved && (!resource.captureEnded || resource.archiveName === null) ||
-        resource.clean && resource.startRequested && !resource.mediaRemoved || audit.state === 'complete' && !resource.clean) {
+        resource.clean && resource.startRequested && !resource.mediaRemoved && !rejectedStart || audit.state === 'complete' && !resource.clean) {
       throw new Error('Recording cleanup is unconfirmed or contradictory.');
     }
     const names = new Set();

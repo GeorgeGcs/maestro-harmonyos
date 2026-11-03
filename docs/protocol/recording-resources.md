@@ -4,7 +4,7 @@
 
 | 文件 | 格式定义 | 写入者 |
 | --- | --- | --- |
-| `recording-resources.json` | [资源登记 v1](recording-resources-v1.schema.json) | 驱动在录屏状态变化时原子更新 |
+| `recording-resources.json` | [资源登记 v1](recording-resources-v1.schema.json)、[v2](recording-resources-v2.schema.json) | 驱动在录屏状态变化时原子更新 |
 | `recoveries/<recoveryId>-recordings.json` | 同上 | 恢复入口复制当时的资源登记，不覆盖既有快照 |
 | `recoveries/<recoveryId>.json` | [内部恢复凭据 v1/v2](recovery-receipt.schema.json) | 会话关闭或显式恢复入口，每次使用新的 ID |
 | `verification.json` | [完整解码结果 v1](recording-verification-v1.schema.json) | `scripts/verify-recording.ps1` |
@@ -29,9 +29,10 @@ Test-Json -Json (Get-Content -LiteralPath './artifacts/video-check/verification.
 | `captureEnded` | 驱动或受控恢复入口已持久登记捕获结束事实；达到时长限制也可能结束，因此不强制要求 `stopRequested=true` |
 | `uri` | 查询确认的本次系统媒体 URI，文件名必须与资源身份对应 |
 | `archives` | 按归档顺序保存的所有原件版本，包含相对文件名、字节数、SHA-256 |
+| `rejectedStart` | v2 专用于启动命令明确返回锁屏拒绝时的两次无采集、无媒体观察；记录原失败指纹与观察时间。此分支未生成原视频，`mediaRemoved=false` |
 | `archiveName`、`archiveSize`、`archiveSha256` | 最近一次归档，三项必须同时为空或同时有值，并与 `archives` 最后一项一致 |
-| `mediaRemoved` | 本次媒体已删除或确认不存在；必须已有结束证据和本地原件 |
-| `clean` | 本资源清理完成；已请求启动的资源还必须确认媒体已移除 |
+| `mediaRemoved` | 已确认采集结束后的媒体已删除或确认不存在；必须已有结束证据和本地原件 |
+| `clean` | 本资源清理完成；已请求启动的资源须确认媒体已移除，或按 v2 拒绝启动分支确认从未产生采集与媒体 |
 | `failureFingerprint` | 资源关闭错误的指纹，只用于匹配该资源已经解决的错误 |
 
 原件位于所属会话的 `recording-originals/`。名称为 `<resourceId>-<archive UUID>.mp4`，单份最多 1 GiB。媒体内容变化时保留所有版本，后续恢复仍需核验每份归档。`clean` 只描述资源，不代表视频能完整解码。

@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:maestro:harmonyos:recording-resources:2",
+  "title": "HarmonyOS recording resource journal and immutable recovery snapshot v2",
+  "$comment": "Structural validation only. Ownership, matching field identities, unique resource IDs, archive history linkage, exact paths and content hashes require the runtime verifier.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "deviceId",
+    "ownerId",
+    "generation",
+    "remoteRoot",
+    "resources"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 2
+    },
+    "deviceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ownerId": {
+      "$ref": "#/$defs/uuid"
+    },
+    "generation": {
+      "$ref": "#/$defs/uuid"
+    },
+    "remoteRoot": {
+      "type": "string",
+      "pattern": "^/data/local/tmp/maestro-session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/resource"
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "counter": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.mp4$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1073741824
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fileName",
+        "remotePath",
+        "startRequested",
+        "startAcknowledged",
+        "ownerPid",
+        "stopRequested",
+        "captureEnded",
+        "uri",
+        "archiveName",
+        "archiveSize",
+        "archiveSha256",
+        "mediaRemoved",
+        "clean",
+        "failureFingerprint",
+        "archives"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "fileName": {
+          "type": "string",
+          "pattern": "^maestro-recording-[0-9a-f]{32}\\.mp4$"
+        },
+        "remotePath": {
+          "type": "string",
+          "pattern": "^/data/local/tmp/maestro-session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/files/recording-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.mp4$"
+        },
+        "startRequested": {
+          "type": "boolean"
+        },
+        "startAcknowledged": {
+          "type": "boolean"
+        },
+        "ownerPid": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stopRequested": {
+          "type": "boolean"
+        },
+        "captureEnded": {
+          "type": "boolean"
+        },
+        "uri": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^file://media/Photo/[0-9]+/[A-Za-z0-9_.-]+/maestro-recording-[0-9a-f]{32}\\.mp4$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archiveName": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\.mp4$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archiveSize": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archiveSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mediaRemoved": {
+          "type": "boolean"
+        },
+        "clean": {
+          "type": "boolean"
+        },
+        "failureFingerprint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archives": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/archive"
+          }
+        },
+        "rejectedStart": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "errorCode",
+            "failureFingerprint",
+            "firstObservedAt",
+            "secondObservedAt"
+          ],
+          "properties": {
+            "errorCode": {
+              "const": 10106102
+            },
+            "failureFingerprint": {
+              "$ref": "#/$defs/sha256"
+            },
+            "firstObservedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "secondObservedAt": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "startAcknowledged": {
+                "const": true
+              }
+            },
+            "required": [
+              "startAcknowledged"
+            ]
+          },
+          "then": {
+            "properties": {
+              "startRequested": {
+                "const": true
+              },
+              "ownerPid": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "captureEnded": {
+                "const": true
+              }
+            },
+            "required": [
+              "captureEnded"
+            ]
+          },
+          "then": {
+            "properties": {
+              "startAcknowledged": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stopRequested": {
+                "const": true
+              }
+            },
+            "required": [
+              "stopRequested"
+            ]
+          },
+          "then": {
+            "properties": {
+              "startAcknowledged": {
+                "const": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mediaRemoved": {
+                "const": true
+              }
+            },
+            "required": [
+              "mediaRemoved"
+            ]
+          },
+          "then": {
+            "properties": {
+              "captureEnded": {
+                "const": true
+              },
+              "archiveName": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "clean": {
+                "const": true
+              },
+              "startRequested": {
+                "const": true
+              }
+            },
+            "required": [
+              "clean",
+              "startRequested"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "mediaRemoved": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "required": [
+                  "rejectedStart"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "archiveName": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "archiveName"
+            ]
+          },
+          "then": {
+            "properties": {
+              "archiveSize": {
+                "type": "null"
+              },
+              "archiveSha256": {
+                "type": "null"
+              },
+              "archives": {
+                "maxItems": 0
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "archiveSize": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1073741824
+              },
+              "archiveSha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "archives": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "rejectedStart"
+            ]
+          },
+          "then": {
+            "properties": {
+              "startRequested": {
+                "const": true
+              },
+              "startAcknowledged": {
+                "const": false
+              },
+              "ownerPid": {
+                "type": "null"
+              },
+              "stopRequested": {
+                "const": false
+              },
+              "captureEnded": {
+                "const": false
+              },
+              "uri": {
+                "type": "null"
+              },
+              "archiveName": {
+                "type": "null"
+              },
+              "archiveSize": {
+                "type": "null"
+              },
+              "archiveSha256": {
+                "type": "null"
+              },
+              "mediaRemoved": {
+                "const": false
+              },
+              "clean": {
+                "const": true
+              },
+              "archives": {
+                "maxItems": 0
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

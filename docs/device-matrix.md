@@ -31,6 +31,7 @@ Windows PowerShell 5.1 受旧版 .NET 路径长度限制影响。仓库或输出
 | `DeviceIds` | 指定执行顺序，每次只操作一个目标 |
 | `Repeat` | 每台设备的计划轮数，默认 1 |
 | `Artifacts` | 输出根目录，默认 `artifacts/device-matrix`；每次调用再创建唯一子目录 |
+| `CliDir` | 可选的 CLI 安装目录；默认使用仓库配置的构建产物。指定后会把该路径及实际 JAR 摘要写入调用记录，适合验证新构建而不覆盖旧分发包 |
 | `ProbeTimeoutSeconds` | 每条只读环境查询的超时，默认 10 秒 |
 | `RunTimeoutSeconds` | 每次调用运行入口的期限；默认 0 不主动设置期限，CI 应显式传有限值 |
 | `ReportPointerPath` | 新建机器可读指针，直接定位本次 matrix.json；已有文件会被拒绝 |

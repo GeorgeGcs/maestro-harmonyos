@@ -4968,10 +4968,10 @@ index 0000000..a3dbcb6
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
 new file mode 100644
-index 0000000..5ba4ea0
+index 0000000..db4af0c
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionLease.kt
-@@ -0,0 +1,523 @@
+@@ -0,0 +1,536 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.core.JsonParser
@@ -5198,7 +5198,8 @@ index 0000000..5ba4ea0
 +                    val readiness = journal.recover(hdc, remaining(), cleanupResources = false)
 +                    val resources = journal.recordings
 +                    if (readiness.issues.any { it.code != "OWNED_RESOURCES_REMAIN" }) return@use readiness
-+                    val recordingIssues = resources?.recover(hdc, journal, remaining()).orEmpty().toMutableList()
++                    val recordingIssues = resources?.recover(hdc, journal, remaining(),
++                        rejectedStartPermission(gate.closeFailure)).orEmpty().toMutableList()
 +                    if (resources != null && resources.isComplete() && !resources.verifyArchives(remaining())) {
 +                        recordingIssues += RecoveryIssue("RECORDING_ARCHIVE_UNCONFIRMED", "A preserved recording original is absent or changed.")
 +                    }
@@ -5256,6 +5257,18 @@ index 0000000..5ba4ea0
 +    val id = details["recordingId"] as? String ?: return false
 +    val fingerprint = details["failureFingerprint"] as? String ?: return false
 +    return resources.resolvesFailure(id, fingerprint)
++}
++
++internal fun rejectedStartPermission(failure: Map<String, Any?>?): HarmonyOSRecordingResourceJournal.RejectedStartPermission? {
++    if (failure?.get("code") != "RECORDING_RESOURCE_CLEANUP_FAILED") return null
++    val message = failure["message"] as? String ?: return null
++    if (!message.contains("error: failed to start ability.") ||
++        !message.contains("Error Code:10106102  Error Message:The device screen is locked during the application launch")) return null
++    val details = failure["details"] as? Map<*, *> ?: return null
++    val id = details["recordingId"] as? String ?: return null
++    val fingerprint = details["failureFingerprint"] as? String ?: return null
++    if (!fingerprint.matches(Regex("[0-9a-f]{64}"))) return null
++    return HarmonyOSRecordingResourceJournal.RejectedStartPermission(id, fingerprint, 10106102)
 +}
 +
 +internal data class LeaseGate(
@@ -10876,6 +10889,38 @@ index 0000000..87b041e
 +        block(Fixture(files.createTempDirectory("maintenance-recovery-test").toPath(), recording, retainedImages))
 +    }
 +}
+diff --git a/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsRejectedStartPermissionTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsRejectedStartPermissionTest.kt
+new file mode 100644
+index 0000000..e54096b
+--- /dev/null
++++ b/maestro-cli/src/test/kotlin/maestro/cli/session/HarmonyOsRejectedStartPermissionTest.kt
+@@ -0,0 +1,26 @@
++package maestro.cli.session
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++
++class HarmonyOsRejectedStartPermissionTest {
++    private val id = "11111111-1111-4111-8111-111111111111"
++    private val fingerprint = "a".repeat(64)
++    private val rejected = "Device command reported a failure\nerror: failed to start ability.\n" +
++        "Error Code:10106102  Error Message:The device screen is locked during the application launch, unlock screen failed."
++
++    @Test fun `only the bound locked ability rejection grants an absence check`() {
++        val failure = mapOf<String, Any?>("code" to "RECORDING_RESOURCE_CLEANUP_FAILED", "message" to rejected,
++            "details" to mapOf("recordingId" to id, "failureFingerprint" to fingerprint))
++        val permission = rejectedStartPermission(failure)
++        assertThat(permission).isNotNull()
++        assertThat(permission!!.recordingId).isEqualTo(id)
++        assertThat(permission.failureFingerprint).isEqualTo(fingerprint)
++        assertThat(permission.errorCode).isEqualTo(10106102)
++        assertThat(rejectedStartPermission(failure + ("code" to "HDC_ERROR"))).isNull()
++        assertThat(rejectedStartPermission(failure + ("message" to rejected.replace("10106102", "10106103")))).isNull()
++        assertThat(rejectedStartPermission(failure + ("details" to mapOf("recordingId" to id)))).isNull()
++        assertThat(rejectedStartPermission(failure + ("details" to mapOf("recordingId" to id,
++            "failureFingerprint" to "bad")))).isNull()
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
 new file mode 100644
 index 0000000..94193ae
@@ -13081,13 +13126,14 @@ index 0000000..5332d5c
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
 new file mode 100644
-index 0000000..7e0dd69
+index 0000000..c67676f
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournal.kt
-@@ -0,0 +1,461 @@
+@@ -0,0 +1,508 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.annotation.JsonInclude
 +import com.fasterxml.jackson.databind.DeserializationFeature
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 +import maestro.harmonyos.driver.HarmonyOSCommandException
@@ -13100,11 +13146,15 @@ index 0000000..7e0dd69
 +import java.nio.file.StandardCopyOption
 +import java.security.MessageDigest
 +import java.time.Duration
++import java.time.Instant
 +import java.util.UUID
 +
 +/** Long-lived recorder resources. The containing recovery journal and device lease own the lock. */
 +class HarmonyOSRecordingResourceJournal private constructor(val path: Path, private val state: State) {
 +    data class Archive(val name: String, val size: Long, val sha256: String)
++    data class RejectedStart(val errorCode: Int, val failureFingerprint: String,
++        val firstObservedAt: String, val secondObservedAt: String)
++    data class RejectedStartPermission(val recordingId: String, val failureFingerprint: String, val errorCode: Int)
 +    data class Resource(
 +        val id: String,
 +        val fileName: String,
@@ -13122,8 +13172,9 @@ index 0000000..7e0dd69
 +        var clean: Boolean = false,
 +        var failureFingerprint: String? = null,
 +        val archives: MutableList<Archive> = mutableListOf(),
++        @field:JsonInclude(JsonInclude.Include.NON_NULL) var rejectedStart: RejectedStart? = null,
 +    )
-+    data class State(val schemaVersion: Int = 1, val deviceId: String, val ownerId: String,
++    data class State(var schemaVersion: Int = 1, val deviceId: String, val ownerId: String,
 +        val generation: String, val remoteRoot: String, val resources: MutableList<Resource> = mutableListOf())
 +
 +    inner class Recording internal constructor(private val resource: Resource) {
@@ -13172,7 +13223,8 @@ index 0000000..7e0dd69
 +        state.resources.any { it.id == id && it.failureFingerprint == fingerprint }
 +
 +    /** Never toggles a recorder. Only acknowledged starts can acquire fresh capture-end evidence. */
-+    @Synchronized fun recover(hdc: HdcClient, journal: HarmonyOSRecoveryJournal, timeout: Duration): List<RecoveryIssue> {
++    @Synchronized fun recover(hdc: HdcClient, journal: HarmonyOSRecoveryJournal, timeout: Duration,
++        rejectedStart: RejectedStartPermission? = null): List<RecoveryIssue> {
 +        if (journal.recordings !== this || journal.deviceId != state.deviceId || journal.ownerId != state.ownerId) {
 +            return listOf(RecoveryIssue("RECORDING_OWNER_MISMATCH", "The recording resources do not belong to this recovery owner."))
 +        }
@@ -13193,7 +13245,35 @@ index 0000000..7e0dd69
 +            try {
 +                if (!resource.startRequested) { resource.clean = true; persist(); continue }
 +                if (!resource.startAcknowledged || resource.ownerPid == null) {
-+                    issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} has no confirmed start ownership; recovery never sends a stop toggle.")
++                    if (rejectedStart?.recordingId != resource.id || rejectedStart.errorCode != 10106102 ||
++                        resource.failureFingerprint != rejectedStart.failureFingerprint || resource.ownerPid != null ||
++                        resource.stopRequested || resource.captureEnded || resource.uri != null || resource.archives.isNotEmpty() ||
++                        resource.archiveName != null || resource.archiveSize != null || resource.archiveSha256 != null) {
++                        issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} has no confirmed start ownership; recovery never sends a stop toggle.")
++                        continue
++                    }
++                    check(journal.ownsTemporaryFile(resource.remotePath)) { "The rejected recording scratch is not registered to this journal." }
++                    fun absent(): Boolean = recorderPids(device.execute(listOf("ps", "-ef"), remaining())).isEmpty() &&
++                        capturePids(device.execute(listOf("hidumper", "-s", "3002", "-a", "-h"), remaining())).isEmpty() &&
++                        query(device, resource, remaining()) == null &&
++                        !scratchExists(recoveryClient, journal, resource, ::remaining)
++                    if (!absent()) {
++                        issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} still has a process, capture, media, or scratch file.")
++                        continue
++                    }
++                    val first = Instant.now()
++                    check(remaining() > Duration.ofSeconds(2)) { "Insufficient time to independently recheck a rejected recording start." }
++                    Thread.sleep(1000)
++                    if (!absent()) {
++                        issues += RecoveryIssue("RECORDING_CAPTURE_UNCONFIRMED", "Recording ${resource.id} changed during the independent absence check.")
++                        continue
++                    }
++                    val second = Instant.now()
++                    check(journal.snapshot().issues.none { it.code != "OWNED_RESOURCES_REMAIN" })
++                    state.schemaVersion = 2
++                    resource.rejectedStart = RejectedStart(10106102, rejectedStart.failureFingerprint, first.toString(), second.toString())
++                    resource.clean = true
++                    persist()
 +                    continue
 +                }
 +                check(journal.ownsTemporaryFile(resource.remotePath)) { "The recording scratch is not registered to this journal." }
@@ -13366,7 +13446,7 @@ index 0000000..7e0dd69
 +
 +    @Synchronized fun verifyArchives(timeout: Duration = Duration.ofSeconds(30)): Boolean {
 +        val deadline = deadline(timeout)
-+        return state.resources.all { !it.startRequested || archiveValid(it, deadline) }
++        return state.resources.all { !it.startRequested || it.rejectedStart != null || archiveValid(it, deadline) }
 +    }
 +
 +    private fun query(device: HdcHarmonyOSDevice, resource: Resource, timeout: Duration): String? {
@@ -13457,11 +13537,13 @@ index 0000000..7e0dd69
 +            require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && path.toRealPath() == path && Files.size(path) <= 4 * 1024 * 1024)
 +            val tree = mapper.readTree(path.toFile())
 +            require(tree.fieldNames().asSequence().toSet() == setOf("schemaVersion", "deviceId", "ownerId", "generation", "remoteRoot", "resources"))
-+            require(tree["schemaVersion"].isIntegralNumber && tree["schemaVersion"].intValue() == 1 && tree["resources"].isArray)
++            require(tree["schemaVersion"].isIntegralNumber && tree["schemaVersion"].intValue() in 1..2 && tree["resources"].isArray)
 +            require(listOf("deviceId", "ownerId", "generation", "remoteRoot").all { tree[it].isTextual })
 +            tree["resources"].forEach { node ->
-+                require(node.fieldNames().asSequence().toSet() == setOf("id", "fileName", "remotePath", "startRequested", "startAcknowledged",
-+                    "ownerPid", "stopRequested", "captureEnded", "uri", "archiveName", "archiveSize", "archiveSha256", "mediaRemoved", "clean", "failureFingerprint", "archives"))
++                val required = setOf("id", "fileName", "remotePath", "startRequested", "startAcknowledged",
++                    "ownerPid", "stopRequested", "captureEnded", "uri", "archiveName", "archiveSize", "archiveSha256", "mediaRemoved", "clean", "failureFingerprint", "archives")
++                val fields = node.fieldNames().asSequence().toSet()
++                require(fields == required || tree["schemaVersion"].intValue() == 2 && fields == required + "rejectedStart")
 +                require(listOf("startRequested", "startAcknowledged", "stopRequested", "captureEnded", "mediaRemoved", "clean").all { node[it].isBoolean })
 +                require(listOf("id", "fileName", "remotePath").all { node[it].isTextual })
 +                require(listOf("uri", "archiveName", "archiveSha256", "failureFingerprint").all { node[it].isNull || node[it].isTextual })
@@ -13484,8 +13566,18 @@ index 0000000..7e0dd69
 +                require(!r.captureEnded || r.startAcknowledged)
 +                require(!r.stopRequested || r.startAcknowledged)
 +                require(r.uri == null || mediaUri(r.fileName, r.uri!!))
-+                require(!r.mediaRemoved || r.captureEnded && r.archiveName != null)
-+                require(!r.clean || !r.startRequested || r.mediaRemoved)
++                if (r.rejectedStart != null) {
++                    val rejection = r.rejectedStart!!
++                    require(state.schemaVersion == 2 && r.startRequested && !r.startAcknowledged && r.ownerPid == null &&
++                        !r.stopRequested && !r.captureEnded && r.uri == null && r.archiveName == null &&
++                        r.archiveSize == null && r.archiveSha256 == null && r.archives.isEmpty() &&
++                        !r.mediaRemoved && r.clean && rejection.errorCode == 10106102 &&
++                        rejection.failureFingerprint == r.failureFingerprint &&
++                        Instant.parse(rejection.secondObservedAt).isAfter(Instant.parse(rejection.firstObservedAt)))
++                } else {
++                    require(!r.mediaRemoved || r.captureEnded && r.archiveName != null)
++                    require(!r.clean || !r.startRequested || r.mediaRemoved)
++                }
 +                require((r.archiveName == null) == (r.archiveSize == null) && (r.archiveName == null) == (r.archiveSha256 == null))
 +                require(r.archiveSha256 == null || r.archiveSha256!!.matches(Regex("[0-9a-f]{64}")))
 +                require(r.failureFingerprint == null || r.failureFingerprint!!.matches(Regex("[0-9a-f]{64}")))
@@ -18223,10 +18315,10 @@ index 0000000..6080ec5
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
 new file mode 100644
-index 0000000..4a29210
+index 0000000..25be5f4
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecordingResourceJournalTest.kt
-@@ -0,0 +1,743 @@
+@@ -0,0 +1,797 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -18370,6 +18462,60 @@ index 0000000..4a29210
 +            val noQuery = HdcClient("fake", HdcCommandRunner { _, _ -> error("No device mutation or query is needed") })
 +            assertThat(resources.recover(noQuery, journal, Duration.ofSeconds(1)).map { it.code }).contains("RECORDING_CAPTURE_UNCONFIRMED")
 +            assertThat(resources.isComplete()).isFalse()
++        }
++    }
++
++    @Test fun `explicitly rejected locked startup is released only after two absent observations`(): Unit {
++        val journal = create()
++        val resources = journal.enableRecordingResources()
++        val recording = journal.allocateRecording()
++        recording.starting()
++        val error = HdcException("Device command reported a failure\nerror: failed to start ability.\nError Code:10106102  Error Message:The device screen is locked during the application launch")
++        recording.failed(error)
++        journal.seal()
++        journal.close()
++        val remote = MediaRemote("file://media/Photo/123/VID_123/${recording.fileName}").apply {
++            present = false; recorderProcesses = emptySet()
++        }
++        HarmonyOSRecoveryJournal.open(journal.path).use { reopened ->
++            val loaded = checkNotNull(reopened.recordings)
++            val permission = HarmonyOSRecordingResourceJournal.RejectedStartPermission(recording.id,
++                HarmonyOSRecordingResourceJournal.failureFingerprint(error), 10106102)
++            assertThat(loaded.recover(HdcClient("fake", remote), reopened, Duration.ofSeconds(10), permission)).isEmpty()
++            assertThat(loaded.isComplete()).isTrue()
++            assertThat(loaded.verifyArchives()).isTrue()
++            val state = mapper.readTree(loaded.path.toFile())
++            assertThat(state["schemaVersion"].intValue()).isEqualTo(2)
++            val rejected = state["resources"][0]["rejectedStart"]
++            assertThat(rejected["errorCode"].intValue()).isEqualTo(10106102)
++            assertThat(state["resources"][0]["mediaRemoved"].booleanValue()).isFalse()
++            assertThat(remote.captureReads).isEqualTo(2)
++            assertThat(remote.queries).isEqualTo(2)
++            assertThat(remote.commands.none { it.contains("'aa' 'start'") || it.contains("mediatool") && it.contains("delete") }).isTrue()
++        }
++        HarmonyOSRecoveryJournal.open(journal.path).use { reopened ->
++            assertThat(reopened.recordings!!.isComplete()).isTrue()
++            assertThat(reopened.recordings!!.verifyArchives()).isTrue()
++        }
++    }
++
++    @Test fun `rejected startup permission cannot hide a late active capture`(): Unit {
++        create().use { journal ->
++            val resources = journal.enableRecordingResources()
++            val recording = journal.allocateRecording()
++            recording.starting()
++            val error = HdcException("rejected start")
++            recording.failed(error)
++            journal.seal()
++            val remote = MediaRemote("file://media/Photo/123/VID_123/${recording.fileName}").apply {
++                present = false; recorderProcesses = emptySet(); activeAtCaptureRead = 2
++            }
++            val permission = HarmonyOSRecordingResourceJournal.RejectedStartPermission(recording.id,
++                HarmonyOSRecordingResourceJournal.failureFingerprint(error), 10106102)
++            assertThat(resources.recover(HdcClient("fake", remote), journal, Duration.ofSeconds(10), permission).map { it.code })
++                .contains("RECORDING_CAPTURE_UNCONFIRMED")
++            assertThat(resources.isComplete()).isFalse()
++            assertThat(mapper.readTree(resources.path.toFile())["schemaVersion"].intValue()).isEqualTo(1)
 +        }
 +    }
 +
@@ -18879,8 +19025,8 @@ index 0000000..4a29210
 +        val extraUris = mutableMapOf<String, String>()
 +        var afterReply: (List<String>) -> Unit = {}
 +        var receives = 0
-+        private var captureReads = 0
-+        private var queries = 0
++        var captureReads = 0
++        var queries = 0
 +        private var stats = 0
 +        var exports = 0
 +        var video = "raw".toByteArray()

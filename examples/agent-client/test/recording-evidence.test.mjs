@@ -60,6 +60,32 @@ test('recording receipt v2 verifies its snapshot and raw archive while receipt v
   assert.deepEqual(await verifyRecordingResources({ schemaVersion: 1 }, 'unused', 'unused'), { checkedFiles: 0 });
 });
 
+test('recording snapshot v2 accepts a confirmed rejected start without inventing an archived video', async () => {
+  const f = await fixture();
+  const resource = f.snapshot.resources[0];
+  f.snapshot.schemaVersion = 2;
+  Object.assign(resource, {startAcknowledged: false, ownerPid: null, stopRequested: false, captureEnded: false,
+    uri: null, archiveName: null, archiveSize: null, archiveSha256: null, mediaRemoved: false, archives: [],
+    failureFingerprint: 'a'.repeat(64), rejectedStart: {errorCode: 10106102, failureFingerprint: 'a'.repeat(64),
+      firstObservedAt: '2026-11-03T01:00:00Z', secondObservedAt: '2026-11-03T01:00:02Z'}});
+  await f.write();
+  assert.deepEqual(await verifyRecordingResources(f.audit, f.reportPath, f.root), {checkedFiles: 1});
+  for (const change of [
+    r => { r.rejectedStart.errorCode = 0; },
+    r => { r.rejectedStart.failureFingerprint = 'b'.repeat(64); },
+    r => { r.rejectedStart.secondObservedAt = r.rejectedStart.firstObservedAt; },
+    r => { r.startAcknowledged = true; r.ownerPid = 51; },
+    r => { r.clean = false; },
+    r => { r.mediaRemoved = true; },
+  ]) {
+    const changed = structuredClone(resource);
+    change(changed);
+    f.snapshot.resources[0] = changed;
+    await f.write();
+    await assert.rejects(verifyRecordingResources(f.audit, f.reportPath, f.root));
+  }
+});
+
 test('matching snapshot hash cannot conceal another owner, unfinished resource or invalid identity', async () => {
   for (const change of [
     f => { f.snapshot.ownerId = randomUUID(); },

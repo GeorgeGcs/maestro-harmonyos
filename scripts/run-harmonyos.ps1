@@ -8,6 +8,7 @@ param(
     [hashtable]$Env = @{},
     [Alias('ArtifactsRoot')][string]$Artifacts,
     [string]$AgentRoot,
+    [string]$CliDir,
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$RunId = [guid]::NewGuid().ToString(),
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$AttemptId = [guid]::NewGuid().ToString(),
     [ValidateRange(1, 2147483647)][int]$AttemptNo = 1,
@@ -165,7 +166,13 @@ try {
         if ($null -eq $Env[$key]) { throw ('Env value is missing: ' + $key) }
     }
 
-    $distribution = Join-Path $projectRoot '.upstream/maestro/maestro-cli/build/install/maestro'
+    $distribution = if ($CliDir) {
+        $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CliDir)
+    } else {
+        Join-Path $projectRoot '.upstream/maestro/maestro-cli/build/install/maestro'
+    }
+    $distribution = [IO.Path]::GetFullPath($distribution)
+    Assert-RunnerControlPath $distribution
     $libraryDirectory = Join-Path $distribution 'lib'
     if (-not (Test-Path -LiteralPath (Join-Path $distribution 'bin/maestro.bat') -PathType Leaf) -or
         -not (Test-Path -LiteralPath $libraryDirectory -PathType Container) -or

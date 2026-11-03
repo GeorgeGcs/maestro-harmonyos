@@ -1,0 +1,21 @@
+# Start on the Button and Selection category page; end on the same page.
+# The app stays in the foreground throughout the flow.
+appId: ohos.samples.componentcollection
+name: component-repeatable-foreground-buttons
+---
+- assertVisible: Button 按钮
+- tapOn:
+    text: Button 按钮
+    retryTapIfNoChange: false
+- assertVisible:
+    id: Capsule
+- tapOn:
+    id: Capsule
+    retryTapIfNoChange: false
+- assertVisible:
+    id: Capsule onClickId
+- takeScreenshot: repeatable-foreground-button
+- tapOn:
+    id: backBtn
+    retryTapIfNoChange: false
+- assertVisible: Button 按钮

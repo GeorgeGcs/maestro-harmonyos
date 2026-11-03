@@ -1,6 +1,6 @@
 # ComponentCollection 场景
 
-这组 YAML 对照 ComponentCollection 源码编写，覆盖按钮、弹窗、文本输入，以及滚动后重新定位输入框。四条场景已完成单条预跑和一次同会话录屏批次；各场景结果和边界见下文，不能据此声明重复稳定性通过。
+这组 YAML 对照 ComponentCollection 源码编写，覆盖按钮、弹窗、文本输入，以及滚动后重新定位输入框。四条场景已完成单条预跑和一次同会话录屏批次。另有一条前台重复按钮 Flow 在手机上完成 20/20 轮开发验证；它只覆盖该单 Flow，见[手机记录](../../docs/progress/2026-11-03-phone.md)。
 
 参考应用仓库为 `HarmonyOS_Samples/component-collection`，本地参考源码提交为 `38a78a4aedfbf332ecc5da768b55d28d416474f0`；该提交与官方远端的对应关系尚未独立核实。页面位于 `entry/src/main/ets/pages/`，中文资源位于 `entry/src/main/resources/zh_CN/element/string.json`。应用由使用者自行构建、签名并安装，本目录不包含 HAP、签名文件或设备配置。
 
