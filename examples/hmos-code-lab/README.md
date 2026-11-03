@@ -1,6 +1,6 @@
 # HMOS代码工坊样例
 
-[HMOS代码工坊](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos)是华为开源的 HarmonyOS 示例应用。本目录提供固定版本获取脚本、前台常亮补丁和三条 Maestro YAML 用例，方便在相同页面上验证按钮、输入框与弹窗操作。
+[HMOS代码工坊](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos)是华为开源的 HarmonyOS 示例应用。本目录提供固定版本获取脚本、前台常亮补丁和四条 Maestro YAML 用例，方便在相同页面上验证按钮、输入框与弹窗操作。
 
 官方源码固定到 `7aa95cac4eca15e39fc6638cdf1de7db6fb70ad6`，来源、SDK 配置和补丁校验值记录在 [source.json](source.json)。源码下载到本目录的 `app/`，不随适配层仓库提交。上游代码采用 [Apache-2.0 许可证](LICENSE)，保留华为版权声明；前台常亮补丁是本仓维护的改动。
 
@@ -39,7 +39,7 @@ node examples/hmos-code-lab/prepare.mjs --check-only
 
 固定版本的配置为 `compatibleSdkVersion=6.1.0(23)`、`targetSdkVersion=6.1.1(24)`，运行设备需满足兼容版本要求。已安装目标 HarmonyOS SDK 的环境可以直接同步工程；本地验证使用 DevEco Studio `6.1.1.290` 和 HarmonyOS SDK `6.1.1.125`，没有另行下载 SDK。
 
-这三条用例使用应用内置的组件展示页，**无需执行 `hmosword-build` 的全量 Samples 下载**，也不需要配置多 HAP 部署。应用包名为 `com.huawei.hmos.sample`，模块为 `phone`，Ability 为 `EntryAbility`。
+这些用例使用应用内置的组件展示页，**无需执行 `hmosword-build` 的全量 Samples 下载**，也不需要配置多 HAP 部署。应用包名为 `com.huawei.hmos.sample`，模块为 `phone`，Ability 为 `EntryAbility`。
 
 补丁只修改 `products/phone/src/main/ets/entryability/EntryAbility.ets`：应用在前台时请求窗口常亮，进入后台或窗口销毁时释放。运行期间保持应用前台；补丁不修改系统锁屏设置。
 
@@ -57,7 +57,7 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'off'
   -DeviceId YOUR_DEVICE_ID -RunTimeoutSeconds 360
 ```
 
-将 `YOUR_DEVICE_ID` 换成自己的 HDC 设备标识。Flow 会打开弹窗、检查内容、截图并关闭弹窗。三条 Flow 的起始页不同，每次只运行一个文件；切换用例前手动进入对应页面。执行失败时按[用例说明](flows/README.md)恢复页面，再检查截图和日志。
+将 `YOUR_DEVICE_ID` 换成自己的 HDC 设备标识。Flow 会打开弹窗、检查内容、截图并关闭弹窗。各 Flow 的起始页不同，每次只运行一个文件；切换用例前手动进入对应页面。执行失败时按[用例说明](flows/README.md)恢复页面，再检查截图和日志。
 
 没有设备时，可以先检查 YAML 和调用参数；这条命令不启动设备会话：
 
@@ -76,7 +76,7 @@ node examples/agent-client/run.mjs --check-only `
 
 同日，`phone` 签名包也在一台手机上安装运行。输入和弹窗 Flow 各通过一次；按钮再次在短 Toast 断言处失败。三条单页用例均完成清理，引用证据哈希核验通过。自动进入页面的操作与单页用例分开统计；见[手机记录](../../docs/progress/2026-11-03-phone.md)。
 
-三条 Flow 均已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)。
+原三条 Flow 已通过 Maestro 原生 YAML 解析和 Agent 的 `--check-only` 检查。新增的[按钮样式 Flow](flows/04-button-style.yaml)已在手机上单次通过，收尾为 `complete`；正式 20 轮结果尚未产生。具体起始页面、选择器来源和其他设备上的验证要求见 [Flow 说明](flows/README.md)。
 
 获取脚本的主机回归测试可单独执行，无需设备：
 
