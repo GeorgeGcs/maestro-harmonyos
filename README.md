@@ -9,11 +9,13 @@
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度：** 约 70%（更新于 2026 年 11 月 4 日 03:18，北京时间，按完整场景套件的交付准备度估算）。
+- **当前进度：** 约 70%（更新于 2026 年 11 月 4 日 18:15，北京时间，按完整场景套件的交付准备度估算）。
 
 Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。ComponentCollection 前台单 Flow 在手机上连续 20/20 轮通过；HMOS 代码工坊的输入、弹窗用例已在手机和平板通过，按钮样式 Flow 在手机上固定版本连续 20/20 轮首次通过。两组 20 轮均为**单 Flow 开发稳定性记录**，不能代替完整场景套件的重复验证。
 
-[完整场景套件](examples/hmos-code-lab/flows/suite/README.md)已串联中文输入、按钮样式和弹窗，长套件正常收尾问题已修复。11 月 4 日的重复批次发现列表项被底栏遮挡、后续轮次未恢复组件页面的问题，停止后记录为 16 轮失败、4 轮未运行。导航修复后，03:17 完成当前版本的真机完整单轮：从“样例”标签页自动切回组件，三个场景及返回检查通过，CLI 退出码 0、`cleanup=complete`。新版本 20 轮尚未启动，重复验证脚本待执行；固定版本整套通过率、录屏复验及同版交付材料仍待完成。详见[本轮记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
+[完整场景套件](examples/hmos-code-lab/flows/suite/README.md)已串联中文输入、按钮样式和弹窗，长套件正常收尾问题已修复。11 月 4 日 12:28～16:08 完成导航修复版的 **20 轮完整套件：16 轮首次通过、4 轮失败，通过率 80%**，未使用重试，20 轮均 `cleanup=complete`；执行期间无人工操作、重装应用或重启设备。第 15、18、19、20 轮在点击顶部标题栏覆盖的按钮列表项后失败，未达到至少 19/20 轮首次通过的门槛。凌晨的 16 轮失败、4 轮未运行另留历史，不合并计算。
+
+针对顶部问题，当前 YAML 在向下找到目标后补充短距离滑动，将目标移出标题栏区域。修复版已通过按钮定向回归（Flow 耗时 3 分 36 秒）和完整单轮（12 分 51 秒），均正常收尾；完整单轮于 18:14 结束，CLI 与 wrapper 退出码 0、`cleanup=complete`，未使用重试。此修改针对示例页面，不构成通用遮挡检测。修复后的 20 轮尚未启动，须重新冻结当前版本；录屏复验及同版交付材料仍待完成。详见[本轮记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
 ## 背景与用途
 
@@ -33,7 +35,7 @@ node examples/hmos-code-lab/prepare.mjs
 
 | 示例 | 用途与状态 |
 | --- | --- |
-| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次。原按钮 Flow 在两台设备上均未通过短暂 Toast 断言；按钮样式单 Flow 在手机固定版本 20/20 轮首次通过。完整套件导航修复后已通过真机单轮，新版本 20 轮尚未执行，见[本轮记录](docs/progress/2026-11-04-hmos-navigation.md)、[平板记录](docs/progress/2026-11-03-hmos.md)与[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。 |
+| [HMOS 代码工坊](examples/hmos-code-lab/README.md) | 获取完整官方工程；输入和弹窗 Flow 已在手机与 API 26 平板各通过一次。原按钮 Flow 在两台设备上均未通过短暂 Toast 断言；按钮样式单 Flow 在手机固定版本 20/20 轮首次通过。完整套件导航修复版完成 20 轮，16 轮首次通过、4 轮因顶部点击位置失败；顶部修复版已通过定向回归及完整单轮，新的 20 轮尚未启动，见[本轮记录](docs/progress/2026-11-04-hmos-navigation.md)、[平板记录](docs/progress/2026-11-03-hmos.md)与[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。 |
 | [ComponentCollection](examples/component-collection/README.md) | 已有按钮、输入、弹窗、滚动用例及手机、平板的开发验证记录；手机前台单 Flow 连续 20/20 轮通过。运行前需自行准备应用。 |
 
 ### 页面预览
@@ -131,7 +133,7 @@ node examples/agent-client/run.mjs `
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前本仓不提供 HAP 安装、权限修改、清除应用数据、Studio、内置 MCP 服务、多设备分片或云端运行；面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
-源码 `1c13d22` 已完成主机回归、复用已声明依赖缓存的独立 CLI/VSIX 构建，以及便携包的 `version`、`describe`、`check-only` 检查。后续使用新构建的 CLI，在手机上完成 ComponentCollection 前台单 Flow 的 20/20 轮开发验证和一次完整解码的录屏；HMOS 完整场景已有单轮通过记录，当前导航修复版的 20 轮验证尚未执行。不同构建、应用和场景的结果分别保留，不合并计算通过率；旧版构建记录也不能替代最终版本的交付检查。
+源码 `1c13d22` 已完成主机回归、复用已声明依赖缓存的独立 CLI/VSIX 构建，以及便携包的 `version`、`describe`、`check-only` 检查。后续使用新构建的 CLI，在手机上完成 ComponentCollection 前台单 Flow 的 20/20 轮开发验证和一次完整解码的录屏；HMOS 完整场景导航修复版的 20 轮结果为 16 轮首次通过、4 轮失败，顶部修复版已通过定向回归及完整单轮，尚待重新冻结后执行 20 轮。不同构建、应用和场景的结果分别保留，不合并计算通过率；旧版构建记录也不能替代最终版本的交付检查。
 
 详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[最新手机记录](docs/progress/2026-11-03-phone.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
 

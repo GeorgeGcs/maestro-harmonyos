@@ -14,6 +14,12 @@ appId: com.huawei.hmos.sample
     speed: 40
     visibilityPercentage: 100
     centerElement: true
+# DOWN centering can leave a row behind the floating title. Move the list
+# down a short distance without another full-height directional swipe.
+- swipe:
+    start: 50%, 40%
+    end: 50%, 55%
+    duration: 1000
 - assertVisible:
     text: ${TARGET}
     above:
