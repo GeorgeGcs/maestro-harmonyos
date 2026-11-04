@@ -1,0 +1,24 @@
+# One complete scenario, recorded in three parts within the same Flow.
+appId: com.huawei.hmos.sample
+name: hmos-code-lab-recorded-component-suite
+---
+- startRecording: hmos-components-01-input
+- launchApp:
+    stopApp: false
+- runFlow: ../suite/common/prepare-components.yaml
+- runFlow:
+    file: ../suite/common/input.yaml
+    env:
+      INPUT_TEXT: 鸿蒙测试
+- stopRecording
+- startRecording: hmos-components-02-button
+- runFlow: ../suite/common/button.yaml
+- stopRecording
+- startRecording: hmos-components-03-dialog
+- runFlow: ../suite/common/dialog.yaml
+- assertVisible:
+    text: '^组件$'
+    selected: true
+- assertVisible: '^单行文本输入$'
+- takeScreenshot: hmos-suite-complete
+- stopRecording

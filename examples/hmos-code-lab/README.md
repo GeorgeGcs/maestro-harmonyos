@@ -68,6 +68,10 @@ node examples/agent-client/run.mjs --check-only `
   --artifacts ./artifacts/hmos-check
 ```
 
+## 执行完整组件场景
+
+[完整套件](flows/suite/README.md)从组件列表依次完成输入、按钮样式和警告弹窗，最后返回输入入口。需要录制整个业务流程时，使用[分段录屏入口](flows/recorded-suite/README.md)：同一 Flow 内按三个场景启停录屏，分别保存原片。该入口复用完整套件的动作与断言，需显式启用 `huawei-system`、设置每段 600 秒上限和 1800 秒总超时，并逐段完整解码核验。
+
 ## 验证记录
 
 2026-11-02，固定版本原配置和应用常亮补丁后的配置均已在上述 DevEco / SDK 环境构建出 `phone` 未签名 HAP。使用了本机已安装的工具链和依赖缓存，这不是全新电脑的完整复现。
