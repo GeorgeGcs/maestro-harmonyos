@@ -9,7 +9,7 @@
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 08:46，北京时间，按完整场景套件的交付准备度估算）。
+- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 10:06，北京时间，按完整场景套件的交付准备度估算）。
 
 Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。当前版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。
 
@@ -20,12 +20,12 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | 导航修复及完整场景单轮 | **通过** | 按钮定向回归 3 分 36 秒、完整单轮 12 分 51 秒；未使用重试，CLI 与 runner 退出码均为 0，`cleanup=complete` |
 | HDC 诊断及最终清理核验 | **单轮与 20 轮收尾通过** | 501 项 JVM 回归通过；真机 20 轮清理完成，设备最终释放；23,114 次 HDC 调用日志已核对，本批未复现此前约 5 秒的超时故障 |
 | 完整场景分段录屏 | **此前版本通过一次完整运行** | `728859cb` CLI 执行 12 分 55 秒，输入、按钮、弹窗三段原片均完整解码通过，清理完成 |
-| 交付文件与插件回放 | **本机验证通过** | `728859cb` 独立构建 CLI、VSIX 和便携包；447 个文件核验、三项便携包检查通过，最终 VSIX 的两步 YAML 保存及真实 CLI 回放通过 |
+| 交付文件与插件回放 | **新交付包主机核验通过** | `2d5bfaeb` 独立构建 CLI、VSIX 0.1.1 和便携包；450 个文件核验、三项便携包自测及 24 项插件测试通过。此前 `728859cb` 的真实 VSCode 保存回放记录保留，本次打包未重新操作设备 |
 | 完整套件 20 轮稳定性 | **通过** | 11 月 5 日固定版本完整套件 20/20 轮首次通过，100%；未使用 YAML 重试、无人工干预或环境变化，清理全部完成，证据复核通过 |
 
 旧版 20 轮的四次失败均发生在顶部标题栏覆盖的按钮入口，20 轮清理均完成，执行期间无人工操作、重装或重启。当前修复针对示例页面，不提供通用遮挡检测；原始结果分别保留，详见[导航修复记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
-长场景录屏留证、CLI / VSIX / 便携包及对应使用文档已完成此前版本的核验，文件摘要和结果见[交付验证记录](docs/progress/2026-11-04-delivery.md)。本次新 CLI 的完整套件 20 轮已通过，结果及 HDC 日志结论见[验证记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。后续重点是接入实际 CI 平台，配置可连接真机的 Windows runner，完成任务执行、取消收尾和报告归档联调；交付包仍需按当前版本更新。本批录屏关闭，不将它记为录屏重复验证。
+长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)，完整套件 20 轮结果及 HDC 日志结论见[本轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。当前源码的 CLI、VSIX 和便携包已重新构建、核验并生成校验值，见 [v0.1.1 交付说明](docs/releases/0.1.1.md)；GitCode 发行版附件待上传。后续重点是接入实际 CI 平台，配置可连接真机的 Windows runner，完成任务执行、取消收尾和报告归档联调。20 轮批次录屏关闭，不将它记为录屏重复验证。
 
 ## 背景与用途
 
@@ -58,7 +58,9 @@ node examples/hmos-code-lab/prepare.mjs
 
 ## 跑一个 Flow
 
-先按[使用指南](docs/user-guide.md)准备 JDK 17、Node.js 22.12+、HDC，并从固定上游和本仓补丁构建 CLI。普通 Maestro 安装包不能替代这个适配版本；VSCode 插件需单独构建，也不包含 Java、HDC 或 CLI。资源下载和缓存配置见[构建说明](docs/build-reproducibility.md)。
+先按[使用指南](docs/user-guide.md)准备 JDK 17、Node.js 22.12+ 和 HDC。[v0.1.1 交付说明](docs/releases/0.1.1.md)列出 CLI、VSIX、便携包及校验方法；也可从固定上游和本仓补丁构建 CLI。普通 Maestro 安装包不能替代这个适配版本，插件不包含 Java、HDC 或 CLI。资源下载和缓存配置见[构建说明](docs/build-reproducibility.md)。
+
+使用便携包时，在解压后的 `source` 目录执行下列脚本，并加上 `-CliDir ../cli`，无需重新编译 CLI。源码检出并构建的用户使用脚本默认路径即可。当前发行版附件尚待上传，文件可用状态见交付说明。
 
 以 [ComponentCollection 前台按钮用例](examples/component-collection/foreground/01-buttons.yaml)为例：应用已构建、签名并安装后，手动进入 **Button 按钮**页，保持应用前台、设备解锁，且胶囊按钮尚未点击。Flow 通过控件 ID 点击，并检查点击后的 ID：
 
@@ -143,7 +145,7 @@ node examples/agent-client/run.mjs `
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前本仓不提供 HAP 安装、权限修改、清除应用数据、Studio、内置 MCP 服务、多设备分片或云端运行；面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
-本轮交付文件来自源码 `728859cb`，在独立源码目录构建，显式复用依赖缓存及经校验的 simulator 资源，没有复制旧编译产物。便携包的 `version`、`describe`、`check-only` 检查通过；同一新 CLI 和 VSIX 随后通过上述录屏与真实 VSCode 回放。安装包保持这一源码标识，后续文档更新单独提交，详见[构建记录](docs/build-reproducibility.md)和[文件摘要](docs/progress/2026-11-04-delivery.md)。各版本、应用和场景的既有结果分别保留，不合并计算通过率。
+当前交付文件来自源码 `2d5bfaeb`，在独立目录构建，显式复用依赖缓存及经校验的 simulator 资源，没有复制旧编译产物。便携包的 `version`、`describe`、`check-only` 检查通过。新 CLI 与 20 轮所用分发包的类文件和其他资源一致，仅 JAR 封装元数据及版本文件的生成时间注释不同；本次打包未重新执行真机测试，已有结果保留原产物身份。版本与摘要见[交付说明](docs/releases/0.1.1.md)，构建过程见[构建记录](docs/build-reproducibility.md)。后续文档提交不改变这些安装包的源码标识。
 
 详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[最新手机记录](docs/progress/2026-11-03-phone.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
 

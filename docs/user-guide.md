@@ -167,7 +167,7 @@ try {
 }
 ```
 
-在 VSCode 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist/maestro-harmonyos-recorder-0.1.0.vsix`。随后打开本地工作区并信任该工作区。
+在 VSCode 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist/maestro-harmonyos-recorder-0.1.1.vsix`；使用发布包时选择带源码提交号的对应 VSIX。随后打开本地工作区并信任该工作区。
 
 ### 2. 配置工具和应用
 

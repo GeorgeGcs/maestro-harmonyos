@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "project": "Maestro HarmonyOS",
+  "release": "v0.1.1",
+  "createdAt": "2026-11-05T02:04:53.570Z",
+  "sourceCommit": "2d5bfaeb254c0682146ffbfa964d31a24efd88fd",
+  "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+  "cliVersion": "2.12.0",
+  "vsixVersion": "0.1.1",
+  "patchSha256": "29be6d90d7f119bef108cf45905d21f2efd786db009cacf06723148c4549bd7a",
+  "buildManifestSha256": "fa2a7fc999a83d9d45c437c8f57880303ea582259abc61ce44d96be24c439940",
+  "build": {
+    "independentSource": true,
+    "dependencyCachesReused": true,
+    "compiledOutputsCopied": false,
+    "coldBuild": false
+  },
+  "verification": {
+    "portableFiles": 450,
+    "portableSelfTests": [
+      {
+        "name": "version",
+        "status": "passed"
+      },
+      {
+        "name": "describe",
+        "status": "passed"
+      },
+      {
+        "name": "check-only",
+        "status": "passed"
+      }
+    ],
+    "cliDistributionFiles": 200,
+    "cliArchiveFiles": 205,
+    "vsixUnitTests": {
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0
+    },
+    "vsixArchiveFiles": 14,
+    "deviceCommandsDuringPackaging": 0,
+    "comparisonToTestedCli": {
+      "identicalFiles": 191,
+      "totalFiles": 200,
+      "byteIdentical": false,
+      "comparedJars": 9,
+      "note": "All class files and other resources match the retained tested CLI. Only JAR container metadata and the generation-time comment in version.properties differ. Device evidence retains its original artifact identity."
+    }
+  },
+  "files": [
+    {
+      "name": "maestro-agent-2d5bfaeb.zip",
+      "bytes": 375836743,
+      "sha256": "33b49b4d469fce3f9fd484417bed3517605551d3cc6a3c6eb0ad2528b41f91ed"
+    },
+    {
+      "name": "maestro-harmonyos-cli-2d5bfaeb.zip",
+      "bytes": 350766367,
+      "sha256": "9978afe382ebf65ac9be2658e71a89a8c9ed54d3d1b19e40142bd3f8f06754c5"
+    },
+    {
+      "name": "maestro-harmonyos-recorder-0.1.1-2d5bfaeb.vsix",
+      "bytes": 28360,
+      "sha256": "41e973a8d13b1bf2e8c2d85c6906d4a04ea9815bdd76e335ae248b68107d9e71"
+    }
+  ]
+}
