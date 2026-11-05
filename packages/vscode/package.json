@@ -2,7 +2,7 @@
   "name": "maestro-harmonyos-recorder",
   "displayName": "Maestro HarmonyOS Recorder",
   "description": "Inspect HarmonyOS controls, record standard Maestro YAML, and replay it on a selected device.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "HarmonyPandaWorkshop",
   "license": "Apache-2.0",
   "repository": {
@@ -97,7 +97,7 @@
     "test": "npm run compile && node --test dist/test/*.test.js",
     "test:extension": "npm run compile && node dist/test/runExtension.js",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --no-dependencies --out dist/maestro-harmonyos-recorder-0.1.0.vsix"
+    "package": "vsce package --no-dependencies --out dist/maestro-harmonyos-recorder-0.1.1.vsix"
   },
   "devDependencies": {
     "@types/node": "22.15.3",
