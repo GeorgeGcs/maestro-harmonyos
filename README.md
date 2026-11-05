@@ -191,4 +191,4 @@ node examples/agent-client/run.mjs `
 | 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板同版 CLI 完整套件 20/20 通过，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板 20 轮](docs/progress/2026-11-06-tablet-v012.md)；API 级别与产品系统版本分别登记 |
 | 完整场景套件 20 轮，首次通过率 ≥95% | 手机与平板各自在固定环境 20/20 首次通过，100%；均无重试、无人工干预、全部清理完成；平板 20 轮约 3 小时 29 分钟 | [手机 20 轮](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)、[平板补充验证](docs/progress/2026-11-06-tablet-v012.md)、[统计方法](docs/validation-plan.md)；版本、设备与结果分别统计，不混算 |
 | 开源、完整使用文档与开发指南 | 源码、固定上游补丁、示例、CLI / VSIX / 便携包已公开 | [使用指南](docs/user-guide.md)、[开发设计](docs/development-design.md)、[贡献说明](CONTRIBUTING.md)、[v0.1.2 发行版](docs/releases/0.1.2.md) |
-| 兼容建议：HarmonyOS 与 OpenHarmony，并说明差异 | HDC、UITest、aa 公共接口已对照；独立 OpenHarmony 真机尚未验证 | [平台兼容范围](docs/platform-compatibility.md)：文本命令版本、布局、权限、应用安装与 Huawei 录屏后端分别说明；不以共用底座替代设备测试 |
+| 兼容建议：HarmonyOS 与 OpenHarmony，并说明差异 | HDC、UITest、aa 公共接口已对照可用；独立 OpenHarmony 真机尚未验证，无设备 | [平台兼容范围](docs/platform-compatibility.md)：文本命令版本、布局、权限、应用安装与 Huawei 录屏后端分别说明；不以共用底座替代设备测试 |
