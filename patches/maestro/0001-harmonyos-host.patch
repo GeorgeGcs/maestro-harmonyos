@@ -3636,10 +3636,10 @@ index b79b107..7a38dd6 100644
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt
 new file mode 100644
-index 0000000..7338b21
+index 0000000..8147e69
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceEvidence.kt
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +package maestro.cli.session
 +
 +import maestro.harmonyos.hdc.CleanupFenceCall
@@ -3669,7 +3669,11 @@ index 0000000..7338b21
 +    val E = HarmonyOsMaintenanceEvidence
 +    const val PROFILE = "exclusive-operation-mkdir-v1"
 +    // Frozen journal implementation exercised with actual shell races. No heuristic bytecode matching.
-+    val supportedJournalClasses = setOf("c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac")
++    val supportedJournalClasses = setOf(
++        "c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac",
++        // 2026-11-05: original frozen CLI exercised with the layout-export wrapper and shell races.
++        "f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9",
++    )
 +    val checkpointFields = setOf("schemaVersion", "recoveryId", "deviceId", "ownerId", "createdAt", "scope",
 +        "originalGate", "originalJournal", "originalReceipt", "origin", "tools")
 +    val stepFields = setOf("schemaVersion", "checkpointSha256", "revision", "previous", "phase", "observedAt", "journal", "calls", "receipt")
@@ -3709,10 +3713,10 @@ index 0000000..7338b21
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt
 new file mode 100644
-index 0000000..99045f7
+index 0000000..8a7e5f5
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsCleanupFenceRecovery.kt
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,354 @@
 +package maestro.cli.session
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -3849,6 +3853,7 @@ index 0000000..99045f7
 +                publish(step.copy(phase = "cleaned"))
 +            }
 +            require(step.phase == "cleaned")
++            if (HarmonyOSCleanupFenceTransport.splitInventory(cp.scope)) require(query("verify-root").phase == "cleaned")
 +            require(query("verify").phase == "cleaned")
 +            verifyOriginal(directory, cp, evidence)
 +            verifyTools()
@@ -3880,7 +3885,9 @@ index 0000000..99045f7
 +        val scope = HarmonyOSRecoveryJournal.open(originalPath).use(HarmonyOSCleanupFenceTransport::inspect)
 +        require(E.read(originalPath).contentEquals(originalBytes)) { "Original journal changed while opening." }
 +        require(scope.deviceId == gate.deviceId && scope.ownerId == gate.ownerId)
-+        for (action in listOf("claim", "clean", "verify")) HarmonyOSCleanupFenceTransport.arguments(scope,
++        val actions = if (HarmonyOSCleanupFenceTransport.splitInventory(scope)) listOf("claim", "clean", "verify-root", "verify")
++            else listOf("claim", "clean", "verify")
++        for (action in actions) HarmonyOSCleanupFenceTransport.arguments(scope,
 +            HarmonyOSCleanupFenceTransport.proof("0".repeat(64)), action, "00000000-0000-0000-0000-000000000000")
 +        val recoveryId = UUID.randomUUID().toString()
 +        val root = F.root(directory, gate.deviceId, gate.ownerId, recoveryId)
@@ -4004,6 +4011,11 @@ index 0000000..99045f7
 +            }
 +            val last = step.calls.last()
 +            require(last.call.action == "verify" && last.outcome != null && evidence.json(last.outcome)["phase"].asText() == "cleaned")
++            if (HarmonyOSCleanupFenceTransport.splitInventory(cp.scope)) {
++                val rootCheck = step.calls.getOrNull(step.calls.lastIndex - 1)
++                require(rootCheck?.call?.action == "verify-root" && rootCheck.outcome != null &&
++                    evidence.json(rootCheck.outcome)["phase"].asText() == "cleaned") { "Split inventory lacks its final root verification." }
++            }
 +            return receipt
 +        }
 +
@@ -4022,10 +4034,13 @@ index 0000000..99045f7
 +                if (hdc != null) {
 +                    val evidence = HarmonyOsMaintenanceEvidence(F.root(directory, gate.deviceId, retained.ownerId, retained.recoveryId))
 +                    val cp = checkpoint(evidence, retained.checkpoint, gate.deviceId, retained.ownerId, retained.recoveryId)
-+                    val remaining = deadline - System.nanoTime()
-+                    if (remaining <= 0) throw HdcTimeoutException(Duration.ofSeconds(30))
-+                    require(HarmonyOSCleanupFenceTransport(hdc).execute(cp.scope,
-+                        HarmonyOSCleanupFenceTransport.proof(retained.checkpoint.sha256), "verify", Duration.ofNanos(remaining)).phase == "cleaned")
++                    val actions = if (HarmonyOSCleanupFenceTransport.splitInventory(cp.scope)) listOf("verify-root", "verify") else listOf("verify")
++                    for (action in actions) {
++                        val remaining = deadline - System.nanoTime()
++                        if (remaining <= 0) throw HdcTimeoutException(Duration.ofSeconds(30))
++                        require(HarmonyOSCleanupFenceTransport(hdc).execute(cp.scope,
++                            HarmonyOSCleanupFenceTransport.proof(retained.checkpoint.sha256), action, Duration.ofNanos(remaining)).phase == "cleaned")
++                    }
 +                }
 +            }
 +        }
@@ -11259,10 +11274,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..584d6d9
+index 0000000..36566fd
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,402 @@
+@@ -0,0 +1,422 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -11309,16 +11324,18 @@ index 0000000..584d6d9
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
 +    private var recordingFailure: Throwable? = null
++    private var queryFailure: HdcTimeoutException? = null
 +
 +    override fun name(): String = "HarmonyOS"
 +
 +    @Synchronized
 +    override fun open() {
++        queryFailure?.let { throw it }
 +        if (opened) return
 +        checkInterrupted()
 +        device.connect()
-+        decodeScreenshot(device.screenshot(config.commandTimeout))
-+        device.hierarchy(config.commandTimeout)
++        capture(config.commandTimeout)
++        hierarchy()
 +        opened = true
 +    }
 +
@@ -11410,7 +11427,7 @@ index 0000000..584d6d9
 +    override fun contentDescriptor(excludeKeyboardElements: Boolean): TreeNode {
 +        requireOpen()
 +        if (excludeKeyboardElements) unsupported("excluding keyboard elements from the hierarchy")
-+        return device.hierarchy(config.commandTimeout)
++        return hierarchy()
 +    }
 +
 +    override fun scrollVertical() = swipe(SwipeDirection.UP, 400)
@@ -11472,20 +11489,18 @@ index 0000000..584d6d9
 +        out.flush()
 +    }
 +
-+    override fun isShutdown(): Boolean = !opened || !device.isAvailable()
++    override fun isShutdown(): Boolean = !opened || queryFailure != null || !device.isAvailable()
 +
 +    override fun waitUntilScreenIsStatic(timeoutMs: Long): Boolean {
 +        requireOpen()
 +        val deadline = deadline(timeoutMs)
 +        var previous: BufferedImage? = null
++        var previousSampleNanos = 0L
 +        while (true) {
-+            val budget = remaining(deadline) ?: return false
-+            val current = try {
-+                capture(budget).image
-+            } catch (error: HdcTimeoutException) {
-+                if (budget < config.commandTimeout && error.suppressed.isEmpty()) return false
-+                throw error
-+            }
++            if (!canSample(deadline, previousSampleNanos)) return false
++            val started = System.nanoTime()
++            val current = capture(config.commandTimeout).image
++            previousSampleNanos = System.nanoTime() - started
 +            if (System.nanoTime() >= deadline) return false
 +            if (previous != null && imagesEqual(previous, current)) return true
 +            previous = current
@@ -11497,15 +11512,13 @@ index 0000000..584d6d9
 +        requireOpen()
 +        val deadline = deadline(timeoutMs?.toLong() ?: config.settleTimeout.toMillis())
 +        var previous: TreeNode? = null
++        var previousSampleNanos = 0L
 +        // Require two fresh samples. A caller's snapshot can predate the last input event.
 +        while (true) {
-+            val budget = remaining(deadline) ?: return null
-+            val current = try {
-+                device.hierarchy(budget)
-+            } catch (error: HdcTimeoutException) {
-+                if (budget < config.commandTimeout && error.suppressed.isEmpty()) return null
-+                throw error
-+            }
++            if (!canSample(deadline, previousSampleNanos)) return null
++            val started = System.nanoTime()
++            val current = hierarchy()
++            previousSampleNanos = System.nanoTime() - started
 +            if (System.nanoTime() >= deadline) return null
 +            if (previous == current) return ViewHierarchy(current)
 +            previous = current
@@ -11589,8 +11602,27 @@ index 0000000..584d6d9
 +    private data class Screenshot(val bytes: ByteArray, val image: BufferedImage)
 +
 +    private fun capture(timeout: Duration): Screenshot {
-+        val bytes = device.screenshot(timeout)
-+        return Screenshot(bytes, decodeScreenshot(bytes))
++        return query {
++            val bytes = device.screenshot(timeout)
++            Screenshot(bytes, decodeScreenshot(bytes))
++        }
++    }
++
++    private fun hierarchy(): TreeNode {
++        return query { device.hierarchy(config.commandTimeout) }
++    }
++
++    private fun <T> query(action: () -> T): T {
++        queryFailure?.let { throw it }
++        try {
++            return action()
++        } catch (error: HdcTimeoutException) {
++            // Deleting a capture file does not prove the timed-out remote command ended.
++            // Keep completion hooks, failure screenshots and external callers from
++            // issuing more device work in this session. close() can still finish recordings.
++            queryFailure = error
++            throw error
++        }
 +    }
 +
 +    private fun decodeScreenshot(bytes: ByteArray): BufferedImage {
@@ -11634,11 +11666,13 @@ index 0000000..584d6d9
 +        return System.nanoTime() + Duration.ofMillis(timeoutMs).toNanos()
 +    }
 +
-+    private fun remaining(deadline: Long): Duration? {
++    private fun canSample(deadline: Long, previousNanos: Long): Boolean {
 +        checkInterrupted()
-+        val nanos = deadline - System.nanoTime()
-+        if (nanos < Duration.ofMillis(3).toNanos()) return null
-+        return minOf(config.commandTimeout, Duration.ofNanos(nanos))
++        // The window admits samples; it must not truncate a remote query to a few ms.
++        // A final sample can overrun the window: its full command budget plus the
++        // backend's bounded termination/cleanup still apply. Skip a tail that cannot fit even
++        // the last observed sample, without inventing a device-specific threshold.
++        return deadline - System.nanoTime() >= maxOf(1L, previousNanos)
 +    }
 +
 +    private fun pause(deadline: Long): Boolean {
@@ -11656,6 +11690,7 @@ index 0000000..584d6d9
 +    private fun requireOpen() {
 +        check(opened) { "HarmonyOS driver is not open" }
 +        checkInterrupted()
++        queryFailure?.let { throw it }
 +    }
 +
 +    private fun checkInterrupted() {
@@ -12971,10 +13006,10 @@ index 0000000..b7ea2b2
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt
 new file mode 100644
-index 0000000..33a92bd
+index 0000000..64bc6cb
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt
-@@ -0,0 +1,154 @@
+@@ -0,0 +1,223 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -12999,7 +13034,7 @@ index 0000000..33a92bd
 +    fun execute(scope: CleanupFenceScope, proof: String, action: String, timeout: Duration,
 +                beforeDispatch: (CleanupFenceCall) -> Unit = {}): CleanupFenceObservation {
 +        require(timeout > Duration.ZERO && timeout <= Duration.ofSeconds(30))
-+        require(calls != null || action == "verify") { "Mutating fence operations require a durable call journal." }
++        require(calls != null || action in setOf("verify", "verify-root")) { "Mutating fence operations require a durable call journal." }
 +        calls?.let { require(it.deviceId == scope.deviceId) }
 +        val nonce = UUID.randomUUID().toString()
 +        val arguments = arguments(scope, proof, action, nonce)
@@ -13037,15 +13072,15 @@ index 0000000..33a92bd
 +            val root = node["remoteRoot"].asText()
 +            require(root == "/data/local/tmp/maestro-session-$generation")
 +            val ops = node["operations"].toList()
-+            require(ops.size in 1..16 && ops.all { uuid.matches(it["id"].asText()) })
++            require(ops.size in 1..1024 && ops.all { uuid.matches(it["id"].asText()) })
 +            require(ops.map { it["id"].asText() }.distinct().size == ops.size)
 +            val pending = ops.filter { !it["completed"].asBoolean() }.single()
 +            require(pending["recoverable"].asBoolean() && !pending["markerRemoved"].asBoolean())
 +            require(node["hostCalls"].all { it["stopped"].asBoolean() })
 +            val paths = node["temporaryFiles"].map { it.asText() }
-+            require(paths.size in 1..16 && paths.distinct().size == paths.size)
++            require(paths.size in 1..512 && paths.distinct().size == paths.size)
 +            require(paths.all { it.matches(Regex(Regex.escape(root) + "/files/(?:layout-$uuid\\.json|screen-$uuid\\.png)")) })
-+            val target = paths.filter { it.endsWith(".json") && hash(mapper.writeValueAsBytes(listOf("rm", "-f", it))) == pending["sha256"].asText() }.single()
++            val target = paths.filter { it.endsWith(".json") && listOf(listOf("rm", "-f", it), listOf("uitest", "dumpLayout", "-p", it)).any { args -> hash(mapper.writeValueAsBytes(args)) == pending["sha256"].asText() } }.single()
 +            return CleanupFenceScope(device, owner, generation, root, pending["id"].asText(), pending["sha256"].asText(),
 +                target, ops.map { it["id"].asText() }, paths)
 +        }
@@ -13067,7 +13102,10 @@ index 0000000..33a92bd
 +            }
 +        }
 +
++        fun splitInventory(scope: CleanupFenceScope): Boolean = scope.operationIds.size > 16 || scope.temporaryFiles.size > 16
++
 +        fun arguments(scope: CleanupFenceScope, proof: String, action: String, nonce: String): List<String> {
++            if (splitInventory(scope)) return compactArguments(scope, proof, action, nonce)
 +            require(action in setOf("claim", "clean", "verify") && uuid.matches(nonce))
 +            require(proof.matches(Regex("MAESTRO_CLEANUP_FENCE_V1:[0-9a-f]{64}")))
 +            require(scope.remoteRoot == "/data/local/tmp/maestro-session-${scope.generation}" && uuid.matches(scope.generation))
@@ -13127,6 +13165,72 @@ index 0000000..33a92bd
 +            require(args.joinToString(" ", transform = ::q).toByteArray().size <= 6 * 1024) { "Fence script exceeds its fixed scope budget." }
 +            return args
 +        }
++        // Large sessions split the immutable inventories between root and file verification.
++        // No compression, device helper, wildcard deletion or trust in path absence is used.
++        private fun compactArguments(scope: CleanupFenceScope, proof: String, action: String, nonce: String): List<String> {
++            require(action in setOf("claim", "clean", "verify-root", "verify") && uuid.matches(nonce))
++            require(proof.matches(Regex("MAESTRO_CLEANUP_FENCE_V1:[0-9a-f]{64}")))
++            require(uuid.matches(scope.generation) && scope.remoteRoot == "/data/local/tmp/maestro-session-${scope.generation}")
++            require(scope.operationIds.size in 1..1024 && scope.operationIds.all { uuid.matches(it) } &&
++                scope.operationIds.distinct().size == scope.operationIds.size && scope.operationId in scope.operationIds)
++            require(scope.temporaryFiles.size in 1..512 && scope.temporaryFiles.distinct().size == scope.temporaryFiles.size &&
++                scope.temporaryFiles.all { it.matches(Regex(Regex.escape(scope.remoteRoot) + "/files/(?:layout-$uuid\\.json|screen-$uuid\\.png)")) })
++            val roots = action == "claim" || action == "verify-root"
++            val prefix = "__r=${q(scope.remoteRoot)}; __p=${q(proof)}; __o=${q(scope.operationId)}; __a=${q(action)}; __nonce=${q(nonce)}; " +
++                "__ops=${q(if (roots) scope.operationIds.joinToString(" ") else "")}; " +
++                "__files=${q(if (roots) "" else scope.temporaryFiles.joinToString(" ") { it.substringAfterLast('/') })}; "
++            val body = """
++                umask 077;
++                [ -d "${'$'}__r" ] && [ ! -L "${'$'}__r" ] && [ -d "${'$'}__r/files" ] && [ ! -L "${'$'}__r/files" ] || exit 121;
++                if [ "${'$'}__a" = claim ] || [ "${'$'}__a" = verify-root ]; then
++                for __d in "${'$'}__r"/* "${'$'}__r"/.[!.]* "${'$'}__r"/..?*; do
++                [ -e "${'$'}__d" ] || [ -L "${'$'}__d" ] || continue;
++                [ -d "${'$'}__d" ] && [ ! -L "${'$'}__d" ] || exit 121;
++                __n=${'$'}{__d##*/}; [ "${'$'}__n" != files ] || continue;
++                case "${'$'}__n" in *[!0-9a-f-]*) exit 121;; esac;
++                case " ${'$'}__ops " in *" ${'$'}__n "*) ;; *) exit 121;; esac;
++                [ "${'$'}__n" != "${'$'}__o" ] || continue;
++                for __f in "${'$'}__d"/* "${'$'}__d"/.[!.]* "${'$'}__d"/..?*; do
++                [ -e "${'$'}__f" ] || [ -L "${'$'}__f" ] || continue;
++                [ -f "${'$'}__f" ] && [ ! -L "${'$'}__f" ] || exit 121;
++                case "${'$'}__f" in "${'$'}__d/done"|"${'$'}__d/done.pending") ;; *) exit 121;; esac;
++                done; done;
++                else
++                for __f in "${'$'}__r/files"/* "${'$'}__r/files"/.[!.]* "${'$'}__r/files"/..?*; do
++                [ -e "${'$'}__f" ] || [ -L "${'$'}__f" ] || continue;
++                [ -f "${'$'}__f" ] && [ ! -L "${'$'}__f" ] || exit 121;
++                __n=${'$'}{__f##*/}; case "${'$'}__n" in *[!a-z0-9.-]*) exit 121;; esac;
++                case " ${'$'}__files " in *" ${'$'}__n "*) ;; *) exit 121;; esac;
++                done; fi;
++                __d="${'$'}__r/${'$'}__o";
++                if [ "${'$'}__a" = claim ]; then
++                mkdir "${'$'}__d" 2>/dev/null || { printf '%s' "MAESTRO_FENCE:${'$'}__nonce:occupied"; exit 0; };
++                printf '%s' "${'$'}__p" > "${'$'}__d/fence.pending" && mv "${'$'}__d/fence.pending" "${'$'}__d/fence" || exit 124;
++                fi;
++                [ -d "${'$'}__d" ] && [ ! -L "${'$'}__d" ] || exit 121;
++                for __f in "${'$'}__d"/* "${'$'}__d"/.[!.]* "${'$'}__d"/..?*; do
++                [ -e "${'$'}__f" ] || [ -L "${'$'}__f" ] || continue;
++                [ -f "${'$'}__f" ] && [ ! -L "${'$'}__f" ] || exit 121;
++                case "${'$'}__f" in "${'$'}__d/fence"|"${'$'}__d/cleaned"|"${'$'}__d/cleaned.pending") ;; *) exit 121;; esac;
++                done;
++                [ -f "${'$'}__d/fence" ] && [ "${'$'}(cat "${'$'}__d/fence")" = "${'$'}__p" ] || exit 125;
++                if [ "${'$'}__a" = clean ]; then
++                set --; for __n in ${'$'}__files; do set -- "${'$'}@" "${'$'}__r/files/${'$'}__n"; done;
++                rm -f "${'$'}@" || exit 121;
++                for __n in ${'$'}__files; do [ ! -e "${'$'}__r/files/${'$'}__n" ] && [ ! -L "${'$'}__r/files/${'$'}__n" ] || exit 121; done;
++                printf '%s' "${'$'}__p" > "${'$'}__d/cleaned.pending" && mv "${'$'}__d/cleaned.pending" "${'$'}__d/cleaned" || exit 124;
++                fi;
++                if [ -e "${'$'}__d/cleaned" ]; then
++                [ "${'$'}(cat "${'$'}__d/cleaned")" = "${'$'}__p" ] || exit 125;
++                for __n in ${'$'}__files; do [ ! -e "${'$'}__r/files/${'$'}__n" ] && [ ! -L "${'$'}__r/files/${'$'}__n" ] || exit 121; done;
++                printf '%s' "MAESTRO_FENCE:${'$'}__nonce:cleaned";
++                else printf '%s' "MAESTRO_FENCE:${'$'}__nonce:claimed"; fi
++            """.trimIndent().lines().joinToString(" ") { it.trim() }
++            val args = listOf("sh", "-c", prefix + body)
++            require(args.joinToString(" ", transform = ::q).toByteArray().size <= 24 * 1024) { "Fence inventory exceeds the bounded command budget." }
++            return args
++        }
++
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt
@@ -15636,10 +15740,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..dcd9da5
+index 0000000..95ffb08
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,471 @@
+@@ -0,0 +1,551 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -15977,21 +16081,93 @@ index 0000000..dcd9da5
 +    }
 +
 +    @Test
-+    fun `a shortened wait budget may expire without claiming that the app settled`() {
++    fun `query timeout is terminal even when temporary file cleanup succeeded`() {
++        for (screenshot in listOf(false, true)) {
++            for (cleanupFailed in listOf(false, true)) {
++                val device = Device()
++                val driver = driver(device)
++                driver.open()
++                val error = HdcTimeoutException(Duration.ofSeconds(15)).apply {
++                    if (cleanupFailed) addSuppressed(HdcException("remote cleanup failed"))
++                }
++                if (screenshot) device.screenshotFailure = error else device.layout = { throw error }
++                assertThat(assertThrows(HdcTimeoutException::class.java) {
++                    if (screenshot) driver.waitUntilScreenIsStatic(1000)
++                    else driver.waitForAppToSettle(null, null, 1000)
++                }).isSameInstanceAs(error)
++                val reads = device.layoutReads + device.screenshots
++                assertThat(driver.isShutdown()).isTrue()
++                assertThat(assertThrows(HdcTimeoutException::class.java) { driver.inputText("later action") }).isSameInstanceAs(error)
++                assertThrows(HdcTimeoutException::class.java) { driver.takeScreenshot(Buffer(), false) }
++                assertThat(device.layoutReads + device.screenshots).isEqualTo(reads)
++                assertThat(device.commands).isEmpty()
++                driver.close()
++                assertThrows(HdcTimeoutException::class.java) { driver.open() }
++                assertThat(device.connections).isEqualTo(1)
++            }
++        }
++    }
++
++    @Test
++    fun `query timeout still allows exactly one recording close and preserves its failure`() {
++        for (closeFailure in listOf(null, HdcException("recording stop unconfirmed"))) {
++            val recording = Recording(closeFailure)
++            val device = Device().apply { recordingFactory = { _, _ -> recording } }
++            val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(enableScreenRecording = true))
++            driver.open()
++            driver.startScreenRecording(Buffer())
++            device.layout = { throw HdcTimeoutException(Duration.ofSeconds(15)) }
++            assertThrows(HdcTimeoutException::class.java) { driver.waitForAppToSettle(null, null, 1000) }
++            repeat(2) {
++                if (closeFailure == null) driver.close()
++                else assertThat(assertThrows(HdcException::class.java) { driver.close() }).isSameInstanceAs(closeFailure)
++            }
++            assertThat(recording.closeCalls).isEqualTo(1)
++            assertThat(driver.isShutdown()).isTrue()
++        }
++    }
++
++    @Test
++    fun `sampling window never becomes a tiny device command timeout`() {
 +        val device = Device()
 +        val driver = driver(device)
 +        driver.open()
-+        device.layout = { throw HdcTimeoutException(Duration.ofSeconds(1)) }
-+        assertThat(driver.waitForAppToSettle(null, null, 1000)).isNull()
-+        device.screenshotFailure = HdcTimeoutException(Duration.ofSeconds(1))
-+        assertThat(driver.waitUntilScreenIsStatic(1000)).isFalse()
-+        val cleanupFailure = HdcTimeoutException(Duration.ofSeconds(1)).apply {
-+            addSuppressed(HdcException("remote cleanup failed"))
-+        }
-+        device.layout = { throw cleanupFailure }
-+        assertThat(assertThrows(HdcTimeoutException::class.java) {
-+            driver.waitForAppToSettle(null, null, 1000)
-+        }).isSameInstanceAs(cleanupFailure)
++        assertThat(driver.waitForAppToSettle(null, null, 1000)).isNotNull()
++        assertThat(driver.waitUntilScreenIsStatic(1000)).isTrue()
++        assertThat(device.layoutBudgets.toSet()).containsExactly(Duration.ofSeconds(15))
++        assertThat(device.screenshotBudgets.toSet()).containsExactly(Duration.ofSeconds(15))
++    }
++
++    @Test
++    fun `window tail shorter than current sample starts no further query`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        device.layout = { Thread.sleep(80); tree("ready") }
++        device.beforeScreenshot = { Thread.sleep(80) }
++        val layoutReads = device.layoutReads
++        val screenReads = device.screenshots
++        assertThat(driver.waitForAppToSettle(null, null, 100)).isNull()
++        assertThat(driver.waitUntilScreenIsStatic(100)).isFalse()
++        assertThat(device.layoutReads - layoutReads).isEqualTo(1)
++        assertThat(device.screenshots - screenReads).isEqualTo(1)
++        device.layout = { tree("ready") }
++        device.beforeScreenshot = {}
++        assertThat(driver.waitForAppToSettle(null, null, 1000)).isNotNull()
++        assertThat(driver.waitUntilScreenIsStatic(1000)).isTrue()
++    }
++
++    @Test
++    fun `completed query beyond window cannot report settled and does not poison session`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        device.layout = { Thread.sleep(30); tree("ready") }
++        val reads = device.layoutReads
++        assertThat(driver.waitForAppToSettle(null, null, 10)).isNull()
++        assertThat(device.layoutReads - reads).isEqualTo(1)
++        driver.inputText("still usable after confirmed completion")
++        assertThat(device.commands).hasSize(1)
 +    }
 +
 +    @Test
@@ -16016,8 +16192,11 @@ index 0000000..dcd9da5
 +        val driver = driver(device)
 +        driver.open()
 +        val before = device.screenshots
++        val layouts = device.layoutReads
 +        assertThat(driver.waitUntilScreenIsStatic(0)).isFalse()
++        assertThat(driver.waitForAppToSettle(null, null, 0)).isNull()
 +        assertThat(device.screenshots).isEqualTo(before)
++        assertThat(device.layoutReads).isEqualTo(layouts)
 +        assertThat(driver.waitUntilScreenIsStatic(1000)).isTrue()
 +        assertThat(device.screenshots - before).isEqualTo(2)
 +    }
@@ -16068,11 +16247,16 @@ index 0000000..dcd9da5
 +        var recordingSink: Sink? = null
 +        var recordingConfig: HarmonyOSDriverConfig? = null
 +        val commands = mutableListOf<List<String>>()
++        val layoutBudgets = mutableListOf<Duration>()
++        val screenshotBudgets = mutableListOf<Duration>()
++        var beforeScreenshot: () -> Unit = {}
 +        override fun connect() { connections++ }
 +        override fun isAvailable(): Boolean = true
-+        override fun hierarchy(timeout: Duration): TreeNode { layoutReads++; return layout() }
++        override fun hierarchy(timeout: Duration): TreeNode { layoutReads++; layoutBudgets += timeout; return layout() }
 +        override fun screenshot(timeout: Duration): ByteArray {
 +            screenshots++
++            screenshotBudgets += timeout
++            beforeScreenshot()
 +            screenshotFailure?.let { throw it }
 +            return image
 +        }
@@ -16151,6 +16335,106 @@ index 0000000..db63669
 +        assertThat(DeviceService.isDeviceConnected("test-device", Platform.HARMONYOS)).isNull()
 +        assertThat(DeviceService.isDeviceAvailableToLaunch("test-device", Platform.HARMONYOS)).isNull()
 +    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt
+new file mode 100644
+index 0000000..af21111
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt
+@@ -0,0 +1,94 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcTimeoutException
++import okio.Buffer
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.params.ParameterizedTest
++import org.junit.jupiter.params.provider.ValueSource
++import org.junit.jupiter.api.io.TempDir
++import java.awt.image.BufferedImage
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++import javax.imageio.ImageIO
++
++/** Real driver, device adapter and journal; only the HDC transport is simulated. */
++class HarmonyOSQueryRecoveryTest {
++    @TempDir lateinit var directory: Path
++
++    @ParameterizedTest
++    @ValueSource(strings = ["dumpLayout", "screenCap"])
++    fun `successful rm cannot hide an unconfirmed query`(query: String) {
++        val runner = QueryRunner(query)
++        HarmonyOSRecoveryJournal.create(directory.resolve("journal.json"), TARGET, UUID.randomUUID().toString()).use { journal ->
++            val hdc = HdcClient("simulated-hdc", runner).withRecoveryJournal(journal)
++            val driver = HarmonyOSDriver(TARGET, hdc)
++            driver.open()
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(0)
++            runner.inject = true
++
++            val failure = assertThrows(HdcTimeoutException::class.java) {
++                if (query == "dumpLayout") driver.waitForAppToSettle(null, null, 1000)
++                else driver.waitUntilScreenIsStatic(1000)
++            }
++            assertThat(failure).isSameInstanceAs(runner.failure)
++            assertThat(failure.suppressed).isEmpty()
++            assertThat(runner.cleanupAcknowledgements).isEqualTo(1)
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++            val dispatches = runner.calls
++            assertThat(driver.isShutdown()).isTrue()
++            assertThrows(HdcTimeoutException::class.java) { driver.inputText("completion hook") }
++            assertThrows(HdcTimeoutException::class.java) { driver.takeScreenshot(Buffer(), false) }
++            driver.close()
++            assertThrows(HdcTimeoutException::class.java) { driver.open() }
++            assertThat(runner.calls).isEqualTo(dispatches)
++            journal.seal()
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(1)
++            assertThat(journal.snapshot().issues.map { it.code }).contains("REMOTE_COMPLETION_UNCONFIRMED")
++        }
++    }
++
++    private class QueryRunner(private val query: String) : HdcCommandRunner {
++        var inject = false
++        var calls = 0
++        var cleanupAcknowledgements = 0
++        var failure: HdcTimeoutException? = null
++
++        override fun run(command: List<String>, timeout: Duration): HdcCommandResult {
++            calls++
++            if (command.drop(1) == listOf("list", "targets")) return HdcCommandResult(0, "$TARGET\n", "")
++            if (command.size == 7 && command.subList(3, 5) == listOf("file", "recv")) {
++                val local = Path.of(command[6])
++                if (command[5].endsWith(".png")) {
++                    ImageIO.write(BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB), "png", local.toFile())
++                } else {
++                    Files.writeString(local, """{"attributes":{"text":"synthetic"},"children":[]}""")
++                }
++                return HdcCommandResult(0, "", "")
++            }
++            check(command.size == 5 && command[3] == "shell") { "Unexpected simulated HDC call" }
++            val wrapper = command[4]
++            val outer = checkNotNull(Regex("MAESTRO_RECOVERY_[0-9a-f]{32}=").find(wrapper)).value
++            if (inject && wrapper.contains(query)) {
++                // Preserve the real journal entry; only the transport response is injected.
++                check(timeout > Duration.ofSeconds(10)) { "Wait window must not truncate the query budget" }
++                val error = HdcTimeoutException(timeout)
++                failure = error
++                throw error
++            }
++            check(listOf("dumpLayout", "screenCap", "rm").any(wrapper::contains))
++            if (failure != null && wrapper.contains("rm")) cleanupAcknowledgements++
++            val inner = Regex("MAESTRO_EXIT_[0-9a-f]{32}=").find(wrapper)?.value
++            return HdcCommandResult(0, (inner?.let { "\n${it}0\n" } ?: "") + "\n${outer}0\n", "")
++        }
++    }
++
++    companion object { private const val TARGET = "simulated-recovery-target" }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSRecordingDiagnosticsTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSRecordingDiagnosticsTest.kt
 new file mode 100644

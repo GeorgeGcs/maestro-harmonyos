@@ -3,13 +3,14 @@ import path from 'node:path';
 import { isDeepStrictEqual as equal } from 'node:util';
 import { readBytes } from '../validation/io.mjs';
 import { parseMaintenanceJson } from './verify-maintenance.mjs';
-import { hash, requireValue, uuid, fields, fenceScope, fenceArguments, confirmedPhase } from './cleanup-fence-scripts.mjs';
+import { hash, requireValue, uuid, fields, fenceScope, fenceArguments, confirmedPhase, splitInventory } from './cleanup-fence-scripts.mjs';
 
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 const same = (a, b) => typeof a === 'string' && typeof b === 'string' && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 const phases = ['prepared', 'claimed', 'cleaned', 'complete'];
 const gateFields = 'schemaVersion deviceId ownerSessionId state journalPath updatedAt closeFailure reportPath reportSha256 requiresRecovery uncertainReason unresolvedRecording cleanupFence retainedFences';
-const supportedClass = 'c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac';
+const supportedClasses = new Set(['c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac',
+  'f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9']);
 
 function reader() {
   const records = new Map(), deadline = Date.now() + 30000;
@@ -71,7 +72,7 @@ async function bundle({ deviceId, root, key, retained, io }) {
   requireValue(cp.schemaVersion === 1 && cp.recoveryId === retained.recoveryId && cp.deviceId === deviceId && cp.ownerId === retained.ownerId &&
     Number.isFinite(Date.parse(cp.createdAt)), 'Checkpoint owner differs.');
   fields(cp.origin, 'profile journalClassSha256 clientJar');
-  requireValue(cp.origin.profile === 'exclusive-operation-mkdir-v1' && cp.origin.journalClassSha256 === supportedClass,
+  requireValue(cp.origin.profile === 'exclusive-operation-mkdir-v1' && supportedClasses.has(cp.origin.journalClassSha256),
     'Original wrapper has no supported compatibility profile.');
   function tool(value) {
     fields(value, 'path sha256 bytes');
@@ -141,6 +142,11 @@ async function bundle({ deviceId, root, key, retained, io }) {
   requireValue((await io.read(path.join(base, 'calls.json'))).sha256 === verified.journal.sha256, 'Recovery journal changed after release.');
   const last = verified.calls.at(-1);
   requireValue(last?.call.action === 'verify' && last.outcome && (await ref(last.outcome)).phase === 'cleaned', 'Final remote isolation was not verified.');
+  if (splitInventory(cp.scope)) {
+    const rootCheck = verified.calls.at(-2);
+    requireValue(rootCheck?.call.action === 'verify-root' && rootCheck.outcome && (await ref(rootCheck.outcome)).phase === 'cleaned',
+      'Split inventory lacks its final root verification.');
+  }
   return { cp, receipt, originalGate, base, ref, step, chain };
 }
 

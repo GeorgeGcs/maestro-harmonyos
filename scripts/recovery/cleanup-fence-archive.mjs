@@ -80,7 +80,7 @@ export async function collectCleanupFenceEvidence({ retained, ownerDirectory, de
       requireValue(value.deviceId === deviceId && value.sessionId === owner && value.state === 'unknown', 'Foreign original receipt snapshot.');
     } else if (item.role === 'observation') {
       fields(value, 'hostCallId action nonce phase stdout stderr');
-      requireValue(uuid.test(value.hostCallId) && uuid.test(value.nonce) && ['claim', 'clean', 'verify'].includes(value.action) &&
+      requireValue(uuid.test(value.hostCallId) && uuid.test(value.nonce) && ['claim', 'clean', 'verify-root', 'verify'].includes(value.action) &&
         ['claimed', 'cleaned'].includes(value.phase), 'Invalid cleanup-fence observation.');
     }
   }

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "kind": "development-regression-index",
+  "publishedRelease": false,
+  "releaseArtifactSmoke": false,
+  "source": {
+    "baseCommit": "7c1b423ad712c1b93b325f089cea55e691edeab1",
+    "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+    "patchSha256": "78417e81f3bf2c942075e43def4f369804f6ed8d249b1897d0c7d46364ebc478",
+    "changes": "query timeout handling and cleanup fence recovery; built before the follow-up source commit"
+  },
+  "cli": {
+    "files": 200,
+    "fileManifestSha256": "3942c2eb1727fcaef457cdc6c83e4b92f8828e813a33ebee631bfa3be763d8a0",
+    "core": [
+      {
+        "file": "maestro-client.jar",
+        "bytes": 13661384,
+        "sha256": "88e32f0ecc8bdea1575346db179f41d47508dd4629d2f3f447474287d6a21593"
+      },
+      {
+        "file": "maestro-cli-2.12.0.jar",
+        "bytes": 138668853,
+        "sha256": "0281226f983ceb8203ae4404946d1a1e9cadea84c620b88f00f4169eee24ae5e"
+      },
+      {
+        "file": "maestro-orchestra.jar",
+        "bytes": 665021,
+        "sha256": "10861257caf26d7db08d215930ea57dc97ddba0333c06297e16027100394da4e"
+      },
+      {
+        "file": "maestro-orchestra-models.jar",
+        "bytes": 230052,
+        "sha256": "b28cf7b596d15e3de2f946be283c174e7282457b1ce8b2cae765f587436deaa2"
+      }
+    ]
+  },
+  "device": {
+    "model": "HUAWEI MRDI-W00",
+    "os": "HarmonyOS 7.0.0",
+    "api": 26
+  },
+  "run": {
+    "startedAt": "2026-11-05T11:07:13.8462862Z",
+    "finishedAt": "2026-11-05T11:17:22.2799163Z",
+    "uiDurationSeconds": 585,
+    "status": "passed",
+    "cleanup": "complete",
+    "releaseConfirmed": true,
+    "processExitCode": 0,
+    "wrapperExitCode": 0,
+    "retryUsed": false,
+    "stepInstances": 98,
+    "checkedEvidenceFiles": 16,
+    "recording": false
+  },
+  "journal": {
+    "operations": 520,
+    "hostCalls": 776,
+    "rootRemoved": true,
+    "incompleteOperations": 0,
+    "unreturnedHostCalls": 0
+  },
+  "flowLog": {
+    "calls": 758,
+    "layoutCalls": 124,
+    "minimumLayoutBudgetMs": 14994,
+    "failedCalls": 0,
+    "scope": "retained Flow log; excludes session setup and teardown"
+  },
+  "checks": {
+    "jvm": 507,
+    "recoveryUnique": 41,
+    "originalWrapperRace": 24,
+    "currentWrapperRace": 24
+  },
+  "historicalPhone20Rounds": "Preserved against the original frozen CLI; not repeated with this build."
+}

@@ -13,15 +13,16 @@ import java.security.MessageDigest;
 class CleanupFenceProbe {
     static final ObjectMapper JSON = new ObjectMapper();
     final boolean device;
+    final boolean layout;
     final Path output;
     final String executable, target;
     final AtomicInteger sequence = new AtomicInteger();
     final List<Map<String,Object>> results = new ArrayList<>();
     final HdcClient hdc;
-    CleanupFenceProbe(boolean device, Path output, String executable, String target) throws Exception {
-        this.device=device; this.output=output; this.executable=executable; this.target=target;
+    CleanupFenceProbe(boolean device, boolean layout, Path output, String executable, String target) throws Exception {
+        this.device=device; this.layout=layout; this.output=output; this.executable=executable; this.target=target;
         Files.createDirectory(output);
-        hdc=new HdcClient(executable,new ProcessHdcCommandRunner(),Duration.ofSeconds(15),null,false);
+        hdc=new HdcClient(executable,new ProcessHdcCommandRunner(),Duration.ofSeconds(15),null,false,line -> Unit.INSTANCE);
     }
     static String quote(String text) { return "'"+text.replace("'","'\"'\"'")+"'"; }
     static String hash(byte[] bytes) throws Exception { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)); }
@@ -61,8 +62,8 @@ class CleanupFenceProbe {
             remote=journal.allocateTemporaryFile$maestro_client("layout","json");
             var capture=new HdcClient("capture-only",(command,timeout)-> {
                 captured[0]=command.get(command.size()-1); return new HdcCommandResult(0,"captured, not dispatched","");
-            },Duration.ofSeconds(3),null,false).withRecoveryJournal(journal);
-            try { capture.shell("probe-target",List.of("rm","-f",remote),Duration.ofSeconds(3)); throw new AssertionError("Missing proof accepted"); }
+            },Duration.ofSeconds(3),null,false,line -> Unit.INSTANCE).withRecoveryJournal(journal);
+            try { capture.shell("probe-target",layout?List.of("uitest","dumpLayout","-p",remote):List.of("rm","-f",remote),Duration.ofSeconds(3)); throw new AssertionError("Missing proof accepted"); }
             catch(HdcException expected) { }
         }
         JsonNode journal=JSON.readTree(journalPath.toFile());
@@ -73,6 +74,8 @@ class CleanupFenceProbe {
         String op=root+"/"+journal.get("operations").get(0).get("id").asText();
         if(!wrapped.contains("mkdir "+quote(op)+" || exit 119; ")) throw new IllegalStateException("Production wrapper lacks exclusive dispatch barrier");
         if(!device){String local="./"+name;wrapped=wrapped.replace(root,local);remote=remote.replace(root,local);op=op.replace(root,local);root=local;}
+        // Host-only stub preserves the production wrapper and observes whether its child was entered.
+        if(layout) wrapped="uitest() { printf exported > \"$3\"; }; "+wrapped;
         save(name+"-scope.json",Map.of("root",root,"file",remote,"operation",op,"productionWrapper",wrapped,"adaptedPathsForHost",!device));
         success("umask 077; [ ! -e "+quote(root)+" ] && [ ! -L "+quote(root)+" ] && mkdir "+quote(root)+" && mkdir "+quote(root+"/files")+" && printf payload > "+quote(remote));
         return new Scope(root,remote,op,wrapped);
@@ -83,6 +86,7 @@ class CleanupFenceProbe {
     }
     void blocked(Scope s) throws Exception { if(run(s.wrapped).exit!=119) throw new AssertionError("Late production command crossed the fence"); }
     void exists(Scope s) throws Exception { success("[ -f "+quote(s.file)+" ] && [ \"$(cat "+quote(s.file)+")\" = payload ]"); }
+    void executed(Scope s) throws Exception { success(layout?"[ -f "+quote(s.file)+" ] && [ \"$(cat "+quote(s.file)+")\" = exported ]":"[ ! -e "+quote(s.file)+" ]"); }
     void clean(Scope s) throws Exception {
         // Only called after every injected command has returned; never used on a real blocked session.
         success("rm -f "+quote(s.file)+" "+quote(s.operation+"/fence")+" "+quote(s.operation+"/done")+" "+quote(s.operation+"/done.pending")+
@@ -96,12 +100,12 @@ class CleanupFenceProbe {
         blocked(first); exists(first);
         success("rm -f "+quote(first.file)); blocked(first);
         // Distinct generations can proceed while the old dispatch barrier remains in place.
-        Scope next=scope("next-generation"); success(next.wrapped); success("[ ! -e "+quote(next.file)+" ]");
+        Scope next=scope("next-generation"); success(next.wrapped); executed(next);
         blocked(first); clean(next); clean(first); record("fence wins, repeated late dispatch refused, next generation independent");
 
         Scope old=scope("original-first"); success(old.wrapped);
         if(run(fence(old,true)).exit!=123) throw new AssertionError("Existing operation was adopted");
-        success("[ ! -e "+quote(old.file)+" ] && [ -f "+quote(old.operation+"/done")+" ]");
+        executed(old); success("[ -f "+quote(old.operation+"/done")+" ]");
         clean(old); record("original wins, recovery refuses adoption");
 
         Scope interrupted=scope("interrupted-fence");
@@ -128,7 +132,7 @@ class CleanupFenceProbe {
 
         Scope removed=scope("removed-fence-control"); success(fence(removed,true)); blocked(removed);
         success("rm -f "+quote(removed.operation+"/fence")+" && rmdir "+quote(removed.operation));
-        success(removed.wrapped); success("[ ! -e "+quote(removed.file)+" ]"); clean(removed);
+        success(removed.wrapped); executed(removed); clean(removed);
         record("negative control: removing fence permits delayed command");
 
         for(int i=0;i<(device?4:20);i++) {
@@ -140,7 +144,7 @@ class CleanupFenceProbe {
                 boolean fenceWon=claim.exit==0&&original.exit==119;
                 boolean originalWon=original.exit==0&&claim.exit==123;
                 if(!fenceWon&&!originalWon) throw new AssertionError("Race did not have exactly one winner");
-                if(fenceWon) exists(s); else success("[ ! -e "+quote(s.file)+" ]");
+                if(fenceWon) exists(s); else executed(s);
                 clean(s); record("race-"+i+":"+(fenceWon?"fence":"original"));
             } finally {workers.shutdownNow(); if(!workers.awaitTermination(20,TimeUnit.SECONDS)) throw new IllegalStateException("Probe workers still active");}
         }
@@ -165,12 +169,12 @@ class CleanupFenceProbe {
         });
     }
     public static void main(String[] args) throws Exception {
-        if(args.length<3||!Set.of("host","device").contains(args[0])||args[0].equals("device")&&args.length!=4) throw new IllegalArgumentException("host NEW_OUTPUT SHELL | device NEW_OUTPUT HDC DEVICE");
+        if(args.length<3||!Set.of("host","host-layout","device").contains(args[0])||args[0].equals("device")&&args.length!=4) throw new IllegalArgumentException("host|host-layout NEW_OUTPUT SHELL | device NEW_OUTPUT HDC DEVICE");
         boolean device=args[0].equals("device");
-        var probe=new CleanupFenceProbe(device,Path.of(args[1]).toAbsolutePath().normalize(),args[2],device?args[3]:null);
+        var probe=new CleanupFenceProbe(device,args[0].equals("host-layout"),Path.of(args[1]).toAbsolutePath().normalize(),args[2],device?args[3]:null);
         try {
             if(device)probe.deviceTests();else probe.tests();
-            var summary=Map.of("passed",true,"prototypeOnly",true,"actualSessionReleased",false,"device",device,"scenarios",probe.results);
+            var summary=Map.of("passed",true,"prototypeOnly",true,"actualSessionReleased",false,"device",device,"layoutExport",probe.layout,"scenarios",probe.results);
             probe.save("summary.json",summary); System.out.println(JSON.writeValueAsString(summary));
         }catch(Exception|AssertionError error){probe.save("failure.json",Map.of("message",error.toString(),"completed",probe.results));throw error;}
     }

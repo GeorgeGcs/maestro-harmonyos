@@ -11,9 +11,9 @@
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 14:48，北京时间，按完整场景套件的交付准备度估算）。
+- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 19:20，北京时间，按完整场景套件的交付准备度估算）。
 
-Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。当前版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。
+Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。手机固定版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。后续修复及平板验证单独记录，不替换这份版本基线。
 
 [完整场景套件](examples/hmos-code-lab/flows/suite/README.md)串联中文输入、按钮样式、弹窗及回程导航。此前 ComponentCollection 前台单 Flow 和 HMOS 按钮样式单 Flow 的 20/20 结果单独保留；手机和平板的输入、弹窗开发验证也不与本次完整套件混算。
 
@@ -24,11 +24,11 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | 完整场景分段录屏 | **此前版本通过一次完整运行** | `728859cb` CLI 执行 12 分 55 秒，输入、按钮、弹窗三段原片均完整解码通过，清理完成 |
 | 交付文件与插件回放 | **新交付包主机核验通过** | `2d5bfaeb` 独立构建 CLI、VSIX 0.1.1 和便携包；450 个文件核验、三项便携包自测及 24 项插件测试通过。此前 `728859cb` 的真实 VSCode 保存回放记录保留，本次打包未重新操作设备 |
 | 完整套件 20 轮稳定性 | **通过** | 11 月 5 日固定版本完整套件 20/20 轮首次通过，100%；未使用 YAML 重试、无人工干预或环境变化，清理全部完成，证据复核通过 |
-| HarmonyOS 7 平板补充验证 | **完整单轮通过，重复批次未达标** | 独立单轮 10 分 31 秒通过；后续计划 20 轮中 5 轮通过，第 6 轮页面流程完成但清理未知，14 轮未执行；已停止，见[平板记录](docs/progress/2026-11-05-tablet.md) |
+| HarmonyOS 7 平板补充验证 | **修复后完整单轮通过** | 旧重复批次保留为 5 轮通过、1 轮未知、14 轮未执行；已修复查询预算及超时处理，平板不重启恢复，新 CLI 完整单轮 9 分 45 秒通过、正常清理，见[修复记录](docs/progress/2026-11-05-query-recovery.md) |
 
 旧版 20 轮的四次失败均发生在顶部标题栏覆盖的按钮入口，20 轮清理均完成，执行期间无人工操作、重装或重启。当前修复针对示例页面，不提供通用遮挡检测；原始结果分别保留，详见[导航修复记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
-长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)，完整套件 20 轮结果及 HDC 日志结论见[本轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。当前源码的 CLI、VSIX 和便携包已重新构建、核验并发布到 [GitCode 发行版](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)，版本与校验值见 [v0.1.1 交付说明](docs/releases/0.1.1.md)。后续重点是接入实际 CI 平台，配置可连接真机的 Windows runner，完成任务执行、取消收尾和报告归档联调。20 轮批次录屏关闭，不将它记为录屏重复验证。
+长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)，完整套件 20 轮结果及 HDC 日志结论见[本轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。已公开的 CLI、VSIX 和便携包见 [v0.1.1 交付说明](docs/releases/0.1.1.md)，该发行版不包含本次查询超时与长会话恢复修复。接下来需要更新发行包、校验值和版本索引，并用拟发布的实际 CLI 补一轮冒烟。实际 CI 平台联调另行配置可连接真机的 Windows runner。20 轮批次录屏关闭，不将它记为录屏重复验证。
 
 ## 背景与用途
 
@@ -186,7 +186,7 @@ node examples/agent-client/run.mjs `
 | 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有本机真机证据；具体 CI 平台尚未配置 | [报告与 CI 证据](docs/requirements-evidence.md#批量执行与报告)：两条 Flow 的 JUnit 为 2 tests / 0 failures，成功批次归档 40 文件、0 问题；[CI 入口](docs/ci.md) |
 | VSCode 高亮与操作录制辅助，生成标准 YAML 并由 CLI 回放 | 真实 VSCode 八步录制、保存及回放通过；另有交付版两步回放记录 | [录制证据](docs/requirements-evidence.md#vscode-录制保存与回放)、[插件说明](packages/vscode/README.md)；当前记录插件动作，不捕获手机手工触摸 |
 | 官方示例应用典型交互覆盖 | 采用固定版本 HMOS 代码工坊，套件覆盖输入、按钮、弹窗及导航 | [官方示例来源与获取](examples/hmos-code-lab/README.md)、[完整套件](examples/hmos-code-lab/flows/suite/README.md)；按所选场景核验，不声称覆盖应用全部功能 |
-| 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板独立单轮通过、正常清理，后续重复批次因收尾未知停止 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板记录](docs/progress/2026-11-05-tablet.md)；API 级别与产品系统版本分别登记，不将单轮扩大为稳定性结论 |
+| 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板已完成恢复及修复后单轮，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板原批次](docs/progress/2026-11-05-tablet.md)、[修复回归](docs/progress/2026-11-05-query-recovery.md)；API 级别与产品系统版本分别登记，不将单轮扩大为稳定性结论 |
 | 完整场景套件 20 轮，首次通过率 ≥95% | 同一手机固定环境 20/20 首次通过，100%；无重试、无人工干预，全部清理完成 | [20 轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)、[统计方法](docs/validation-plan.md)；平板结果独立统计，不与手机混算 |
 | 开源、完整使用文档与开发指南 | 源码、固定上游补丁、示例、CLI / VSIX / 便携包已公开 | [使用指南](docs/user-guide.md)、[开发设计](docs/development-design.md)、[贡献说明](CONTRIBUTING.md)、[v0.1.1 发行版](docs/releases/0.1.1.md) |
 | 兼容建议：HarmonyOS 与 OpenHarmony，并说明差异 | HDC、UITest、aa 公共接口已对照；独立 OpenHarmony 真机尚未验证 | [平台兼容范围](docs/platform-compatibility.md)：文本命令版本、布局、权限、应用安装与 Huawei 录屏后端分别说明；不以共用底座替代设备测试 |
