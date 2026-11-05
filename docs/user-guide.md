@@ -21,7 +21,9 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 
 ## 安装方式和前置条件
 
-当前仓库的交付方式是**固定 Maestro 上游版本、应用适配补丁，再在本机构建**。下面不依赖公共 Release 下载包或扩展商店安装项；VSIX 也从仓库源码构建。仅安装普通 Maestro 分发包不能替代本项目的适配版本。
+首次使用可下载已发布的 **CLI、VSIX 或便携包**，按 [v0.1.1 安装说明](releases/0.1.1.md)校验文件并配置工具。便携包包含源码、脚本和 CLI，从包内 `source` 运行脚本时用 `-CliDir ../cli` 指定随包分发。
+
+需要开发或自行构建时，按下文获取固定 Maestro 上游版本、应用适配补丁，再构建 CLI 与 VSIX。下文构建步骤及默认 CLI 路径按源码工作区编写。仅安装普通 Maestro 分发包不能替代本项目的适配版本。
 
 | 项目 | 要求 |
 | --- | --- |
@@ -38,7 +40,7 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 
 应用的 bundle 名称通常从 `AppScope/app.json5` 获取，入口 Ability 和 module 从应用的 `module.json5` 核对。以下示例中的 `org.example.demo`、`EntryAbility`、`entry`、页面文字及工具路径都需要换成自己的值。仓库不附带这个示例包名的可安装应用。
 
-还没有测试应用时，可以按 [HMOS 代码工坊说明](../examples/hmos-code-lab/README.md)获取固定版本的官方工程，用 DevEco 构建、为自己的设备签名并安装。该样例需要 API 24 SDK，兼容 API 23 及以上设备；本仓附带前台常亮补丁和三条待真机验证的单页 Flow。已有 ComponentCollection 应用时，可直接使用[对应场景](../examples/component-collection/README.md)。两组应用的包名、页面和控件不同，不能混用 Flow。
+还没有测试应用时，可以按 [HMOS 代码工坊说明](../examples/hmos-code-lab/README.md)获取固定版本的官方工程，用 DevEco 构建、为自己的设备签名并安装。该样例需要 API 24 SDK，兼容 API 23 及以上设备；本仓附带前台常亮补丁、单页 Flow 和串联输入、按钮、弹窗及导航的[完整套件](../examples/hmos-code-lab/flows/suite/README.md)，已测范围见[手机记录](progress/2026-11-05-hdc-cleanup.md)与[平板记录](progress/2026-11-05-tablet.md)。已有 ComponentCollection 应用时，可直接使用[对应场景](../examples/component-collection/README.md)。两组应用的包名、页面和控件不同，不能混用 Flow。
 
 ## 从源码构建 CLI
 
@@ -284,7 +286,7 @@ CI 分别报告原生 `execution`、设备 `released` 和 `quality.status`。质
 
 ## 当前支持范围
 
-“已实现”说明当前代码有这条执行路径；“单台实测”只覆盖已记录的场景。现有验证包含本地测试应用和 ComponentCollection 开发场景，第二台 API 26 平板也已有前台单页记录；不能外推为所有鸿蒙/OpenHarmony 设备均兼容。跨 API、官方示例最终来源核对和正式 20 轮统计尚未完成，详见[测试范围](acceptance.md)。
+“已实现”说明当前代码有这条执行路径；“单台实测”只覆盖已记录的场景。固定版本 HMOS 完整套件在同一手机上 20/20 轮首次通过。HarmonyOS 7.0.0 平板另有完整单轮通过；其重复批次为 5 轮通过、1 轮清理未知、14 轮未执行，已经停止。两台设备分别记录，不能外推为所有设备均兼容。跨 API 和独立 OpenHarmony 真机仍未验证，详见[平台范围](platform-compatibility.md)与[测试记录](acceptance.md)。
 
 | 功能或命令 | 当前实现与验证情况 | 使用限制 |
 | --- | --- | --- |
