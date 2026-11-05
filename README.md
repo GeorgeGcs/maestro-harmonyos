@@ -6,10 +6,12 @@
 
 **让 Agent 调用测试：[鸿测 Agent 开源仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。** 鸿测基于本项目提供 MCP、CLI 和 HTTP 接口，负责提交回归任务、查询执行状态和交付 HTML 报告。接入方式见下方 [Agent 接入](#agent-接入)。
 
+**下载 v0.1.1：** [便携包（含 CLI、脚本和示例）](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/download/v0.1.1/maestro-agent-2d5bfaeb.zip) · [独立 CLI](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/download/v0.1.1/maestro-harmonyos-cli-2d5bfaeb.zip) · [VSCode 插件](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/download/v0.1.1/maestro-harmonyos-recorder-0.1.1-2d5bfaeb.vsix) · [SHA-256 校验值](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/download/v0.1.1/SHA256SUMS)。安装方法见[交付说明](docs/releases/0.1.1.md)。
+
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 10:06，北京时间，按完整场景套件的交付准备度估算）。
+- **当前进度：** 约 90%（更新于 2026 年 11 月 5 日 10:40，北京时间，按完整场景套件的交付准备度估算）。
 
 Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。当前版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。
 
@@ -25,7 +27,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 旧版 20 轮的四次失败均发生在顶部标题栏覆盖的按钮入口，20 轮清理均完成，执行期间无人工操作、重装或重启。当前修复针对示例页面，不提供通用遮挡检测；原始结果分别保留，详见[导航修复记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
-长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)，完整套件 20 轮结果及 HDC 日志结论见[本轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。当前源码的 CLI、VSIX 和便携包已重新构建、核验并生成校验值，见 [v0.1.1 交付说明](docs/releases/0.1.1.md)；GitCode 发行版附件待上传。后续重点是接入实际 CI 平台，配置可连接真机的 Windows runner，完成任务执行、取消收尾和报告归档联调。20 轮批次录屏关闭，不将它记为录屏重复验证。
+长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)，完整套件 20 轮结果及 HDC 日志结论见[本轮记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。当前源码的 CLI、VSIX 和便携包已重新构建、核验并发布到 [GitCode 发行版](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)，版本与校验值见 [v0.1.1 交付说明](docs/releases/0.1.1.md)。后续重点是接入实际 CI 平台，配置可连接真机的 Windows runner，完成任务执行、取消收尾和报告归档联调。20 轮批次录屏关闭，不将它记为录屏重复验证。
 
 ## 背景与用途
 
@@ -60,7 +62,7 @@ node examples/hmos-code-lab/prepare.mjs
 
 先按[使用指南](docs/user-guide.md)准备 JDK 17、Node.js 22.12+ 和 HDC。[v0.1.1 交付说明](docs/releases/0.1.1.md)列出 CLI、VSIX、便携包及校验方法；也可从固定上游和本仓补丁构建 CLI。普通 Maestro 安装包不能替代这个适配版本，插件不包含 Java、HDC 或 CLI。资源下载和缓存配置见[构建说明](docs/build-reproducibility.md)。
 
-使用便携包时，在解压后的 `source` 目录执行下列脚本，并加上 `-CliDir ../cli`，无需重新编译 CLI。源码检出并构建的用户使用脚本默认路径即可。当前发行版附件尚待上传，文件可用状态见交付说明。
+使用便携包时，在解压后的 `source` 目录执行下列脚本，并加上 `-CliDir ../cli`，无需重新编译 CLI。源码检出并构建的用户使用脚本默认路径即可。
 
 以 [ComponentCollection 前台按钮用例](examples/component-collection/foreground/01-buttons.yaml)为例：应用已构建、签名并安装后，手动进入 **Button 按钮**页，保持应用前台、设备解锁，且胶囊按钮尚未点击。Flow 通过控件 ID 点击，并检查点击后的 ID：
 
