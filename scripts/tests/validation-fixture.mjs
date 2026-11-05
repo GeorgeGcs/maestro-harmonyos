@@ -165,11 +165,13 @@ export async function writeMatrixFixture(input) {
   for (let round = 1; round <= plan.repeat; round++) {
     const mode = modes[round - 1] ?? 'pass', attemptId = randomUUID(), base = path.join(agentRoot, 'runs', runId, attemptId);
     const resultPath = path.join(base, 'result.json'), controlRecordPath = path.join(path.dirname(controlIndexPath), attemptId + '.json');
-    const status = mode === 'fail' ? 'failed' : mode === 'cancel' ? 'cancelled' : mode === 'not-run' ? 'not-run' : 'passed';
+    const status = ['unknown-clean', 'unknown-execution-cleanup'].includes(mode) ? 'unknown' :
+      mode === 'fail' ? 'failed' : mode === 'cancel' ? 'cancelled' : mode === 'not-run' ? 'not-run' : 'passed';
     const stamp = new Date().toISOString();
     const run = { deviceKey: 'device-01', round, status, startedAt: mode === 'not-run' ? null : stamp, finishedAt: stamp,
       cliExitCode: status === 'passed' ? 0 : status === 'not-run' ? null : 1, reason: null, manualIntervention: 'unknown',
-      runId, attemptId, deviceId: batch.deviceId, runResultPath: resultPath, cleanup: { state: mode === 'unknown-cleanup' ? 'unknown' : 'complete', errors: [] } };
+      runId, attemptId, deviceId: batch.deviceId, runResultPath: resultPath,
+      cleanup: { state: ['unknown-cleanup', 'unknown-execution-cleanup'].includes(mode) ? 'unknown' : 'complete', errors: [] } };
     runs.push(run); controls.push({ deviceId: batch.deviceId, runId, attemptId, attemptNo: round, controlRecordPath, dispatchState: mode === 'not-run' ? 'planned' : 'returned' });
     if (mode === 'not-run') continue;
     await fs.mkdir(base, { recursive: true });

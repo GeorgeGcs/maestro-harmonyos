@@ -170,7 +170,8 @@ export async function verifyState(input) {
   if (control.protocol !== 'maestro.harmonyos.runner-control' || control.schemaVersion !== 1 || control.runId !== input.runId ||
       control.attemptId !== input.attemptId || control.deviceId !== input.deviceId || control.phase !== 'exited' ||
       control.processExitObserved !== true || !Number.isInteger(control.processExitCode) || control.terminationRequested !== false ||
-      !['passed', 'failed', 'blocked', 'cancelled'].includes(control.agentStatus) || control.wrapperExitCode !== control.processExitCode ||
+      !['passed', 'failed', 'blocked', 'cancelled', 'unknown'].includes(control.agentStatus) || control.wrapperExitCode !== control.processExitCode ||
+      (control.agentStatus === 'unknown' && control.processExitCode === 0) ||
       control.stopReason !== null || control.error !== null || control.stdoutComplete !== true || control.stderrComplete !== true) {
     throw new Error('Runner completion or output collection is unconfirmed.');
   }
@@ -187,6 +188,8 @@ export async function verifyState(input) {
   const { value: evidence } = await checkedFile(evidenceFile);
   const verification = await verifyEvidence(result, evidence, input.agentRoot);
   if (['passed', 'failed'].includes(data.status) && !data.artifacts.junitPath) throw new Error('The native JUnit report is missing.');
+  // An unknown execution can finish resource cleanup. Preserve its status and
+  // nonzero exit; release still requires the complete result, receipt and evidence above.
   return { mode: 'completion', releaseConfirmed: true, ...gate, status: data.status, processExitCode: control.processExitCode,
     resultPath: expected, resultSha256, controlSha256, evidence: verification };
 }

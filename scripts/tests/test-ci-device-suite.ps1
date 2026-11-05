@@ -140,7 +140,7 @@ $value = @{ deviceId=$DeviceId; artifacts=$Artifacts; agentRoot=$AgentRoot; runI
 & node (Join-Path $env:CI_FIXTURE_ROOT 'fixture.mjs') $inputFile
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($env:CI_FIXTURE_MODE -eq 'hard-stop') { [Environment]::Exit(86) }
-if ($env:CI_FIXTURE_MODE -eq 'failed') { exit 7 }
+if ($env:CI_FIXTURE_MODE -in @('failed', 'unknown-clean')) { exit 7 }
 exit 0
 '@
     Write-TestFile (Join-Path $fixture 'scripts/run-harmonyos.ps1') $fakeRunner
@@ -207,7 +207,7 @@ const registeredInput={kind:'flow',deviceId:input.deviceId,request:{sources:[{pa
 // Quality fixtures are constructed before hashing every dependent native document.
 if(input.mode==='quality-profile') registeredInput.request.configuration.ability='DifferentAbility';
 await write(path.join(base,'input.json'),registeredInput);
-const status=input.mode==='failed'?'failed':'passed';
+const status=input.mode==='unknown-clean'?'unknown':input.mode==='failed'?'failed':'passed';
 const xmlEscape=value=>String(value).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const caseName=input.mode==='quality-name'?'unexpected-fixture':'fixture';
 const nativeFailure=status==='failed'?'<failure>fixture assertion failed</failure>':'';
@@ -265,6 +265,14 @@ if(input.mode==='video-decoder-change') await fs.appendFile(path.join(root,'fixt
     $failure = Invoke-Fixture 'failed'
     Assert-Test ($failure.ExitCode -ne 0 -and $failure.State.state -eq 'released' -and $failure.State.execution -eq 'failed' -and $failure.State.wrapperExitCode -eq 7) 'An assertion failure was converted to success or lost its exit.'
     Assert-Test ($failure.State.quality.status -eq 'passed') ('The matching native ERROR testcase was rejected: ' + $failure.Output)
+    $passed++
+    $unknownClean = Invoke-Fixture 'unknown-clean' 'fixture-unknown-clean'
+    Assert-Test ($unknownClean.ExitCode -ne 0 -and $unknownClean.State.state -eq 'released' -and
+        $unknownClean.State.execution -eq 'unknown' -and $unknownClean.State.wrapperExitCode -eq 7 -and
+        $unknownClean.State.resolution.releaseConfirmed -eq $true -and $unknownClean.State.resolution.processExitCode -eq 7) ('Unknown execution lost its confirmed cleanup or became passed: ' + $unknownClean.Output)
+    $unknownResult = Get-Content -LiteralPath $unknownClean.State.resolution.resultPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Test ($unknownResult.data.status -eq 'unknown' -and $unknownResult.data.cleanup.state -eq 'complete' -and
+        (Get-FileHash -LiteralPath $unknownClean.State.resolution.resultPath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $unknownClean.State.resolution.resultSha256) 'CI changed the unknown execution result.'
     $passed++
     foreach ($mode in @('quality-empty', 'quality-name', 'quality-profile', 'quality-java')) {
         $quality = Invoke-Fixture $mode ('fixture-' + $mode)

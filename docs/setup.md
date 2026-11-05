@@ -2,7 +2,7 @@
 
 第一次使用先看[使用指南](user-guide.md)。本文保留环境、命令参数和功能限制的参考信息；内部实现见[开发设计](development-design.md)。
 
-已接入 `HarmonyOSDriver` 和 CLI 会话，使用上游的标准 YAML 解析与执行流程。API 26 手机已通过中文输入、截图、VSCode 8 步录制回放及 HMOS 完整场景单轮；同 API 平板另有单页验证。完整套件导航修复版 20 轮为 16/20，顶部修复版的新 20 轮暂缓；具体范围见[测试记录](acceptance.md)，不据此声明其他系统版本兼容。
+已接入 `HarmonyOSDriver` 和 CLI 会话，使用上游的标准 YAML 解析与执行流程。API 26 手机已通过中文输入、截图、VSCode 8 步录制回放；同 API 平板另有单页验证。11 月 5 日，新增 HDC 诊断和最终清理核验修复后的 HMOS 完整套件固定版本 20/20 轮首次通过，清理全部完成，见[本轮记录](progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)。旧版 16/20 以及随后 3 轮通过、1 轮未知的批次独立保留。具体覆盖范围见[测试记录](acceptance.md)，不据此声明其他系统版本兼容。
 
 ## 环境与源码
 
@@ -102,6 +102,19 @@ if ($LASTEXITCODE -ne 0) { throw '输入流程未通过，请查看运行报告�
 
 截图及报告写入 `--test-output-dir` 指定目录内的时间戳/Flow 子目录，通过其中的 `manifest.json` 查看文件位置，不写在 YAML 旁。manifest 的截图条目指向截图集合目录；具体 PNG 位于 `takeScreenshot/`。运行产物位于被 Git 忽略的 `artifacts/` 中，分享前检查截图和日志是否含个人信息。
 
+### 定位 HDC 超时
+
+运行日志中的 `MAESTRO_HDC_CALL` 后面是一条 JSON 阶段记录。同一次调用共享 `callId`，可按 `sequence` 排序；已登记的设备操作还带有 `operationId` 和 `hostCallId`，用于关联会话资源日志。日志记录命令类别、预算、阶段耗时、退出码、输出字节数及失败阶段，不记录命令参数、输出正文或设备标识。
+
+```powershell
+Get-ChildItem ./artifacts -Recurse -Filter '*.log' |
+  Select-String 'MAESTRO_HDC_CALL'
+```
+
+先查看 `FINISH` 记录的 `category`、`failurePhase` 和 `failureKind`。`DUMP_LAYOUT` 表示读取控件树，`FILE_RECEIVE` 表示接收文件；`WAIT_EXIT` 表示等待进程结束，`DRAIN_STDOUT` / `DRAIN_STDERR` 表示收取输出。同一调用的 `budgetMs` 是总调用预算，`processBudgetMs` 是进入进程执行时剩余的预算。每次调用最多输出 32 条阶段记录和一条终态，不记录轮询细节；这类记录保留在文件中，不因 `--verbose` 混入命令的 JSON 输出。
+
+阶段日志用于判断时间消耗在哪里，不能作为设备操作完成或清理成功的凭据。即使主进程退出码为 0，输出管道仍可能超时；`TERMINATE` 返回也不证明设备端命令已经结束。设备释放仍按[CI 收尾核验](ci.md#两层设备状态)检查会话清理回执。
+
 [smoke.yaml](../examples/flows/smoke.yaml) 保留了按控件 ID 点击的示例，需要 `APP_ID`、`START_TEXT`、`BUTTON_ID`、`RESULT_TEXT` 四个参数。选择测试页面上的本地操作按钮，确认点击后的页面含 `RESULT_TEXT`。
 
 [scroll-input.yaml](../examples/flows/scroll-input.yaml) 在输入前增加向上滑动，再按提示重新定位输入框。目标页面应可以滚动，且滚动后仍能找到该输入框。
@@ -173,7 +186,7 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 
 `back` 是设备返回键，不能保证在所有应用中都等同于关闭键盘。UITest 的文本输入、布局可见范围和滑动行为可能因系统版本或控件而不同；滑动时长通过速度近似换算。主机模拟测试不能证明这些行为在手机上可用。
 
-按[测试计划与验证记录](acceptance.md)分别记录插件录制回放、视频录屏和设备兼容结果。早期插件 0.1.0 已在 VSCode 1.140 和 API 26 手机完成 8 步录制、保存及一键回放；本轮 `728859cb` 交付版又通过真实 VSCode 的断言、截图两步保存与回放检查，插件的第二台设备验证仍待补。HMOS 完整套件稳定性未达标，新 20 轮暂缓，历史视频尾部解码问题仍待定位。
+按[测试计划与验证记录](acceptance.md)分别记录插件录制回放、视频录屏和设备兼容结果。早期插件 0.1.0 已在 VSCode 1.140 和 API 26 手机完成 8 步录制、保存及一键回放；此前 `728859cb` 交付版又通过真实 VSCode 的断言、截图两步保存与回放检查，插件的第二台设备验证仍待补。HMOS 完整套件已完成固定版本 20/20 轮首次通过；本批录屏关闭，历史视频尾部解码问题仍待定位。
 
 ## 资料
 

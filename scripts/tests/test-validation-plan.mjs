@@ -527,6 +527,53 @@ test('unconfirmed cleanup retains raw success and blocks subsequent dispatch', a
   await assert.rejects(execute(context, [], 1), /stopped earlier batch/);
 });
 
+test('unknown execution with checked complete cleanup releases ownership but stops later rounds and units', async t => {
+  const context = await setup(t, { repeat: 2, units: 2 });
+  const result = await execute(context, ['unknown-clean', 'not-run']);
+  assert.equal(result.imported.releaseConfirmed, true, result.imported.error);
+  assert.equal(result.imported.release.status, 'unknown');
+  assert.equal(result.imported.release.processExitCode, 1);
+  assert.equal(result.imported.matrixExitCode, 1);
+  assert.equal(result.imported.stopDevice, true);
+  assert.equal(result.state.slots[0].status, 'unknown');
+  assert.equal(result.state.slots[0].cleanup.state, 'complete');
+  assert.equal(result.state.slots[0].finalPass, false);
+  assert.equal(result.state.slots[1].status, 'not-run');
+  assert.equal(result.state.groups[0].firstPassCount, 0);
+  assert.equal(result.state.groups[0].finalPassCount, 0);
+  await assert.rejects(execute(context, [], 1), /stopped earlier batch/);
+  const finished = await finishPlan({ summaryPath: context.summaryPath, interrupted: false });
+  const state = (await readJson(context.summaryPath)).value;
+  assert.equal(finished.originalExecutionSucceeded, false);
+  assert.equal(state.batches[0].releaseConfirmed, true);
+  assert.equal(state.groups[1].notRun, 2);
+  assert.equal(state.qualified, false);
+});
+
+for (const mode of ['unknown-execution-cleanup', 'missing-receipt', 'zero-exit']) {
+  test(`unknown execution cannot release ownership with ${mode}`, async t => {
+    const context = await setup(t, { repeat: 2, units: 2 });
+    const result = await execute(context, [mode === 'unknown-execution-cleanup' ? mode : 'unknown-clean', 'not-run'], 0,
+      async (generated, files) => {
+        if (mode === 'missing-receipt') {
+          const gatePath = path.join(context.root, 'recovery', hash(Buffer.from(context.batches[0].deviceId)) + '.owner.json');
+          await fs.unlink((await readJson(gatePath)).value.reportPath);
+        } else if (mode === 'zero-exit') {
+          generated.matrix.runs[0].cliExitCode = 0;
+          await json(path.join(generated.matrixRoot, 'matrix.json'), generated.matrix);
+          const index = (await readJson(files.controlIndexPath)).value;
+          const controlPath = index.entries[0].controlRecordPath, control = (await readJson(controlPath)).value;
+          control.processExitCode = 0; control.wrapperExitCode = 0; await json(controlPath, control);
+        }
+      });
+    assert.equal(result.imported.releaseConfirmed, false);
+    assert.equal(result.imported.stopDevice, true);
+    assert.equal(result.state.slots[0].status, 'unknown');
+    assert.equal(result.state.slots[0].finalPass, false);
+    await assert.rejects(execute(context, [], 1), /stopped earlier batch/);
+  });
+}
+
 test('changed core evidence invalidates success and clean handoff', async t => {
   const context = await setup(t, { repeat: 1 });
   const result = await execute(context, [], 0, async generated => {

@@ -197,6 +197,8 @@ CI 入口返回 0 要同时满足：CLI 和 runner 正常退出 0、执行结果
 | `state: released` | 本次设备资源的释放已确认，可以结束该占用 |
 | `quality.status` | 固定输入、构建引用、原生 JUnit 场景记录及已启用的视频要求是否满足 |
 
+`execution: unknown` 仍保留非零退出，验证计划继续停止该设备的后续轮次和单元；若进程正常结束、输出收集完整、该次结果的 `cleanup=complete` 且错误为空，再经严格的 clean gate、清理回执与证据摘要核验，可以单独确认 `state: released`。资源释放不把未知执行改为通过；清理未知、进程终态未确认或凭据不完整时仍保留占用。
+
 例如预期场景全部出现，JUnit 如实记录断言失败，质量检查可以 passed，但 execution 仍是 failed，CI 返回非零。反过来，原生 passed 也不能覆盖缺失场景或构建文件变化。
 
 JUnit 检查按源文件路径和名称核对每个顶层场景，拒绝空报告、缺项、重复、额外场景和计数矛盾。相对的 `testcase.file` 按本次 runner 的项目根目录解析，原生 `SUCCESS`/`ERROR` 必须与 `<failure>` 和总失败数一致。读取器禁用 DTD 和外部实体，限制文件大小、深度和条目数，并复核原件哈希。

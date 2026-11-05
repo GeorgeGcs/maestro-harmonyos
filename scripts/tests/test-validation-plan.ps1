@@ -66,7 +66,7 @@ param($FlowPath, $BundleId, $AbilityName, $Module, $DeviceIds, $Env, $Artifacts,
 $ErrorActionPreference = 'Stop'
 [IO.File]::AppendAllText((Join-Path $env:VALIDATION_FIXTURE_ROOT 'calls.txt'), "called`n")
 if ($env:VALIDATION_FIXTURE_MODE -eq 'hard-stop') { [Environment]::Exit(87) }
-$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'operator-stop' { @('pass', 'not-run') } 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } 'unconfirmed' { @('unknown-cleanup', 'not-run') } default { @('pass', 'pass') } }
+$modes = switch ($env:VALIDATION_FIXTURE_MODE) { 'operator-stop' { @('pass', 'not-run') } 'cancel' { @('cancel', 'not-run') } 'fail' { @('fail', 'pass') } 'unknown-clean' { @('unknown-clean', 'not-run') } 'unconfirmed' { @('unknown-cleanup', 'not-run') } default { @('pass', 'pass') } }
 $request = Join-Path $Artifacts 'fixture-request.json'
 $value = @{ artifacts=$Artifacts; flowPath=$FlowPath; repeat=[int]$Repeat; deviceId=$DeviceIds[0]; pointerPath=$ReportPointerPath;
     controlDirectory=$ControlRecordDirectory; invocationId=$MatrixInvocationId; recoveryRoot=$env:VALIDATION_FIXTURE_RECOVERY; modes=@($modes) }
@@ -105,6 +105,14 @@ exit $LASTEXITCODE
     Assert-Test ($result.summary.groups[0].cancelled -eq 1 -and $result.summary.groups[1].notRun -eq 2) 'Cancelled and unexecuted slots must remain in the denominator.'
     Assert-Test ($result.reservation.execution -eq 'unknown') 'A stopped device must not become an ordinary failed execution merely because matrix returned exit 1.'
     $passed++; Write-Output 'PASS cancellation stops subsequent unit without reducing denominator'
+
+    $result = Invoke-Case 'unknown-clean' 'unknown-clean'
+    Assert-Test ($result.calls -eq 1 -and $result.code -eq 1 -and $result.reservation.state -eq 'released' -and
+        $result.reservation.execution -eq 'unknown' -and $result.reservation.wrapperExitCode -eq 1) ('Unknown execution with checked cleanup lost its release or failure: ' + $result.output)
+    Assert-Test ($result.summary.groups[0].firstPassCount -eq 0 -and $result.summary.groups[0].finalPassCount -eq 0 -and
+        $result.summary.groups[0].unknown -eq 1 -and $result.summary.groups[0].notRun -eq 1 -and $result.summary.groups[1].notRun -eq 2 -and
+        $result.summary.batches[0].releaseConfirmed -eq $true -and $result.summary.batches[0].stopDevice -eq $true -and -not $result.summary.qualified) 'Released unknown execution continued dispatch, reduced its denominator or counted as passed.'
+    $passed++; Write-Output 'PASS unknown execution releases checked resources while later slots remain unexecuted'
 
     $result = Invoke-Case 'failure' 'fail'
     Assert-Test ($result.calls -eq 2 -and $result.reservation.state -eq 'released') ('Clean ordinary failure should permit subsequent units: ' + $result.output)

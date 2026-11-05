@@ -396,7 +396,7 @@ index 15c5b42..b80acec 100644
  
      override fun call(): Int {
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
-index 064ff51..fbec2ba 100644
+index 064ff51..40cf533 100644
 --- a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 @@ -47,6 +47,8 @@ import maestro.cli.runner.TestSuiteInteractor
@@ -600,7 +600,7 @@ index 064ff51..fbec2ba 100644
  
          val missingDevices = requestedShards - deviceIds.size
          if (missingDevices > 0) {
-@@ -468,8 +552,9 @@ class TestCommand : Callable<Int> {
+@@ -468,12 +552,14 @@ class TestCommand : Callable<Int> {
          chunkPlans: List<ExecutionPlan>,
          debugOutputPath: Path,
      ): Triple<Int?, Int?, TestExecutionSummary?> {
@@ -611,7 +611,21 @@ index 064ff51..fbec2ba 100644
          val executionPlan = chunkPlans[shardIndex]
  
          logger.info("[shard ${shardIndex + 1}] Selected device $deviceId using port $driverHostPort with execution plan $executionPlan")
-@@ -573,6 +658,7 @@ class TestCommand : Callable<Int> {
+ 
++        val agentSession = harmonyOsAgentReport?.sessionStarted(deviceId)
+         return MaestroSessionManager.newSession(
+             host = parent?.host,
+             port = parent?.port,
+@@ -528,6 +614,8 @@ class TestCommand : Callable<Int> {
+                     runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
+                 }
+             }
++        }.also {
++            agentSession?.let { harmonyOsAgentReport?.sessionClosedNormally(it) }
+         }
+     }
+ 
+@@ -573,6 +661,7 @@ class TestCommand : Callable<Int> {
              analyze = analyze,
              apiKey = authToken,
              deviceId = deviceId,
@@ -619,7 +633,7 @@ index 064ff51..fbec2ba 100644
          )
          val duration = System.currentTimeMillis() - startTime
  
-@@ -620,6 +706,7 @@ class TestCommand : Callable<Int> {
+@@ -620,6 +709,7 @@ class TestCommand : Callable<Int> {
              reporter = ReporterFactory.buildReporter(format, testSuiteName),
              captureSteps = format == ReportFormat.HTML_DETAILED,
              captureFullArtifacts = analyze,
@@ -663,10 +677,10 @@ index f2f7bae..a13e0e6 100644
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
 new file mode 100644
-index 0000000..3f4e810
+index 0000000..391f285
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,423 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -821,6 +835,7 @@ index 0000000..3f4e810
 +    @Volatile var cancellationRequestedAtMillis: Long? = null
 +        private set
 +    private var cancellationHandler: (() -> Unit)? = null
++    private var sessionCleanupConfirmed = false
 +
 +    @Synchronized fun result(): Map<String, Any?> = snapshot(HarmonyOsAgentProtocol.document("runResult", revision, data))
 +    @Synchronized fun evidence(): Map<String, Any?> = snapshot(HarmonyOsAgentProtocol.document("evidenceIndex", revision,
@@ -863,6 +878,7 @@ index 0000000..3f4e810
 +        data["status"] = "running"
 +        if (data["startedAt"] == null) data["startedAt"] = Instant.now().toString()
 +        data["cleanup"] = mapOf("state" to "in_progress", "errors" to emptyList<Any>())
++        sessionCleanupConfirmed = false
 +        persist()
 +    }
 +
@@ -879,7 +895,14 @@ index 0000000..3f4e810
 +        require(state in setOf("not_started", "in_progress", "complete", "failed", "unknown"))
 +        require((state != "complete" || errors.isEmpty()) && (state != "failed" || errors.isNotEmpty()))
 +        data["cleanup"] = mapOf("state" to state, "errors" to errors.map { it.toMap() })
++        sessionCleanupConfirmed = false
 +        persist()
++    }
++
++    /** Only the CLI's normal session-return boundary can confirm final resource cleanup. */
++    @Synchronized internal fun confirmSessionCleanup() {
++        setCleanup("complete")
++        sessionCleanupConfirmed = true
 +    }
 +
 +    @Synchronized fun startStep(flow: String?, index: Int, name: String, mutating: Boolean): String {
@@ -943,11 +966,16 @@ index 0000000..3f4e810
 +
 +    @Synchronized fun finishFailure(error: Throwable) {
 +        if (isTerminal) return
-+        val classified = HarmonyOsAgentProtocol.error(error)
++        var classified = HarmonyOsAgentProtocol.error(error)
 +        if (error.suppressed.isNotEmpty()) {
 +            val additional = error.suppressed.map { HarmonyOsAgentProtocol.error(it) }
 +            val cleanup = data["cleanup"] as Map<*, *>
-+            if (cleanup["state"] == "unknown") {
++            if (sessionCleanupConfirmed) {
++                // These errors preceded confirmed session teardown. Keep them diagnostic,
++                // without replacing its final cleanup outcome or the execution failure.
++                classified = classified.copy(details = classified.details.orEmpty() +
++                    ("suppressedErrors" to additional.map { it.toMap() }))
++            } else if (cleanup["state"] == "unknown") {
 +                val existing = (cleanup["errors"] as List<*>).filterIsInstance<Map<*, *>>()
 +                data["cleanup"] = mapOf("state" to "unknown",
 +                    "errors" to (existing + additional.map { it.toMap() }).distinct())
@@ -982,7 +1010,7 @@ index 0000000..3f4e810
 +            if (evidence.isEmpty()) evidence += mapOf("kind" to "log", "state" to "missing", "path" to null,
 +                "sha256" to null, "capturedAt" to null, "phase" to "failure", "error" to null)
 +        }
-+        if (error.kind in setOf("cancelled", "timeout", "transport") && data["startedAt"] != null) {
++        if (!sessionCleanupConfirmed && error.kind in setOf("cancelled", "timeout", "transport") && data["startedAt"] != null) {
 +            val cleanup = data["cleanup"] as Map<*, *>
 +            if (cleanup["state"] !in setOf("failed", "unknown")) {
 +                data["cleanup"] = mapOf("state" to "unknown", "errors" to emptyList<Any>())
@@ -2283,10 +2311,10 @@ index 0000000..3ec5fe1
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..e10a746
+index 0000000..5462705
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,420 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -2325,6 +2353,8 @@ index 0000000..e10a746
 +    private var failedFlows = 0
 +    private var observedFlows = 0
 +    private var abortedFlows = 0
++    private var activeSession: UUID? = null
++    private var closedSession: UUID? = null
 +    private val shutdownHook = Thread({
 +        synchronized(this) {
 +            if (!completed) {
@@ -2340,6 +2370,19 @@ index 0000000..e10a746
 +
 +    fun selectedDevice(deviceId: String) = attempt.setDeviceId(deviceId)
 +
++    @Synchronized internal fun sessionStarted(deviceId: String): UUID {
++        check(!completed) { "The CLI report is already complete." }
++        selectedDevice(deviceId)
++        closedSession = null
++        return UUID.randomUUID().also { activeSession = it }
++    }
++
++    /** Called only after newSession returns, including durable HarmonyOS lease teardown. */
++    @Synchronized internal fun sessionClosedNormally(session: UUID) {
++        check(!completed && activeSession == session) { "The session does not belong to the current CLI execution." }
++        closedSession = session
++    }
++
 +    fun flow(flowFile: File, artifactsDir: Path, commands: List<MaestroCommand> = emptyList()): FlowObserver = FlowObserver(flowFile, artifactsDir, commands)
 +
 +    fun failed(error: Throwable) { failure = error }
@@ -2347,10 +2390,15 @@ index 0000000..e10a746
 +    @Synchronized
 +    fun finish(success: Boolean, error: Throwable? = null) {
 +        if (completed) return
-+        // Returning from newSession confirms normal teardown. An exception does not.
-+        val recoveryError = recoveryError(error)
-+        attempt.setCleanup(if (error == null) "complete" else "unknown",
-+            (error?.let { listOf(HarmonyOsAgentProtocol.error(it)) }.orEmpty() + listOfNotNull(recoveryError)).distinct())
++        // A normal return must belong to this report's latest session. A generic
++        // complete state or a previous session's return is not teardown evidence.
++        val recoveryError = recoveryError(error ?: failure)
++        if (error == null && recoveryError == null && activeSession != null && closedSession == activeSession) {
++            attempt.confirmSessionCleanup()
++        } else {
++            attempt.setCleanup(if (error == null && recoveryError == null && activeSession == null) "complete" else "unknown",
++                (error?.let { listOf(HarmonyOsAgentProtocol.error(it)) }.orEmpty() + listOfNotNull(recoveryError)).distinct())
++        }
 +        // Only a top-level recovery blocker delegates the execution outcome to
 +        // prior Flow observations. A final error with a suppressed blocker wins
 +        // over failures from earlier, successfully recovered retry attempts.
@@ -5755,10 +5803,10 @@ index cc05d69..714c609 100644
              )
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
 new file mode 100644
-index 0000000..5957468
+index 0000000..ba73922
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,346 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -6039,6 +6087,53 @@ index 0000000..5957468
 +            assertThat(result["error"]["code"].asText()).isEqualTo("ASSERTION_FAILED")
 +            assertThat(result["cleanup"]["state"].asText()).isEqualTo(if (suppressed) "failed" else "complete")
 +            assertThat(result["cleanup"]["errors"].size()).isEqualTo(if (suppressed) 1 else 0)
++        }
++    }
++
++    @Test fun `confirmed session cleanup preserves execution failure and earlier cleanup diagnostics`() {
++        for (kind in listOf("timeout", "transport", "assertion")) {
++            val attempt = register()
++            val step = attempt.startStep("flow.yaml", 0, "ScrollUntilVisibleCommand", true)
++            val failure = AgentProtocolException(AgentError(kind, "BODY_FAILURE", "original execution failure",
++                mapOf("fixtureDetail" to "retained")))
++            failure.addSuppressed(HdcTimeoutException(Duration.ofSeconds(2)))
++            attempt.finishStep(step, "failed", HarmonyOsAgentProtocol.error(failure))
++            attempt.confirmSessionCleanup()
++
++            attempt.finishFailure(failure)
++
++            val result = json(attempt.result())["data"]
++            assertThat(result["status"].asText()).isEqualTo(if (kind == "assertion") "failed" else "unknown")
++            assertThat(result["effects"].asText()).isEqualTo("possible")
++            assertThat(result["failedStepId"].asText()).isEqualTo(step)
++            assertThat(result["error"]["code"].asText()).isEqualTo("BODY_FAILURE")
++            assertThat(result["error"]["details"]["fixtureDetail"].asText()).isEqualTo("retained")
++            val diagnostic = result["error"]["details"]["suppressedErrors"].single()
++            assertThat(diagnostic["code"].asText()).isEqualTo("OPERATION_TIMEOUT")
++            assertThat(diagnostic["message"].asText()).contains("2000 ms")
++            assertThat(result["cleanup"]["state"].asText()).isEqualTo("complete")
++            assertThat(result["cleanup"]["errors"].size()).isEqualTo(0)
++            assertThat(mapper.readTree(attempt.directory.resolve("result.json").toFile())["data"]).isEqualTo(result)
++        }
++    }
++
++    @Test fun `generic cleanup complete cannot confirm teardown or retain an earlier confirmation`() {
++        for (previouslyConfirmed in listOf(false, true)) {
++            for (suppressed in listOf(false, true)) {
++                val attempt = register()
++                attempt.startStep("flow.yaml", 0, "ScrollUntilVisibleCommand", true)
++                if (previouslyConfirmed) attempt.confirmSessionCleanup()
++                attempt.setCleanup("complete")
++                val failure = HdcTimeoutException(Duration.ofSeconds(5))
++                if (suppressed) failure.addSuppressed(HdcTimeoutException(Duration.ofSeconds(2)))
++
++                attempt.finishFailure(failure)
++
++                val result = json(attempt.result())["data"]
++                assertThat(result["status"].asText()).isEqualTo("unknown")
++                assertThat(result["cleanup"]["state"].asText()).isEqualTo(if (suppressed) "failed" else "unknown")
++                assertThat(result["cleanup"]["errors"].size()).isEqualTo(if (suppressed) 1 else 0)
++            }
 +        }
 +    }
 +
@@ -7425,10 +7520,10 @@ index 0000000..8a71768
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
 new file mode 100644
-index 0000000..3cc31f8
+index 0000000..50a439f
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsCliAgentReportTest.kt
-@@ -0,0 +1,679 @@
+@@ -0,0 +1,771 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7447,6 +7542,7 @@ index 0000000..3cc31f8
 +import maestro.cli.session.HarmonyOsSessionSupport
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.hdc.HarmonyOSRecordingResourceJournal
 +import maestro.harmonyos.hdc.RecordingResourceFailure
 +import maestro.orchestra.ArtifactEntry
@@ -7476,6 +7572,7 @@ index 0000000..3cc31f8
 +import java.nio.file.Path
 +import java.io.IOException
 +import java.time.Instant
++import java.time.Duration
 +import java.util.UUID
 +import okio.Sink
 +
@@ -7661,6 +7758,96 @@ index 0000000..3cc31f8
 +        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
 +        assertThat(result["cleanup"]["errors"][0]["code"].asText()).isEqualTo("DEVICE_RECOVERY_REQUIRED")
 +        assertThat(result["cleanup"]["errors"][0]["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++    }
++
++    @Test
++    fun `normal session return keeps final cleanup complete after a handled timeout with early cleanup failure`() {
++        val (report, flow) = create()
++        val session = report.sessionStarted("fixture-device")
++        val observer = report.flow(flow.toFile(), Files.createDirectories(report.directory.resolve("flows/timeout")))
++        val command = MaestroCommand(backPressCommand = BackPressCommand())
++        val failure = HdcTimeoutException(Duration.ofMillis(4994))
++        failure.addSuppressed(IOException("early temporary layout cleanup failed", HdcTimeoutException(Duration.ofSeconds(2))))
++        observer.starting(command)
++        observer.onCommandStart(command, 0)
++        observer.onCommandFinished(command, CommandOutcome.Failed(failure), 1, 2)
++        observer.finished(Orchestra.FlowResult(false, FlowDebugOutput(), ArtifactManifest(emptyList())))
++
++        val locks = directory.resolve("clean-session-locks")
++        val noHdc = HdcClient("unused", HdcCommandRunner { _, _ -> error("No device command is expected") })
++        HarmonyOsSessionSupport.withDeviceLock("fixture-device", locks) {
++            val lease = HarmonyOsSessionLease.begin("fixture-device", UUID.randomUUID().toString(), locks)
++            lease.finish(null, noHdc)
++        }
++        // This is the same boundary as TestCommand's newSession(...).also callback.
++        report.sessionClosedNormally(session)
++        report.finish(false)
++
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isEqualTo("unknown")
++        assertThat(result["error"]["code"].asText()).isEqualTo("OPERATION_TIMEOUT")
++        assertThat(result["error"]["message"].asText()).contains("4994 ms")
++        assertThat(result["error"]["details"]["suppressedErrors"].single()["message"].asText()).contains("2000 ms")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("complete")
++        assertThat(result["cleanup"]["errors"].size()).isEqualTo(0)
++        val gate = mapper.readTree(locks.resolve("${HarmonyOsSessionSupport.lockName("fixture-device")}.owner.json").toFile())
++        assertThat(gate["state"].asText()).isEqualTo("clean")
++        val receipt = mapper.readTree(Path.of(gate["reportPath"].asText()).toFile())
++        assertThat(receipt["reason"].asText()).isEqualTo("session_close")
++        assertThat(receipt["state"].asText()).isEqualTo("complete")
++    }
++
++    @Test
++    fun `an earlier session cannot confirm cleanup for the latest unclosed session`() {
++        val (report, _) = create()
++        val earlier = report.sessionStarted("fixture-device")
++        report.sessionClosedNormally(earlier)
++        report.sessionStarted("fixture-device")
++        assertThrows<IllegalStateException> { report.sessionClosedNormally(earlier) }
++        report.failed(HdcTimeoutException(Duration.ofSeconds(5)))
++        report.finish(false)
++
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isNotEqualTo("passed")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++    }
++
++    @Test
++    fun `a nested recovery blocker cannot be hidden by a normal return notification`() {
++        val (report, _) = create()
++        val session = report.sessionStarted("fixture-device")
++        val owner = UUID.randomUUID().toString()
++        val failure = HdcTimeoutException(Duration.ofSeconds(5))
++        val cleanup = IOException("recording cleanup unconfirmed")
++        cleanup.addSuppressed(AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "recording remains unknown",
++            mapOf("recoverySessionId" to owner))))
++        failure.addSuppressed(cleanup)
++        report.failed(failure)
++        report.sessionClosedNormally(session)
++        report.finish(false)
++
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isNotEqualTo("passed")
++        assertThat(result["error"]["code"].asText()).isEqualTo("OPERATION_TIMEOUT")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        val blocker = result["cleanup"]["errors"].single { it["code"].asText() == "DEVICE_RECOVERY_REQUIRED" }
++        assertThat(blocker["details"]["recoverySessionId"].asText()).isEqualTo(owner)
++    }
++
++    @Test
++    fun `final close failure revokes a prior normal session notification`() {
++        val (report, _) = create()
++        val session = report.sessionStarted("fixture-device")
++        report.sessionClosedNormally(session)
++        val failure = IOException("final close failed")
++        failure.addSuppressed(AgentProtocolException(AgentError("environment", "DEVICE_RECOVERY_REQUIRED", "cleanup unconfirmed")))
++        report.finish(false, failure)
++
++        val result = mapper.readTree(report.directory.resolve("result.json").toFile())["data"]
++        assertThat(result["status"].asText()).isNotEqualTo("passed")
++        assertThat(result["error"]["message"].asText()).isEqualTo("final close failed")
++        assertThat(result["cleanup"]["state"].asText()).isEqualTo("unknown")
++        assertThat(result["cleanup"]["errors"].map { it["code"].asText() }).contains("DEVICE_RECOVERY_REQUIRED")
 +    }
 +
 +    @Test
@@ -8633,10 +8820,10 @@ index 0000000..002a0ab
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt
 new file mode 100644
-index 0000000..1f6e5e3
+index 0000000..cea0db4
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsRecoveryProcessFixture.kt
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,267 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -8838,7 +9025,21 @@ index 0000000..1f6e5e3
 +                }
 +                check(unquoted.contains("rmdir") && unquoted.contains(scratch.substringBefore("/files/")))
 +                calls += "journal-cleanup"
-+                if (unquoted.contains("'$scratch'")) scratchPresent = false
++                // Cleanup batches send the owned root and basenames separately. Model
++                // the actual guarded removal, rather than acknowledging an unremoved file.
++                val batches = Regex("__maestro_cleanup_root='([^']+)'; __maestro_cleanup_names='([^']+)';")
++                    .findAll(unquoted)
++                for (batch in batches) {
++                    check(batch.groupValues[1] == scratch.substringBeforeLast('/'))
++                    check(batch.groupValues[2].split(' ') == listOf(scratch.substringAfterLast('/')))
++                    check(unquoted.contains("__maestro_cleanup_file=\"\$__maestro_cleanup_root/\$__maestro_cleanup_name\"; " +
++                        "[ ! -L \"\$__maestro_cleanup_file\" ] && rm -f \"\$__maestro_cleanup_file\" && " +
++                        "[ ! -e \"\$__maestro_cleanup_file\" ] || exit 121; done; "))
++                    scratchPresent = false
++                }
++                if (unquoted.contains("rmdir '${scratch.substringBeforeLast('/')}'")) {
++                    check(!scratchPresent) { "The scratch directory cannot be removed while its file remains" }
++                }
 +                val nonce = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 +                    .findAll(script).last().value
 +                return HdcCommandResult(0, nonce, "")
@@ -10922,6 +11123,39 @@ index 0000000..e54096b
 +            "failureFingerprint" to "bad")))).isNull()
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt b/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
+index 5a191dd..c6199bf 100644
+--- a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
++++ b/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
+@@ -1,6 +1,7 @@
+ package maestro.debuglog
+ 
+ import org.apache.logging.log4j.core.appender.FileAppender
++import org.apache.logging.log4j.core.Filter
+ import org.apache.logging.log4j.core.config.Configurator
+ import org.apache.logging.log4j.core.config.builder.api.ConfigurationBuilder
+ import org.apache.logging.log4j.core.config.builder.api.ConfigurationBuilderFactory
+@@ -8,6 +9,9 @@ import org.apache.logging.log4j.core.config.builder.impl.BuiltConfiguration
+ 
+ object LogConfig {
+ 
++    // HDC diagnostics belong in file captures, including when a JSON command enables --verbose.
++    internal const val HDC_DIAGNOSTIC_MARKER = "MAESTRO_HDC_DIAGNOSTICS"
++
+     private const val DEFAULT_FILE_LOG_PATTERN = "%d{HH:mm:ss.SSS} [%5level] %logger.%method: %msg%n"
+     private const val DEFAULT_CONSOLE_LOG_PATTERN = "%highlight{[%5level]} %msg%n"
+ 
+@@ -51,6 +55,10 @@ object LogConfig {
+         val consoleLayout = builder.newLayout("PatternLayout")
+         consoleLayout.addAttribute("pattern", CONSOLE_LOG_PATTERN)
+         consoleAppender.add(consoleLayout)
++        consoleAppender.add(
++            builder.newFilter("MarkerFilter", Filter.Result.DENY, Filter.Result.NEUTRAL)
++                .addAttribute("marker", HDC_DIAGNOSTIC_MARKER)
++        )
+ 
+         builder.add(consoleAppender)
+ 
 diff --git a/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt b/maestro-client/src/main/java/maestro/debuglog/RecordingDiagnosticContext.kt
 new file mode 100644
 index 0000000..94193ae
@@ -12327,16 +12561,17 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..893d472
+index 0000000..df9d345
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,191 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
 +import maestro.ScreenRecording
 +import okio.Sink
 +import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandCategory
 +import maestro.harmonyos.hdc.HdcCommandException
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
@@ -12392,7 +12627,7 @@ index 0000000..893d472
 +            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
 +        var transportFailure: HdcCommandException? = null
 +        val result = try {
-+            hdc.shellFinite(deviceId, listOf("sh", "-c", script), timeout, HdcClient.finiteCommand(arguments))
++            hdc.shellFinite(deviceId, listOf("sh", "-c", script), timeout, HdcClient.finiteCommand(arguments), HdcCommandCategory.shell(arguments))
 +        } catch (error: HdcCommandException) {
 +            // HDC's text heuristic can identify a remote tool's [FAIL] output as a
 +            // transport error. Only this invocation's final status proves it ran.
@@ -13641,10 +13876,10 @@ index 0000000..c67676f
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..b7e00e7
+index 0000000..091a27a
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,579 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -13691,10 +13926,11 @@ index 0000000..b7e00e7
 +    private var activeCalls = 0
 +    private var closed = false
 +    private var persistenceUnconfirmed = false
-+    private class DispatchBoundary(val parent: DispatchBoundary?, var entered: Boolean = false)
++    private class DispatchBoundary(val parent: DispatchBoundary?, val operationId: String, var entered: Boolean = false)
 +    private class BeforeDispatchFailure(val boundary: DispatchBoundary, val original: Throwable) :
 +        RuntimeException(original.message, original)
 +    private val dispatchBoundary = ThreadLocal<DispatchBoundary>()
++    internal fun diagnosticOperationId(): String? = dispatchBoundary.get()?.operationId
 +    var recordings: HarmonyOSRecordingResourceJournal? = null
 +        private set
 +
@@ -13831,7 +14067,7 @@ index 0000000..b7e00e7
 +        }
 +        var error: HdcCommandException? = null
 +        val previousBoundary = dispatchBoundary.get()
-+        val boundary = DispatchBoundary(previousBoundary)
++        val boundary = DispatchBoundary(previousBoundary, operation.id)
 +        dispatchBoundary.set(boundary)
 +        val result = try { execute(listOf("sh", "-c", script)) } catch (failure: BeforeDispatchFailure) {
 +            // Only hostCall's own failed registration can supply this private, scoped proof.
@@ -14283,12 +14519,169 @@ index 0000000..c460847
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
+new file mode 100644
+index 0000000..2c4ca24
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
+@@ -0,0 +1,151 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.debuglog.LogConfig
++import org.slf4j.LoggerFactory
++import org.slf4j.MarkerFactory
++import java.io.IOException
++import java.time.Duration
++import java.time.Instant
++import java.util.EnumMap
++import java.util.UUID
++
++/** Categories are selected before shell wrapping. Never derive log fields from arbitrary argv. */
++internal enum class HdcCommandCategory {
++    LIST_TARGETS, DUMP_LAYOUT, SCREEN_CAPTURE, INPUT_TAP, INPUT_SWIPE, INPUT_TEXT, INPUT_KEY,
++    INPUT_OTHER, FILE_RECEIVE, REMOVE_FILE, APP_START, APP_STOP, PROCESS_QUERY, SERVICE_QUERY,
++    MEDIA_QUERY, MEDIA_RECEIVE, MEDIA_DELETE, FILE_STAT, FILE_TEST, SHELL_SCRIPT, SHELL_OTHER, UNKNOWN;
++
++    companion object {
++        fun shell(arguments: List<String>): HdcCommandCategory = when (arguments.firstOrNull()) {
++            "uitest" -> when (arguments.getOrNull(1)) {
++                "dumpLayout" -> DUMP_LAYOUT
++                "screenCap" -> SCREEN_CAPTURE
++                "uiInput" -> when (arguments.getOrNull(2)) {
++                    "click", "doubleClick", "longClick" -> INPUT_TAP
++                    "swipe", "drag" -> INPUT_SWIPE
++                    "text" -> INPUT_TEXT
++                    "keyEvent" -> INPUT_KEY
++                    else -> INPUT_OTHER
++                }
++                else -> SHELL_OTHER
++            }
++            "rm" -> REMOVE_FILE
++            "aa" -> when (arguments.getOrNull(1)) { "start" -> APP_START; "force-stop" -> APP_STOP; else -> SHELL_OTHER }
++            "ps" -> PROCESS_QUERY
++            "hidumper" -> SERVICE_QUERY
++            "stat" -> FILE_STAT
++            "test" -> FILE_TEST
++            "mediatool" -> when (arguments.getOrNull(1)) {
++                "query" -> MEDIA_QUERY; "recv" -> MEDIA_RECEIVE; "delete" -> MEDIA_DELETE; else -> SHELL_OTHER
++            }
++            "sh" -> SHELL_SCRIPT
++            else -> SHELL_OTHER
++        }
++    }
++}
++
++/** Diagnostic observations only, not command acknowledgements or recovery evidence. */
++internal class HdcCallDiagnostics(
++    private val category: HdcCommandCategory,
++    timeout: Duration,
++    operationId: String? = null,
++    private val emitLine: (String) -> Unit = ::log,
++) {
++    enum class Phase { DISPATCH, SPAWN, WAIT_EXIT, STDOUT_READ, STDERR_READ, DRAIN_STDOUT, DRAIN_STDERR, TERMINATE, CUSTOM_RUNNER, HOST_RETURN, CHECK_RESULT, FINISH }
++
++    private val callId = UUID.randomUUID().toString()
++    private val operationId = safeId(operationId)
++    private var hostCallId: String? = null
++    private val budgetMs = timeout.toMillis()
++    private var processBudgetMs: Long? = null
++    private val startedAt = Instant.now().toString()
++    private val startedNanos = System.nanoTime()
++    private val phaseStarts = EnumMap<Phase, Long>(Phase::class.java)
++    private var lastPhase = Phase.DISPATCH
++    private var failurePhase: Phase? = null
++    private var failureKind: String? = null
++    private var failureCause: Throwable? = null
++    private var timedOut = false
++    private var interrupted = false
++    private var exitCode: Int? = null
++    private var sequence = 0
++    private var finished = false
++
++    @Synchronized fun bindHostCall(id: String) { safely { hostCallId = safeId(id) } }
++    @Synchronized fun processBudget(timeout: Duration) { safely { processBudgetMs = timeout.toMillis() } }
++
++    @Synchronized fun begin(phase: Phase, active: Boolean = true) { safely {
++        if (finished) return@safely
++        phaseStarts[phase] = System.nanoTime()
++        if (active) lastPhase = phase
++        append(phase, "begin")
++    } }
++
++    @Synchronized fun end(phase: Phase, exit: Int? = null, bytes: Long? = null) { safely {
++        if (finished) return@safely
++        if (exit != null) exitCode = exit
++        append(phase, "returned", bytes = bytes)
++    } }
++
++    @Synchronized fun phaseFailed(phase: Phase, error: Throwable) { safely {
++        if (!finished) append(phase, "failed", phaseFailure = kind(error))
++    } }
++
++    @Synchronized fun failure(error: Throwable, phase: Phase = lastPhase) { safely {
++        if (failureCause !== error) {
++            failureCause = error
++            failureKind = kind(error)
++            failurePhase = phase
++            timedOut = error is HdcTimeoutException
++            interrupted = error is InterruptedException
++        }
++    } }
++
++    @Synchronized fun finish() { safely {
++        if (finished) return@safely
++        finished = true
++        append(Phase.FINISH, if (failureKind == null) "returned" else "failed")
++    } }
++
++    private fun append(phase: Phase, event: String, bytes: Long? = null, phaseFailure: String? = null) {
++        // No loop/poll events. The cap also protects against accidental future instrumentation loops.
++        if (sequence >= 32 && phase != Phase.FINISH) return
++        val now = System.nanoTime()
++        val fields = linkedMapOf<String, Any?>(
++            "schemaVersion" to 1, "callId" to callId, "sequence" to ++sequence,
++            "operationId" to operationId, "hostCallId" to hostCallId, "category" to category.name,
++            "startedAt" to startedAt, "at" to Instant.now().toString(),
++            "elapsedMs" to ((now - startedNanos).coerceAtLeast(0) / 1_000_000),
++            "budgetMs" to budgetMs, "processBudgetMs" to processBudgetMs,
++            "phase" to phase.name, "event" to event,
++            "phaseElapsedMs" to phaseStarts[phase]?.let { (now - it).coerceAtLeast(0) / 1_000_000 },
++            "exitCode" to exitCode, "bytes" to bytes, "timedOut" to timedOut, "interrupted" to interrupted,
++            "lastPhase" to lastPhase.name, "failurePhase" to failurePhase?.name,
++            "failureKind" to failureKind, "phaseFailureKind" to phaseFailure,
++        )
++        emitLine("MAESTRO_HDC_CALL " + mapper.writeValueAsString(fields))
++    }
++
++    private inline fun safely(action: () -> Unit) {
++        val wasInterrupted = Thread.currentThread().isInterrupted
++        try { action() } catch (_: Throwable) { /* Diagnostics must not replace the command outcome. */ }
++        finally { if (wasInterrupted) Thread.currentThread().interrupt() }
++    }
++
++    companion object {
++        private val mapper = jacksonObjectMapper()
++        private val marker = MarkerFactory.getMarker(LogConfig.HDC_DIAGNOSTIC_MARKER)
++        private val identifier = Regex("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
++        private fun safeId(value: String?) = value?.takeIf(identifier::matches)
++        private fun kind(error: Throwable): String = when (error) {
++            is HdcTimeoutException -> "timeout"
++            is InterruptedException -> "interrupted"
++            is HdcOutputLimitException -> "output_limit"
++            is HdcCommandException -> "command_failed"
++            is IOException -> "io_error"
++            else -> "other"
++        }
++        internal fun log(line: String) { LoggerFactory.getLogger(HdcCallDiagnostics::class.java).info(marker, line) }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..7aa89ba
+index 0000000..c70347e
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,243 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -14311,6 +14704,7 @@ index 0000000..7aa89ba
 +    private val commandTimeout: Duration = Duration.ofSeconds(10),
 +    private val recoveryJournal: HarmonyOSRecoveryJournal? = null,
 +    private val resourceRecovery: Boolean = false,
++    private val diagnosticSink: (String) -> Unit = { HdcCallDiagnostics.log(it) },
 +) {
 +    init {
 +        require(executablePath.isNotBlank() && '\u0000' !in executablePath) { "A valid HDC executable is required" }
@@ -14318,10 +14712,10 @@ index 0000000..7aa89ba
 +    }
 +
 +    fun withRecoveryJournal(journal: HarmonyOSRecoveryJournal): HdcClient =
-+        HdcClient(executablePath, runner, commandTimeout, journal)
++        HdcClient(executablePath, runner, commandTimeout, journal, diagnosticSink = diagnosticSink)
 +
 +    internal fun forResourceRecovery(journal: HarmonyOSRecoveryJournal): HdcClient =
-+        HdcClient(executablePath, runner, commandTimeout, journal, resourceRecovery = true)
++        HdcClient(executablePath, runner, commandTimeout, journal, resourceRecovery = true, diagnosticSink = diagnosticSink)
 +
 +    internal fun recordingResources(): HarmonyOSRecoveryJournal? = recoveryJournal
 +
@@ -14332,7 +14726,7 @@ index 0000000..7aa89ba
 +    internal fun forgetTemporaryFile(path: String) { recoveryJournal?.forgetTemporaryFile(path) }
 +
 +    fun listDevices(): List<String> {
-+        val result = execute(listOf("list", "targets"), commandTimeout)
++        val result = execute(listOf("list", "targets"), commandTimeout, category = HdcCommandCategory.LIST_TARGETS)
 +        if (result.stderr.isNotBlank()) {
 +            throw HdcException("HDC device listing returned diagnostics: ${result.stderr.trim().take(2048)}")
 +        }
@@ -14365,10 +14759,12 @@ index 0000000..7aa89ba
 +        return shellTracked(deviceId, arguments, timeout, finiteCommand(arguments))
 +    }
 +
-+    internal fun shellFinite(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean): HdcCommandResult =
-+        shellTracked(deviceId, arguments, timeout, finite)
++    internal fun shellFinite(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean,
++                             category: HdcCommandCategory = HdcCommandCategory.shell(arguments)): HdcCommandResult =
++        shellTracked(deviceId, arguments, timeout, finite, category)
 +
-+    private fun shellTracked(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean): HdcCommandResult {
++    private fun shellTracked(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean,
++                             category: HdcCommandCategory = HdcCommandCategory.shell(arguments)): HdcCommandResult {
 +        validateDeviceId(deviceId)
 +        require(arguments.isNotEmpty() && arguments.first().isNotBlank()) { "A shell command is required" }
 +        require(arguments.none { '\u0000' in it }) { "Shell arguments cannot contain NUL" }
@@ -14379,7 +14775,7 @@ index 0000000..7aa89ba
 +                require(finite) { "Resource recovery accepts only declared finite commands." }
 +                checkResourceRecoveryReady(journal)
 +                val result = try {
-+                    journal.shell(arguments, finite, allowSealed = true) { wrapped -> rawShell(deviceId, wrapped, timeout, true, allowSealed = true) }
++                    journal.shell(arguments, finite, allowSealed = true) { wrapped -> rawShell(deviceId, wrapped, timeout, true, allowSealed = true, category = category) }
 +                } catch (error: HdcCommandException) {
 +                    // An acknowledged nonzero status can be a valid absence result. It is
 +                    // safe to interpret only after its native host invocation has ended.
@@ -14392,9 +14788,9 @@ index 0000000..7aa89ba
 +                checkResourceRecoveryReady(journal)
 +                return result
 +            }
-+            return journal.shell(arguments, finite) { wrapped -> rawShell(deviceId, wrapped, timeout, true) }
++            return journal.shell(arguments, finite) { wrapped -> rawShell(deviceId, wrapped, timeout, true, category = category) }
 +        }
-+        return rawShell(deviceId, arguments, timeout, false)
++        return rawShell(deviceId, arguments, timeout, false, category = category)
 +    }
 +
 +    /** Recovery does not register new device work, but its native HDC processes remain tracked. */
@@ -14403,12 +14799,13 @@ index 0000000..7aa89ba
 +        validateDeviceId(deviceId)
 +        require(journal.deviceId == deviceId)
 +        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
-+        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true, beforeDispatch)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, true, journal, true, beforeDispatch, HdcCommandCategory.shell(arguments))
 +    }
 +
-+    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean, allowSealed: Boolean = false): HdcCommandResult {
++    private fun rawShell(deviceId: String, arguments: List<String>, timeout: Duration, trackHost: Boolean,
++                         allowSealed: Boolean = false, category: HdcCommandCategory): HdcCommandResult {
 +        val command = arguments.joinToString(" ", transform = ::quoteShellArgument)
-+        return execute(listOf("-t", deviceId, "shell", command), timeout, trackHost, allowSealed = allowSealed)
++        return execute(listOf("-t", deviceId, "shell", command), timeout, trackHost, allowSealed = allowSealed, category = category)
 +    }
 +
 +    fun receiveFile(
@@ -14423,7 +14820,8 @@ index 0000000..7aa89ba
 +        }
 +        recoveryJournal?.let { require(it.deviceId == deviceId) { "Recovery journal belongs to another target." } }
 +        if (resourceRecovery) checkResourceRecoveryReady(checkNotNull(recoveryJournal))
-+        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null, allowSealed = resourceRecovery)
++        return execute(listOf("-t", deviceId, "file", "recv", remotePath, localPath.toAbsolutePath().toString()), timeout, recoveryJournal != null,
++            allowSealed = resourceRecovery, category = HdcCommandCategory.FILE_RECEIVE)
 +            .also { if (resourceRecovery) checkResourceRecoveryReady(checkNotNull(recoveryJournal)) }
 +    }
 +
@@ -14434,23 +14832,50 @@ index 0000000..7aa89ba
 +
 +    private fun execute(arguments: List<String>, timeout: Duration, trackHost: Boolean = false,
 +        journal: HarmonyOSRecoveryJournal? = recoveryJournal, allowSealed: Boolean = false,
-+        beforeDispatch: ((String) -> Unit)? = null): HdcCommandResult {
++        beforeDispatch: ((String) -> Unit)? = null, category: HdcCommandCategory): HdcCommandResult {
 +        val command = listOf(executablePath) + arguments
 +        // A maintenance binding may write to disk. Charge that work to the same command budget.
 +        val deadline = if (beforeDispatch == null) null else System.nanoTime() + timeout.toNanos()
-+        val result = if (trackHost && journal != null) journal.hostCall(allowSealed, beforeDispatch ?: {}) { observer ->
-+            val effectiveTimeout = deadline?.let {
-+                if (Thread.currentThread().isInterrupted) throw InterruptedException("Maintenance dispatch was interrupted.")
-+                val remaining = it - System.nanoTime()
-+                if (remaining <= 0) throw HdcTimeoutException(timeout)
-+                Duration.ofNanos(remaining)
-+            } ?: timeout
-+            if (runner is ProcessHdcCommandRunner) runner.runObserved(command, effectiveTimeout, observer) else runner.run(command, effectiveTimeout)
-+        } else runner.run(command, timeout)
-+        if (result.exitCode != 0 || hasHdcFailure(result.stdout) || hasHdcFailure(result.stderr)) {
-+            throw HdcCommandException(result)
++        val diagnostics = HdcCallDiagnostics(category, timeout, journal?.diagnosticOperationId(), diagnosticSink)
++        diagnostics.begin(HdcCallDiagnostics.Phase.DISPATCH)
++        fun run(effectiveTimeout: Duration, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit): HdcCommandResult {
++            diagnostics.end(HdcCallDiagnostics.Phase.DISPATCH)
++            val result = if (runner is ProcessHdcCommandRunner) runner.runObserved(command, effectiveTimeout, diagnostics, observer)
++            else {
++                diagnostics.processBudget(effectiveTimeout)
++                diagnostics.begin(HdcCallDiagnostics.Phase.CUSTOM_RUNNER)
++                runner.run(command, effectiveTimeout).also { diagnostics.end(HdcCallDiagnostics.Phase.CUSTOM_RUNNER, exit = it.exitCode) }
++            }
++            // Journal.hostCall can still persist return/ownership facts after the runner returns.
++            diagnostics.begin(HdcCallDiagnostics.Phase.HOST_RETURN)
++            return result
 +        }
-+        return result
++        try {
++            val result = if (trackHost && journal != null) journal.hostCall(allowSealed, { id ->
++                diagnostics.bindHostCall(id)
++                beforeDispatch?.invoke(id)
++            }) { observer ->
++                val effectiveTimeout = deadline?.let {
++                    if (Thread.currentThread().isInterrupted) throw InterruptedException("Maintenance dispatch was interrupted.")
++                    val remaining = it - System.nanoTime()
++                    if (remaining <= 0) throw HdcTimeoutException(timeout)
++                    Duration.ofNanos(remaining)
++                } ?: timeout
++                run(effectiveTimeout, observer)
++            } else run(timeout) {}
++            diagnostics.end(HdcCallDiagnostics.Phase.HOST_RETURN)
++            diagnostics.begin(HdcCallDiagnostics.Phase.CHECK_RESULT)
++            if (result.exitCode != 0 || hasHdcFailure(result.stdout) || hasHdcFailure(result.stderr)) {
++                throw HdcCommandException(result)
++            }
++            diagnostics.end(HdcCallDiagnostics.Phase.CHECK_RESULT, exit = result.exitCode)
++            return result
++        } catch (error: Throwable) {
++            diagnostics.failure(error)
++            throw error
++        } finally {
++            diagnostics.finish()
++        }
 +    }
 +
 +    companion object {
@@ -14502,10 +14927,10 @@ index 0000000..7aa89ba
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
 new file mode 100644
-index 0000000..9167a6c
+index 0000000..9080a35
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCommandRunner.kt
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,231 @@
 +package maestro.harmonyos.hdc
 +
 +import java.io.ByteArrayOutputStream
@@ -14517,6 +14942,7 @@ index 0000000..9167a6c
 +import java.util.concurrent.Future
 +import java.util.concurrent.TimeUnit
 +import java.util.concurrent.TimeoutException
++import maestro.harmonyos.hdc.HdcCallDiagnostics.Phase
 +
 +data class HdcCommandResult(val exitCode: Int, val stdout: String, val stderr: String)
 +
@@ -14535,7 +14961,10 @@ index 0000000..9167a6c
 +    HdcException("HDC $stream exceeded the $limit byte output limit")
 +
 +/** Runs one finite command. Each output stream has its own memory limit. */
-+class ProcessHdcCommandRunner(private val maxOutputBytes: Int = 4 * 1024 * 1024) : HdcCommandRunner {
++class ProcessHdcCommandRunner(
++    private val maxOutputBytes: Int = 4 * 1024 * 1024,
++    private val diagnosticSink: (String) -> Unit = { HdcCallDiagnostics.log(it) },
++) : HdcCommandRunner {
 +
 +    init {
 +        require(maxOutputBytes > 0) { "Output limit must be positive" }
@@ -14544,16 +14973,32 @@ index 0000000..9167a6c
 +    override fun run(command: List<String>, timeout: Duration): HdcCommandResult = runObserved(command, timeout) {}
 +
 +    internal fun runObserved(command: List<String>, timeout: Duration, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit): HdcCommandResult {
++        val diagnostics = HdcCallDiagnostics(HdcCommandCategory.UNKNOWN, timeout, emitLine = diagnosticSink)
++        diagnostics.begin(Phase.DISPATCH)
++        diagnostics.end(Phase.DISPATCH)
++        try {
++            return runObserved(command, timeout, diagnostics, observer)
++        } catch (error: Throwable) {
++            diagnostics.failure(error)
++            throw error
++        } finally { diagnostics.finish() }
++    }
++
++    internal fun runObserved(command: List<String>, timeout: Duration, diagnostics: HdcCallDiagnostics,
++                             observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit): HdcCommandResult {
 +        require(command.isNotEmpty() && command.first().isNotBlank()) { "An executable is required" }
 +        require(command.none { '\u0000' in it }) { "Command arguments cannot contain NUL" }
 +        require(!timeout.isZero && !timeout.isNegative) { "Timeout must be positive" }
 +        val timeoutNanos = timeout.toNanos()
 +        val deadline = System.nanoTime() + timeoutNanos
++        diagnostics.processBudget(timeout)
++        diagnostics.begin(Phase.SPAWN)
 +        val process = try {
 +            ProcessBuilder(processArguments(command)).start()
 +        } catch (e: IOException) {
 +            throw HdcException("Unable to start HDC executable: ${command.first()}", e)
 +        }
++        diagnostics.end(Phase.SPAWN)
 +        val rootIdentity = HarmonyOSRecoveryJournal.HostProcess(process.pid(), runCatching { process.info().startInstant().orElse(null)?.toString() }.getOrNull())
 +        val processTree = OwnedProcessTree(rootIdentity)
 +        val readers = Executors.newFixedThreadPool(2) { task ->
@@ -14563,29 +15008,38 @@ index 0000000..9167a6c
 +            observer(rootIdentity)
 +            // Finite commands must not wait for keyboard input.
 +            process.outputStream.close()
-+            val stdout = readers.submit<String> { readOutput(process.inputStream, "stdout") }
-+            val stderr = readers.submit<String> { readOutput(process.errorStream, "stderr") }
++            diagnostics.begin(Phase.STDOUT_READ, active = false)
++            val stdout = readers.submit<String> { readOutput(process.inputStream, "stdout", diagnostics, Phase.STDOUT_READ) }
++            diagnostics.begin(Phase.STDERR_READ, active = false)
++            val stderr = readers.submit<String> { readOutput(process.errorStream, "stderr", diagnostics, Phase.STDERR_READ) }
++            diagnostics.begin(Phase.WAIT_EXIT)
 +            while (true) {
 +                processTree.refresh()
 +                processTree.identities().forEach(observer)
-+                checkReader(stdout)
-+                checkReader(stderr)
++                try { checkReader(stdout) } catch (error: Throwable) { diagnostics.failure(error, Phase.STDOUT_READ); throw error }
++                try { checkReader(stderr) } catch (error: Throwable) { diagnostics.failure(error, Phase.STDERR_READ); throw error }
 +                val remaining = remainingNanos(deadline, timeout)
 +                if (process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(25)), TimeUnit.NANOSECONDS)) {
 +                    break
 +                }
 +            }
-+            return HdcCommandResult(
-+                process.exitValue(),
-+                awaitOutput(stdout, deadline, timeout),
-+                awaitOutput(stderr, deadline, timeout),
-+            )
++            val exit = process.exitValue()
++            diagnostics.end(Phase.WAIT_EXIT, exit = exit)
++            diagnostics.begin(Phase.DRAIN_STDOUT)
++            val output = awaitOutput(stdout, deadline, timeout)
++            diagnostics.end(Phase.DRAIN_STDOUT)
++            diagnostics.begin(Phase.DRAIN_STDERR)
++            val errors = awaitOutput(stderr, deadline, timeout)
++            diagnostics.end(Phase.DRAIN_STDERR)
++            return HdcCommandResult(exit, output, errors)
 +        } catch (e: InterruptedException) {
-+            terminate(processTree, observer)
++            diagnostics.failure(e)
++            terminateObserved(processTree, observer, diagnostics)
 +            Thread.currentThread().interrupt()
 +            throw e
 +        } catch (e: Throwable) {
-+            terminate(processTree, observer)
++            diagnostics.failure(e)
++            terminateObserved(processTree, observer, diagnostics)
 +            throw e
 +        } finally {
 +            readers.shutdownNow()
@@ -14595,16 +15049,22 @@ index 0000000..9167a6c
 +        }
 +    }
 +
-+    private fun readOutput(stream: InputStream, name: String): String {
++    private fun readOutput(stream: InputStream, name: String, diagnostics: HdcCallDiagnostics, phase: Phase): String {
 +        val output = ByteArrayOutputStream(minOf(maxOutputBytes, 8192))
 +        val buffer = ByteArray(8192)
-+        while (true) {
-+            val count = stream.read(buffer)
-+            if (count < 0) break
-+            if (count > maxOutputBytes - output.size()) throw HdcOutputLimitException(name, maxOutputBytes)
-+            output.write(buffer, 0, count)
++        try {
++            while (true) {
++                val count = stream.read(buffer)
++                if (count < 0) break
++                if (count > maxOutputBytes - output.size()) throw HdcOutputLimitException(name, maxOutputBytes)
++                output.write(buffer, 0, count)
++            }
++            diagnostics.end(phase, bytes = output.size().toLong())
++            return output.toString(Charsets.UTF_8)
++        } catch (error: Throwable) {
++            diagnostics.phaseFailed(phase, error)
++            throw error
 +        }
-+        return output.toString(Charsets.UTF_8)
 +    }
 +
 +    @Suppress("DEPRECATION")
@@ -14673,6 +15133,18 @@ index 0000000..9167a6c
 +        val remaining = deadline - System.nanoTime()
 +        if (remaining <= 0) throw HdcTimeoutException(timeout)
 +        return remaining
++    }
++
++    private fun terminateObserved(processTree: OwnedProcessTree, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit,
++                                  diagnostics: HdcCallDiagnostics) {
++        diagnostics.begin(Phase.TERMINATE)
++        try {
++            terminate(processTree, observer)
++            diagnostics.end(Phase.TERMINATE)
++        } catch (error: Throwable) {
++            diagnostics.phaseFailed(Phase.TERMINATE, error)
++            throw error
++        }
 +    }
 +
 +    private fun terminate(processTree: OwnedProcessTree, observer: (HarmonyOSRecoveryJournal.HostProcess) -> Unit) {
@@ -20058,6 +20530,195 @@ index 0000000..cd612d3
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcCallDiagnosticsTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcCallDiagnosticsTest.kt
+new file mode 100644
+index 0000000..5a25c0b
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcCallDiagnosticsTest.kt
+@@ -0,0 +1,183 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.databind.JsonNode
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.UUID
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.atomic.AtomicBoolean
++import java.util.concurrent.atomic.AtomicReference
++
++class HdcCallDiagnosticsTest {
++    @TempDir lateinit var directory: Path
++    private val mapper = jacksonObjectMapper()
++    private val lines = CopyOnWriteArrayList<String>()
++    private fun events(): List<JsonNode> = lines.map { mapper.readTree(it.removePrefix("MAESTRO_HDC_CALL ")) }
++    private fun terminal(): JsonNode = events().single { it["phase"].asText() == "FINISH" }
++    private fun runner() = ProcessHdcCommandRunner(diagnosticSink = lines::add)
++
++    @Test fun `real process success records finite phases and both drained byte counts`() {
++        val result = runner().run(HdcProcessTestChild.command("flood"), Duration.ofSeconds(10))
++        assertThat(result.stdout.length).isEqualTo(262144)
++        assertThat(result.stderr.length).isEqualTo(262144)
++        val events = events()
++        assertThat(events.size).isAtMost(33)
++        assertThat(events.map { it["callId"].asText() }.distinct()).hasSize(1)
++        assertThat(events.map { it["sequence"].asInt() }).containsExactlyElementsIn(1..events.size).inOrder()
++        for (phase in listOf("SPAWN", "WAIT_EXIT", "STDOUT_READ", "STDERR_READ", "DRAIN_STDOUT", "DRAIN_STDERR")) {
++            assertThat(events.filter { it["phase"].asText() == phase }.map { it["event"].asText() })
++                .containsExactly("begin", "returned").inOrder()
++        }
++        for (phase in listOf("STDOUT_READ", "STDERR_READ")) {
++            assertThat(events.single { it["phase"].asText() == phase && it["event"].asText() == "returned" }["bytes"].asLong()).isEqualTo(262144L)
++        }
++        assertThat(terminal()["exitCode"].asInt()).isEqualTo(0)
++        assertThat(terminal()["event"].asText()).isEqualTo("returned")
++        assertThat(terminal()["timedOut"].asBoolean()).isFalse()
++        assertThat(terminal()["budgetMs"].asLong()).isEqualTo(10000L)
++        assertThat(events.all { it["elapsedMs"].asLong() >= 0 }).isTrue()
++        assertThat(lines.joinToString()).doesNotContain("xxxxxxxx")
++    }
++
++    @Test fun `real timeout identifies wait exit and termination without poll events`() {
++        val pid = Files.createFile(directory.resolve("sleep.pid"))
++        try {
++            assertThrows(HdcTimeoutException::class.java) {
++                runner().run(HdcProcessTestChild.command("sleep", pid.toString()), Duration.ofSeconds(3))
++            }
++            assertThat(terminal()["event"].asText()).isEqualTo("failed")
++            assertThat(terminal()["failurePhase"].asText()).isEqualTo("WAIT_EXIT")
++            assertThat(terminal()["lastPhase"].asText()).isEqualTo("TERMINATE")
++            assertThat(terminal()["timedOut"].asBoolean()).isTrue()
++            assertThat(terminal()["exitCode"].isNull).isTrue()
++            assertThat(events().count { it["phase"].asText() == "WAIT_EXIT" }).isEqualTo(1)
++            assertThat(events().size).isAtMost(33)
++            assertStopped(pid)
++        } finally { stop(pid) }
++    }
++
++    @Test fun `real root exit followed by inherited pipe timeout is not reported as success`() {
++        val parentPid = Files.createFile(directory.resolve("parent.pid"))
++        val childPid = Files.createFile(directory.resolve("child.pid"))
++        try {
++            assertThrows(HdcTimeoutException::class.java) {
++                runner().run(HdcProcessTestChild.command("spawn-and-exit", parentPid.toString(), childPid.toString()), Duration.ofSeconds(4))
++            }
++            val final = terminal()
++            assertThat(final["exitCode"].isNull).isFalse()
++            assertThat(final["exitCode"].isInt).isTrue()
++            assertThat(final["exitCode"].asInt()).isEqualTo(0)
++            assertThat(final["event"].asText()).isEqualTo("failed")
++            assertThat(final["failurePhase"].asText()).isAnyOf("DRAIN_STDOUT", "DRAIN_STDERR")
++            assertThat(final["failureKind"].asText()).isEqualTo("timeout")
++            assertThat(final["timedOut"].asBoolean()).isTrue()
++            assertStopped(parentPid)
++            assertStopped(childPid)
++        } finally { stop(parentPid); stop(childPid) }
++    }
++
++    @Test fun `real interruption preserves its exception flag and diagnostic outcome`() {
++        val pid = Files.createFile(directory.resolve("interrupted.pid"))
++        val error = AtomicReference<Throwable>()
++        val interrupted = AtomicBoolean()
++        val thread = Thread {
++            try { runner().run(HdcProcessTestChild.command("sleep", pid.toString()), Duration.ofSeconds(30)) }
++            catch (failure: Throwable) { error.set(failure); interrupted.set(Thread.currentThread().isInterrupted) }
++        }
++        thread.start()
++        try {
++            waitUntil { Files.readString(pid).trim().toLongOrNull() != null }
++            thread.interrupt()
++            thread.join(7000)
++            assertThat(thread.isAlive).isFalse()
++            assertThat(error.get()).isInstanceOf(InterruptedException::class.java)
++            assertThat(interrupted.get()).isTrue()
++            assertThat(terminal()["interrupted"].asBoolean()).isTrue()
++            assertThat(terminal()["failureKind"].asText()).isEqualTo("interrupted")
++            assertStopped(pid)
++        } finally { thread.interrupt(); stop(pid); thread.join(7000) }
++    }
++
++    @Test fun `diagnostic emitter failures do not change real process output or client exception identity`() {
++        val broken: (String) -> Unit = { throw IllegalStateException("logging unavailable") }
++        val result = ProcessHdcCommandRunner(diagnosticSink = broken).run(HdcProcessTestChild.command("failure"), Duration.ofSeconds(10))
++        assertThat(result.exitCode).isEqualTo(7)
++        assertThat(result.stdout.trim()).isEqualTo("command output")
++        assertThat(result.stderr.trim()).isEqualTo("command error")
++        val expected = HdcTimeoutException(Duration.ofMillis(51))
++        val client = HdcClient("private-executable", HdcCommandRunner { _, _ -> throw expected }, diagnosticSink = broken)
++        assertThat(assertThrows(HdcTimeoutException::class.java) { client.shell("private-device", listOf("uitest", "dumpLayout")) }).isSameInstanceAs(expected)
++    }
++
++    @Test fun `classification never exposes arguments device paths output or exception messages`() {
++        val secret = "private-input-中文; shell-secret"
++        val client = HdcClient("private-executable", HdcCommandRunner { _, _ -> HdcCommandResult(0, secret, "") }, diagnosticSink = lines::add)
++        client.shell("private-device", listOf("uitest", "dumpLayout", "-p", "/private/layout.json"))
++        client.shell("private-device", listOf("uitest", "uiInput", "text", secret))
++        client.shell("private-device", listOf("uitest", "uiInput", "swipe", "1", "2", "3", "4", "200"))
++        client.shell("private-device", listOf("rm", "-f", "/private/file"))
++        client.shell("private-device", listOf("private-command", secret))
++        client.receiveFile("private-device", "/private/remote", directory.resolve("private-local"))
++        val final = events().filter { it["phase"].asText() == "FINISH" }
++        assertThat(final.map { it["category"].asText() }).containsExactly(
++            "DUMP_LAYOUT", "INPUT_TEXT", "INPUT_SWIPE", "REMOVE_FILE", "SHELL_OTHER", "FILE_RECEIVE",
++        ).inOrder()
++        assertThat(final.map { it["callId"].asText() }.distinct()).hasSize(6)
++        val text = lines.joinToString()
++        assertThat(text).doesNotContain("private")
++        assertThat(text).doesNotContain(secret)
++        assertThat(text).doesNotContain(directory.toString())
++    }
++
++    @Test fun `device wrapper preserves safe input and screenshot categories`() {
++        val fake = HdcCommandRunner { command, _ ->
++            val marker = checkNotNull(Regex("MAESTRO_EXIT_[0-9a-f]+=").find(command.last())).value
++            HdcCommandResult(0, "No Error\n${marker}0\n", "")
++        }
++        val device = HdcHarmonyOSDevice("private-device", HdcClient("fake", fake, diagnosticSink = lines::add))
++        device.execute(listOf("uitest", "uiInput", "text", "private-input"), Duration.ofSeconds(1))
++        device.execute(listOf("uitest", "screenCap", "-p", "/private/screen.png"), Duration.ofSeconds(1))
++        device.execute(listOf("rm", "-f", "/private/screen.png"), Duration.ofSeconds(1))
++        assertThat(events().filter { it["phase"].asText() == "FINISH" }.map { it["category"].asText() })
++            .containsExactly("INPUT_TEXT", "SCREEN_CAPTURE", "REMOVE_FILE").inOrder()
++        assertThat(lines.joinToString()).doesNotContain("private")
++        assertThat(lines.joinToString()).doesNotContain("MAESTRO_EXIT_")
++    }
++
++    @Test fun `call identifiers correlate with journal operations without changing disk schema`() {
++        val path = directory.resolve("journal.json")
++        HarmonyOSRecoveryJournal.create(path, "private-device", UUID.randomUUID().toString()).use { journal ->
++            val fake = HdcCommandRunner { command, _ ->
++                val marker = checkNotNull(Regex("MAESTRO_RECOVERY_[0-9a-f]+=").find(command.last())).value
++                HdcCommandResult(0, "\n${marker}0\n", "")
++            }
++            HdcClient("fake", fake, diagnosticSink = lines::add).withRecoveryJournal(journal)
++                .shell("private-device", listOf("uitest", "dumpLayout", "-p", "/private/layout.json"))
++            val state = mapper.readTree(path.toFile())
++            assertThat(terminal()["operationId"].asText()).isEqualTo(state["operations"][0]["id"].asText())
++            assertThat(terminal()["hostCallId"].asText()).isEqualTo(state["hostCalls"][0]["id"].asText())
++            assertThat(terminal()["category"].asText()).isEqualTo("DUMP_LAYOUT")
++            assertThat(state["version"].asInt()).isEqualTo(1)
++            assertThat(state.has("callId")).isFalse()
++            assertThat(lines.joinToString()).doesNotContain("private")
++        }
++    }
++
++    private fun assertStopped(file: Path) {
++        val pid = Files.readString(file).trim().toLong()
++        waitUntil { !ProcessHandle.of(pid).map { it.isAlive }.orElse(false) }
++    }
++    private fun stop(file: Path) { Files.readString(file).trim().toLongOrNull()?.let { pid -> ProcessHandle.of(pid).ifPresent { it.destroyForcibly() } } }
++    private fun waitUntil(condition: () -> Boolean) {
++        val deadline = System.nanoTime() + Duration.ofSeconds(7).toNanos()
++        while (!condition() && System.nanoTime() < deadline) Thread.sleep(20)
++        assertThat(condition()).isTrue()
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcClientTest.kt
 new file mode 100644
 index 0000000..267dbab
@@ -20197,6 +20858,98 @@ index 0000000..267dbab
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcDiagnosticLogConfigTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcDiagnosticLogConfigTest.kt
+new file mode 100644
+index 0000000..05a6778
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HdcDiagnosticLogConfigTest.kt
+@@ -0,0 +1,86 @@
++package maestro.harmonyos.hdc
++
++import com.google.common.truth.Truth.assertThat
++import maestro.debuglog.LogConfig
++import maestro.debuglog.ScopedLogCapture
++import org.apache.logging.log4j.LogManager
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import org.slf4j.LoggerFactory
++import org.slf4j.MarkerFactory
++import java.io.File
++import java.net.URLClassLoader
++import java.nio.file.Files
++import java.nio.file.Path
++import java.util.concurrent.TimeUnit
++
++class HdcDiagnosticLogConfigTest {
++    @TempDir lateinit var directory: Path
++
++    @Test fun `verbose console excludes HDC diagnostics while file and scoped capture retain them`() {
++        // LogConfig reconfigures a global context. Exercise it in a real child JVM so this
++        // test cannot stop/restart the appenders used by other tests in the Gradle worker.
++        val file = directory.resolve("global.log")
++        val scoped = directory.resolve("scoped.log")
++        val stdout = directory.resolve("stdout.log")
++        val stderr = directory.resolve("stderr.log")
++        val java = Path.of(System.getProperty("java.home"), "bin",
++            if (System.getProperty("os.name").startsWith("Windows")) "java.exe" else "java")
++        val urls = generateSequence(HdcLogConfigProbe::class.java.classLoader) { it.parent }
++            .filterIsInstance<URLClassLoader>()
++            .flatMap { it.getURLs().asSequence() }
++            .filter { it.protocol == "file" }
++            .map { Path.of(it.toURI()).toString() }.toList()
++        val ownClasses = listOf(HdcLogConfigProbe::class.java, LogConfig::class.java, Unit::class.java)
++            .map { Path.of(it.protectionDomain.codeSource.location.toURI()).toString() }
++        val classpath = (urls + ownClasses + System.getProperty("java.class.path").split(File.pathSeparator))
++            .distinct().joinToString(File.pathSeparator)
++        // Java's argument file avoids Windows' command-line limit for the full test runtime.
++        val arguments = listOf("-Dfile.encoding=UTF-8", "-cp", classpath,
++            HdcLogConfigProbe::class.java.name, file.toString(), scoped.toString())
++        val argumentFile = directory.resolve("java.args")
++        Files.writeString(argumentFile, arguments.joinToString("\n", postfix = "\n") { argument ->
++            require(argument.none { it == '\n' || it == '\r' || it == '\u0000' })
++            "\"" + argument.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
++        })
++        val builder = ProcessBuilder(java.toString(), "@${argumentFile.toAbsolutePath()}")
++            .redirectOutput(stdout.toFile()).redirectError(stderr.toFile())
++        builder.environment().remove("MAESTRO_CLI_LOG_PATTERN_CONSOLE")
++        builder.environment().remove("MAESTRO_CLI_LOG_PATTERN_FILE")
++        val process = builder.start()
++        try {
++            assertThat(process.waitFor(30, TimeUnit.SECONDS)).isTrue()
++            assertThat(process.exitValue()).isEqualTo(0)
++            val console = Files.readString(stdout)
++            assertThat(console).doesNotContain("MAESTRO_HDC_CALL")
++            assertThat(Files.readString(stderr)).doesNotContain("MAESTRO_HDC_CALL")
++            assertThat(console).contains("ordinary-log-visible")
++            assertThat(console).contains("other-marker-visible")
++            for (path in listOf(file, scoped)) {
++                val content = Files.readString(path)
++                assertThat(content).contains("MAESTRO_HDC_CALL")
++                assertThat(content).contains("\"category\":\"DUMP_LAYOUT\"")
++                assertThat(content).contains("\"phase\":\"FINISH\"")
++                assertThat(content).contains("ordinary-log-visible")
++            }
++        } finally {
++            if (process.isAlive) { process.destroyForcibly(); process.waitFor(5, TimeUnit.SECONDS) }
++        }
++    }
++}
++
++/** Fake transport only; the process exercises the actual logging backend without HDC or a device. */
++object HdcLogConfigProbe {
++    @JvmStatic fun main(arguments: Array<String>) {
++        LogConfig.configure(logFileName = arguments[0], printToConsole = true)
++        try {
++            ScopedLogCapture.start(File(arguments[1])).use {
++                HdcClient("unused-hdc", HdcCommandRunner { _, _ -> HdcCommandResult(0, "", "") })
++                    .shell("fixture-target", listOf("uitest", "dumpLayout"))
++                val logger = LoggerFactory.getLogger("maestro.hdc.log-probe")
++                logger.info("ordinary-log-visible")
++                logger.info(MarkerFactory.getMarker("UNRELATED_TEST_MARKER"), "other-marker-visible")
++            }
++        } finally { LogManager.shutdown() }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/OwnedProcessTreeTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/OwnedProcessTreeTest.kt
 new file mode 100644
 index 0000000..5755356
@@ -20315,10 +21068,10 @@ index 0000000..5755356
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
 new file mode 100644
-index 0000000..e8bdd2d
+index 0000000..eee842b
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,200 @@
 +package maestro.harmonyos.hdc
 +
 +import com.google.common.truth.Truth.assertThat
@@ -20503,6 +21256,17 @@ index 0000000..e8bdd2d
 +                File(arguments[1]).writeText(ProcessHandle.current().pid().toString())
 +                ProcessBuilder(command("sleep", arguments[2])).inheritIO().start()
 +                Thread.sleep(30000)
++            }
++            "spawn-and-exit" -> {
++                // The descendant retains the parent's pipe handles after the root exits.
++                // This exercises output-drain timeout independently from waitFor timeout.
++                File(arguments[1]).writeText(ProcessHandle.current().pid().toString())
++                ProcessBuilder(command("sleep", arguments[2])).inheritIO().start()
++                val deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos()
++                while (File(arguments[2]).readText().trim().toLongOrNull() == null && System.nanoTime() < deadline) Thread.sleep(10)
++                check(File(arguments[2]).readText().trim().toLongOrNull() != null)
++                // Give the owner time to observe the descendant while the root is alive.
++                Thread.sleep(500)
 +            }
 +            else -> error("Unknown fixture mode")
 +        }

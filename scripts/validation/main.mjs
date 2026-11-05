@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateDocument } from '../../examples/agent-client/client.mjs';
-import { verifyDeviceRelease } from '../ci/verify-state.mjs';
+import { verifyDeviceRelease, verifyState } from '../ci/verify-state.mjs';
 import { artifact, canonical, digestPattern, hashFile, inside, key, noLinks, readJson, requireValue, samePath, uuid } from './io.mjs';
 import { checkFrozen, freezePlan, saveSummary } from './plan.mjs';
 import { inspectAttempt, verifyAttemptInput } from './retry-evidence.mjs';
@@ -157,6 +157,7 @@ export async function importBatch(input, recheck = null) {
   batch.releaseConfirmed = false;
   batch.matrixExitCode = input.matrixExitCode;
   let allControlsTrusted = true, attempted = 0;
+  const unknownAttempts = [];
   try {
     if (!recheck) await checkFrozen(plan, process.env, { executionPreparation: false });
     const pointer = await readJson(batch.pointerPath), value = pointer.value;
@@ -223,7 +224,9 @@ export async function importBatch(input, recheck = null) {
           resultPath: result.path, resultSha256: result.sha256, evidenceIndexPath: evidence.path, evidenceIndexSha256: evidence.sha256,
           evidenceComplete: verified.evidence.unavailable === 0, firstPassStatus: data.status === 'passed' || data.status === 'unknown' ? 'unknown' : 'not_passed' });
         if (data.cleanup?.state !== 'complete' || data.status === 'unknown' || data.status === 'cancelled') batch.stopDevice = true;
-        if (data.cleanup?.state !== 'complete' || data.status === 'unknown') allControlsTrusted = false;
+        if (data.cleanup?.state !== 'complete') allControlsTrusted = false;
+        if (data.status === 'unknown') unknownAttempts.push({ runId: run.runId, attemptId: run.attemptId,
+          controlRecordPath: control.path });
         try {
           const inspection = await inspectAttempt(result.value, evidence.value, batch.agentRoot, unit, profile, verified);
           Object.assign(slot, inspection);
@@ -240,6 +243,11 @@ export async function importBatch(input, recheck = null) {
         batch.release = originalBatch.release;
         if (attempted > 0) requireValue(batch.release?.reportPath &&
           await hashFile(batch.release.reportPath) === batch.release.reportSha256, 'Retained cleanup receipt changed.');
+      } else if (unknownAttempts.length > 0) {
+        // Unknown execution still stops this device. Only complete attempt cleanup,
+        // confirmed process termination and checked current receipts may release its reservation.
+        for (const attempt of unknownAttempts) batch.release = await verifyState({ mode: 'completion', ...attempt,
+          deviceId: batch.deviceId, agentRoot: batch.agentRoot, recoveryRoot: input.recoveryRoot, createdAt: batch.startedAt });
       } else batch.release = attempted === 0 ? { reason: 'all controls remained planned' } : await verifyDeviceRelease({
         deviceId: batch.deviceId, recoveryRoot: input.recoveryRoot, createdAt: batch.startedAt });
       batch.releaseConfirmed = true;
