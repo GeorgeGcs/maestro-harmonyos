@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 1,
+  "kind": "supplementary-release-tablet-validation",
+  "reviewedAt": "2026-11-05T16:08:30.012Z",
+  "source": {
+    "release": "v0.1.2",
+    "commit": "75470f36b45fe7f1ce01a9a665e4c7ef96e5f029",
+    "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+    "patchSha256": "78417e81f3bf2c942075e43def4f369804f6ed8d249b1897d0c7d46364ebc478",
+    "releasePublication": "not-verified-by-this-record",
+    "cliVersion": "2.12.0"
+  },
+  "artifacts": [
+    {
+      "name": "maestro-agent-75470f36.zip",
+      "bytes": 375882084,
+      "sha256": "75388ca9378b1e0a7f9c93320b4152943b3844bcad282fb9dd06e273fb7d5bec"
+    },
+    {
+      "name": "maestro-harmonyos-cli-75470f36.zip",
+      "bytes": 350769858,
+      "sha256": "8dd6dead9b4a6629c39d1d36161f61306420cc65ab2c2ac734e5d64bdc9fc0d4"
+    },
+    {
+      "name": "maestro-harmonyos-recorder-0.1.1-75470f36.vsix",
+      "bytes": 28360,
+      "sha256": "a5ded8dfd8e68fdb720b83aaa6cf26443e99bda97830935aa17f88167a721898"
+    }
+  ],
+  "runtime": {
+    "distributionFiles": 200,
+    "cliCopyVerified": true,
+    "flowSourcesUnchanged": true,
+    "core": [
+      {
+        "file": "maestro-cli-2.12.0.jar",
+        "sha256": "491c935f0eb3f746e98349664c6d4ed8ad43ffed07b5c68106abb16dc2baae08"
+      },
+      {
+        "file": "maestro-client.jar",
+        "sha256": "a6d9a5d6f6d751ec9cc19024e8da7b68156f9342f609e8e3ddf7154334d30da3"
+      },
+      {
+        "file": "maestro-orchestra-models.jar",
+        "sha256": "b80f05ee2a2da98e31ea717837fd4aa4cccdbc91f735e1edbaf8bb2c5e76529e"
+      },
+      {
+        "file": "maestro-orchestra.jar",
+        "sha256": "ab9770ea44bf91369053c9b0ee3d95c69134a949481c65d4b858a38954c7aa40"
+      }
+    ]
+  },
+  "device": {
+    "model": "HUAWEI MRDI-W00",
+    "os": "HarmonyOS 7.0.0",
+    "api": 26
+  },
+  "scope": {
+    "application": "HMOS Code Lab",
+    "module": "phone",
+    "suite": "hmos-code-lab-component-suite",
+    "entry": "examples/hmos-code-lab/flows/suite/01-components.yaml",
+    "purpose": "development",
+    "measurementMode": "suite",
+    "recording": false,
+    "scenarios": [
+      "input",
+      "button style",
+      "alert dialog",
+      "return navigation"
+    ]
+  },
+  "duration": {
+    "timezone": "Asia/Shanghai",
+    "batchLaunchAt": "2026-11-05T20:30:09.7085136+08:00",
+    "archiveFinishedAt": "2026-11-05T15:59:01.5868110Z",
+    "totalElapsedSeconds": 12532,
+    "description": "Approximately 3 hours 29 minutes, from background script launch to log archival completion.",
+    "matrixStartedAt": "2026-11-05T12:30:18.4292440+00:00",
+    "matrixFinishedAt": "2026-11-05T15:58:52.1311942+00:00",
+    "matrixElapsedSeconds": 12514,
+    "roundRunnerMinSeconds": 597,
+    "roundRunnerMaxSeconds": 691,
+    "roundRunnerMeanSeconds": 625,
+    "roundDurationScope": "Each runner start through cleanup and exit; not UI Flow duration."
+  },
+  "result": {
+    "planned": 20,
+    "firstPassCount": 20,
+    "firstPassRate": 1,
+    "finalPassCount": 20,
+    "threshold": 0.95,
+    "minimumPassCount": 19,
+    "retryUsed": false,
+    "manualIntervention": "none",
+    "cleanupCompleteCount": 20,
+    "releaseConfirmed": true,
+    "deviceGate": "clean",
+    "ciState": "released",
+    "qualified": true,
+    "formalQualified": false,
+    "formalScope": "Supplementary development plan; formal installation and preparation evidence were not registered."
+  },
+  "hdc": {
+    "retainedFlowLogs": 20,
+    "calls": 15673,
+    "failedCalls": 0,
+    "allLogsStable": true,
+    "collectionErrors": 0,
+    "scope": "Retained Flow logs; session setup and teardown are verified by completion evidence separately."
+  },
+  "evidence": {
+    "releaseManifestSha256": "a26df91f253d5ff567ad7955251f4331003a6bfef3b46b3de67926dc898c2d1d",
+    "planSha256": "98015d6082a329659df2fc5eaf28e7706ad7ee697336025a5fa1440fe2797c95",
+    "reviewedSummarySha256": "60eeae5555b16e96cd60a0556c01e1ec59f3d1a2af6d762a15e937d89928d609",
+    "matrixSha256": "ae1857505ef37e35293798fad03c57019067cb536fb243b024cba3c7744cbc51",
+    "operatorReviewSha256": "894a9002516ce78b69e7ab8bc12fa175a8c641f9eada9236dfeb4fdeb4e4d10b",
+    "copyVerificationSha256": "36b75e6543fe354f61da6cad10727de09d850627c68452ded9db5fcf283654e9",
+    "hdcIndexSha256": "64d7c477d6b07e866fc09a4baa59a5a4ecab20b9d4c704fbd48d9ac77a396c03",
+    "finalGateSha256": "9fa55c6d5bc3c5432799a5f587caafa5fa5382a58b063deef69a657e84db8ab0",
+    "finalCiStateSha256": "44e250fd1e72bc7fb72128fc3ce8ed007a69184f8d64f9caa81d83e798886c50"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 611,
+      "resultSha256": "0b6f80dfaf9e0f4d17bb6038080173855622645ea9a375ab9227ba155ac29c58",
+      "controlSha256": "9a1cf1e04f8e0386d3be67e15cb1d1dd0b485bd0f8674d5d2057e0864818943d",
+      "evidenceIndexSha256": "07661487c422df51dddb16a3c689f83c3b52bbdbd9bb5fa232bb62ab4c5cf940"
+    },
+    {
+      "round": 2,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 614,
+      "resultSha256": "fee8a59d8274613518a6ffb00b9729ea1e82a8317a90f8ff2ef5fb89d02dc9a6",
+      "controlSha256": "a1901d2ad7a40954c0952451ad13ddcd81049dae2c0f6303690f49a571afc70d",
+      "evidenceIndexSha256": "ffa1cecb8d81ee9ef1739bf3ab63247581d5026254b3ddb583c061a285432acd"
+    },
+    {
+      "round": 3,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 604,
+      "resultSha256": "1bb405242b658d91c14d7c82a3545c017d6047cd86d1bed179022c2692072bbf",
+      "controlSha256": "bcb36573d6153d125b36b479449e3c05c00593b633f0367a8abaa864781bf083",
+      "evidenceIndexSha256": "175799a1a1f75407fd000e115bf521b209fc76d620fb2a3af297dc36d5d4aa5b"
+    },
+    {
+      "round": 4,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 597,
+      "resultSha256": "8400c59c40ce04b4fc61e3a4732ba7a876be439856e1a2c5adb3122cfc3922fa",
+      "controlSha256": "afb637703a5b0df5eb2637ce3f42acc38ffc1673b267cd2681459050bba68f6e",
+      "evidenceIndexSha256": "76637f0e0ccd6e94674f9dd934dbaa07fbf9ae462d052a47bac261483d6854cb"
+    },
+    {
+      "round": 5,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 598,
+      "resultSha256": "739c4998f4587b4e106b42ed492e1f97293255d2d4c2231e93109bffa7eada67",
+      "controlSha256": "18af472ce697ec6553e5f2e5d7f8c832a54f46f9f1947b0ea28da50f3622981c",
+      "evidenceIndexSha256": "ad1d16bb36914dbccfc93b66a2bce591e7324ac5e85171cd183ace5496710653"
+    },
+    {
+      "round": 6,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 602,
+      "resultSha256": "71112f340f41f67327e3321f3fde70aab03eb7d243cc8eed99ce0fd8a0e0edbb",
+      "controlSha256": "8d66fab8445bb9e89c159a38702ed8fb9918cd7e7a92c1250092660fd596b736",
+      "evidenceIndexSha256": "178b7927ea64eb53295ac34008aa490e1e222a4bfe0a66fd0b557164368d231e"
+    },
+    {
+      "round": 7,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 603,
+      "resultSha256": "ea920eeb21234ba44f16641c5d0972325b1d9b1870abdc85d5d0bca31e194f65",
+      "controlSha256": "4e8799334c472a2c19f701372e5cb5ca94e4f5bb046d6ee542c00edb3ab3cb9d",
+      "evidenceIndexSha256": "92141dd52ea21a7fb8a6ef0a3faef09d0b5fecb2b84f4c15fba4ec2c51aec650"
+    },
+    {
+      "round": 8,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 601,
+      "resultSha256": "8c9c7858731de0a0b2dbabcff0cc249beda4ed831c54256932b66c373dc63eaa",
+      "controlSha256": "13096c791df03677bcbb890d7bcb09d762ef87a677e29feded6d07e3db920b9c",
+      "evidenceIndexSha256": "63fb538e46e102e1a67c16e52791fdfce8f039903a10ba96434e07caa11af3f7"
+    },
+    {
+      "round": 9,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 608,
+      "resultSha256": "6733668e681fa848d426b983332ce1032ef02a3afc3c85da244eda1836b7e351",
+      "controlSha256": "f336f0037ca15e81536551543cc7652cba72bdd1027abf34fd8cf35da240a0ef",
+      "evidenceIndexSha256": "becd9912407e3722eb12baa753e506bfa47fb9690e38c401c6af82af042d3455"
+    },
+    {
+      "round": 10,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 609,
+      "resultSha256": "231aa5a26c2ddbd1f156aef389b3d4d84116df8137641f523124b48bbbeeea2a",
+      "controlSha256": "c4d82229025c7caa9ff3c6b71626896c7ec5632855d846c8b4018114e0f8dcce",
+      "evidenceIndexSha256": "5358c289ff030eb6878b74f149a8724914db90301e2ecd56fc8049eca007c9bb"
+    },
+    {
+      "round": 11,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 608,
+      "resultSha256": "840914f7aa2573e791c5c4163b5289b0ccfa72b5067970ca5a29c747cc172543",
+      "controlSha256": "97c42d39ae9ebd5f6c293b8042dda17a0b2f6452b450b7865d799bc1939763f5",
+      "evidenceIndexSha256": "d897dcdd8831230d6cfdd03a79207c9e284b220554387eb312a838669701b8f8"
+    },
+    {
+      "round": 12,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 598,
+      "resultSha256": "3f7e28f71b89dea7ce36e0b401c4c0ca27f8a03194c6c68f3b538d468a4bf581",
+      "controlSha256": "93caed3b2f4aa50bc26ef32e50992dff9d2dfdb4f1a43ae60f4f30ea7e3fb796",
+      "evidenceIndexSha256": "9bfc00ac04e8c8cf7f842a862135a6c151cf35bcd191dc2790b4a051a97c80e0"
+    },
+    {
+      "round": 13,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 608,
+      "resultSha256": "787f1e23f25440ada7091101aa9582acf668899e6f4f4ba112e1834bdb646800",
+      "controlSha256": "d8ee3e3346a61a26ce1e22abfb718a9426a1dc2271392ed859bd242fffcd5fd7",
+      "evidenceIndexSha256": "cdb704aca6b13a149592e2d41a580f4995c7ee7507f99a30cf86d97755eb99f5"
+    },
+    {
+      "round": 14,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 607,
+      "resultSha256": "cf71eeefe58523e13f05319851b4a035ea0a2fe6a2f9c6fedefda8e635360197",
+      "controlSha256": "94fe8df498905e60f5aca06b42fb9a498feead11ce68d817705d29f5aaf6b249",
+      "evidenceIndexSha256": "a66e35c2a3ac74ea505aaa55402b42fca08c262fdfa7e6be0b552c1caec53586"
+    },
+    {
+      "round": 15,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 645,
+      "resultSha256": "88994b4e1dd2079893af5ea0eecd84ef95a8b0265f616bb6f17df85c7e5c2998",
+      "controlSha256": "91002a8644dde7436ff4825b47cd6358ee5c2a6abb0e8a9c6be0f0ba1a4a6ef4",
+      "evidenceIndexSha256": "de7af341f4e382634ccbfbaeda0e34f272bb145f30008c19dda4fab4948d253e"
+    },
+    {
+      "round": 16,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 690,
+      "resultSha256": "6cebbc201ecfa0ac9c428d5e12b17d79aca979bc257020cfea8ff81f7d5f9cfd",
+      "controlSha256": "38fde692586704fba211579970b7ddb6d06ee409b19fd9fd9787fab5c826b920",
+      "evidenceIndexSha256": "dbf522fb91c093b5ae0723eb9f0f0b78b123d739f63575d0ae5c129cea3e6514"
+    },
+    {
+      "round": 17,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 675,
+      "resultSha256": "41a2c91568d149f39830bd937864231812ddc05f5e3790df91a48bdda01e656e",
+      "controlSha256": "1878ca2d6565cba500cb0c7f61afb302e3b9749f9ee04d58a234d2e42591d61a",
+      "evidenceIndexSha256": "ae23472b85e608741280c297308cc80225f078de39bcfbc5279cd2fb2c0bf337"
+    },
+    {
+      "round": 18,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 691,
+      "resultSha256": "058e62b316e63327094a6cb7fc7773393bc203e37dc21bc4126cb27085c6b621",
+      "controlSha256": "f0b6b2da694a573e65b37fb3fd9c696cda1a809d729785091d9e30c5ed6510c1",
+      "evidenceIndexSha256": "8e3e56b5390b9ba336c8f910c5eb8501fe18df3333b6427d171661629766bd91"
+    },
+    {
+      "round": 19,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 689,
+      "resultSha256": "b0c06dd71e0b6870491d59886369bc9b9737dfa20e3dcb500514dd97edc119c5",
+      "controlSha256": "26b4a0373606f03a74bd21e6fd795041dbf745e6360164914f51fd2b84198c11",
+      "evidenceIndexSha256": "d8c7df84dfd24fae4c2d4e3ea1081ee3577490223cb6db72005271b76809af85"
+    },
+    {
+      "round": 20,
+      "firstPassStatus": "passed",
+      "retryUsed": false,
+      "manualIntervention": "none",
+      "cleanup": "complete",
+      "runnerElapsedSeconds": 649,
+      "resultSha256": "394f4e19471b8aa4e465c3e95e3058573daf2234217d4b2a1009a5df404c03db",
+      "controlSha256": "777f5ff7961824716238a00cf13cef55fd32004f51c4ff463055b1b7c1386093",
+      "evidenceIndexSha256": "153fd33cbd8f550065a7edaebac5ae5c5db069cc12237f435d2dfb34c0c6a3fb"
+    }
+  ],
+  "history": {
+    "priorTabletBatch": "Preserved as 5 passed, 1 unknown and 14 not run.",
+    "priorPhone20Rounds": "Preserved against its original frozen CLI; not combined with this batch."
+  }
+}
