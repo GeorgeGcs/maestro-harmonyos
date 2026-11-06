@@ -122,7 +122,7 @@ Kotlin 实现采用固定上游加补丁的交付方式；VSCode 扩展、运行
 
 ### 通过鸿测 Agent 提交回归任务
 
-**开源地址：[https://gitcode.com/HarmonyPandaWorkshop/hongce-agent](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)**
+**开源地址：[https://atomgit.com/HarmonyPandaWorkshop/hongce-agent](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent)**
 
 需要让 Agent 执行已有 YAML 并交付报告时，可使用鸿测 Agent。它将本项目的 CLI 封装为独立 worker，提供任务提交、请求去重、状态查询、证据核验和 JSON/HTML 报告。Maestro HarmonyOS 负责实际设备操作与会话清理；上层 Agent 按宿主能力选择 MCP、CLI 或 HTTP，调用同一个 worker。
 
