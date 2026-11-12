@@ -19,6 +19,8 @@
     element('coordinate').disabled = !ready || !selectedPoint || !state.snapshot;
     for (const id of ['save', 'replay', 'clear']) element(id).disabled = state.busy || !state.steps.length;
     element('artifacts').disabled = !state.artifactsDir;
+    element('replayFailure').hidden = !state.hasReplayFailure;
+    element('replayFailure').disabled = state.busy;
     element('stop').disabled = !state.busy && !state.connected;
   }
   function paintSelection() {
@@ -47,7 +49,7 @@
     selectedNode = selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null;
     paintSelection(); buttons();
   });
-  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'clear', 'stop', 'artifacts']) element(id).addEventListener('click', () => send(id));
+  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts']) element(id).addEventListener('click', () => send(id));
   element('launch').addEventListener('click', () => action({ type: 'launchApp' }));
   element('back').addEventListener('click', () => action({ type: 'back' }));
   element('tap').addEventListener('click', () => { if (selectedNode && state.snapshot) action({ type: 'tapOn', snapshotId: state.snapshot.snapshotId, nodeId: selectedNode.nodeId }); });

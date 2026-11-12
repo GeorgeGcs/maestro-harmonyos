@@ -6,6 +6,7 @@ import { BridgeClient } from './bridge';
 import { createRunDirectory, javaLaunch, replayFlow, stopOwnProcess, ToolSettings } from './launcher';
 import { object, parseDevices, string } from './protocol';
 import { RecorderSession, OperationStopped, errorMessage } from './session';
+import { replayEvidence, replayFileHash } from './replay-evidence';
 
 let recorder: Recorder | undefined;
 export function activate(context: vscode.ExtensionContext): { getStatus(): { panelOpen: boolean; connected: boolean; busy: boolean; steps: number } } {
@@ -129,6 +130,27 @@ class Recorder implements vscode.Disposable {
     const closingSession = this.session.stop();
     await Promise.all([closingSession, stopOwnProcess(process), bridge?.dispose()]);
   }
+  private async showReplayFailure(): Promise<void> {
+    const failure = this.session.state.replayFailure;
+    if (!failure || this.session.state.busy) return;
+    const links = await replayEvidence(failure);
+    if (failure !== this.session.state.replayFailure) return;
+    if (!links.length) {
+      this.output.show(true);
+      return;
+    }
+    const picked = await vscode.window.showQuickPick(links, { placeHolder: '打开本次失败的 YAML、截图或日志' });
+    if (!picked || failure !== this.session.state.replayFailure) return;
+    const uri = vscode.Uri.file(picked.file);
+    if (picked.offset === undefined) {
+      await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(uri);
+    if (replayFileHash(Buffer.from(document.getText(), 'utf8')) !== picked.sha256) throw new Error('运行时的 YAML 快照已改变。');
+    const line = document.lineAt(document.positionAt(picked.offset).line);
+    await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, selection: line.range });
+  }
   dispose(): void { void this.stop(); this.output.dispose(); }
   private async message(message: unknown): Promise<void> {
     if (!object(message) || !string(message.type, 30)) throw new Error('无效的面板消息。');
@@ -140,6 +162,7 @@ class Recorder implements vscode.Disposable {
       case 'action': await this.session.action(message.action); return;
       case 'save': await this.save(); return;
       case 'replay': await this.replay(); return;
+      case 'replayFailure': await this.showReplayFailure(); return;
       case 'stop': await this.stop(); return;
       case 'clear':
         if (!this.session.state.steps.length || await vscode.window.showWarningMessage('清空当前录制步骤？已保存的 YAML 文件不受影响。', { modal: true }, '清空') === '清空') this.session.clear();
@@ -151,7 +174,9 @@ class Recorder implements vscode.Disposable {
     }
   }
   private render(): void {
-    void this.panel?.webview.postMessage({ type: 'state', ...this.session.state, busy: this.session.state.busy || this.connecting, yaml: this.session.yaml() });
+    const { replayFailure, ...state } = this.session.state;
+    void this.panel?.webview.postMessage({ type: 'state', ...state, hasReplayFailure: !!replayFailure,
+      busy: state.busy || this.connecting, yaml: this.session.yaml() });
   }
   private html(webview: vscode.Webview): string {
     const nonce = randomBytes(24).toString('hex');
@@ -168,6 +193,6 @@ class Recorder implements vscode.Disposable {
 <div class="row"><label for="direction">滑动方向</label><select id="direction"><option value="UP">向上</option><option value="DOWN">向下</option><option value="LEFT">向左</option><option value="RIGHT">向右</option></select><button id="swipe">滑动</button></div>
 <div class="row"><input id="screenshotName" value="recorded-screen" aria-label="截图名称" maxlength="80"><button id="screenshot">保存截图步骤</button></div>
 <details><summary>控件树 <span id="nodeCount"></span></summary><div id="nodes" role="list"></div></details></section></div>
-<section class="flow"><div class="row"><h2>已录制流程 <span id="stepCount">0 步</span></h2><button id="save">保存 YAML</button><button id="replay">回放流程</button><button id="clear" class="secondary">新建流程</button><button id="artifacts" class="secondary">打开产物</button></div><textarea id="yaml" readonly rows="10" aria-label="录制的 YAML"></textarea></section><footer>仅记录通过本插件执行的操作。回放期间会释放录制会话；结束后可重新连接。录制不依赖系统视频录屏。</footer><script nonce="${nonce}" src="${geometry}"></script><script nonce="${nonce}" src="${script}"></script></body></html>`;
+<section class="flow"><div class="row"><h2>已录制流程 <span id="stepCount">0 步</span></h2><button id="save">保存 YAML</button><button id="replay">回放流程</button><button id="replayFailure" hidden>查看回放失败</button><button id="clear" class="secondary">新建流程</button><button id="artifacts" class="secondary">打开产物</button></div><textarea id="yaml" readonly rows="10" aria-label="录制的 YAML"></textarea></section><footer>仅记录通过本插件执行的操作。回放期间会释放录制会话；结束后可重新连接。录制不依赖系统视频录屏。</footer><script nonce="${nonce}" src="${geometry}"></script><script nonce="${nonce}" src="${script}"></script></body></html>`;
   }
 }
