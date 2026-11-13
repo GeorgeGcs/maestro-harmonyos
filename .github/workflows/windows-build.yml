@@ -45,6 +45,15 @@ jobs:
                 if ($detail) { $message += "`n" + ($detail -join "`n") }
               }
             }
+            $testClasses = 'HarmonyOSRecoveryJournalTest', 'ProcessHdcCommandRunnerTest', 'HdcDiagnosticLogConfigTest'
+            foreach ($testClass in $testClasses) {
+              $file = Get-ChildItem -Path 'artifacts/ci-host/junit' -Filter "TEST-*.$testClass.xml" -ErrorAction SilentlyContinue
+              if ($file) {
+                [xml]$junit = Get-Content -LiteralPath $file.FullName -Raw
+                $failure = $junit.SelectSingleNode('//failure')
+                if ($failure) { $message += "`n${testClass}: " + $failure.GetAttribute('message') }
+              }
+            }
             $escaped = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error::$escaped"
           }
