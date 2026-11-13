@@ -41,11 +41,16 @@ jobs:
           if (Test-Path -LiteralPath $reportPath) {
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             $message = "Stage $($report.stage): $($report.error)"
-            if ($report.stage -eq 'host-tests') {
-              $testLog = 'artifacts/ci-host/host-tests.log'
-              if (Test-Path -LiteralPath $testLog) {
-                $detail = Get-Content -LiteralPath $testLog -Tail 100 |
-                  Select-String -Pattern '(^e: |Exception|Could not |Caused by:| FAILED|failed|timed out)' |
+            $logName = switch ($report.stage) {
+              'host-tests' { 'host-tests' }
+              'extension' { ($report.error -split ' ', 2)[0] }
+              'cli' { ($report.error -split ' ', 2)[0] }
+            }
+            if ($logName -match '^[a-z][a-z0-9-]+$') {
+              $logPath = Join-Path 'artifacts/ci-host' "$logName.log"
+              if (Test-Path -LiteralPath $logPath) {
+                $detail = Get-Content -LiteralPath $logPath -Tail 100 |
+                  Select-String -Pattern '(^e: |error|Exception|Could not |Caused by:| FAILED|failed|timed out|^not ok)' |
                   Select-Object -Last 12 -ExpandProperty Line
                 if ($detail) { $message += "`n" + ($detail -join "`n") }
               }
