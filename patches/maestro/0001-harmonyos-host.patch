@@ -21513,10 +21513,10 @@ index 0000000..5755356
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
 new file mode 100644
-index 0000000..eee842b
+index 0000000..2077cb2
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,223 @@
 +package maestro.harmonyos.hdc
 +
 +import com.google.common.truth.Truth.assertThat
@@ -21544,7 +21544,7 @@ index 0000000..eee842b
 +    @Test
 +    fun `host arguments remain literal without a command shell`() {
 +        val arguments = listOf(
-+            "space separated", "中文", "a'\"b", "\$HOME; echo injected", "", "line\nbreak",
++            "space separated", "a'\"b", "\$HOME; echo injected", "", "line\nbreak",
 +            "\"", "\"\"", "\"quoted\"", "plain\\", "path with space\\", "\\", "\\\\",
 +            " leading ", "\ttab\t", "line\r\nbreak",
 +        ) + (0..5).flatMap { count ->
@@ -21559,6 +21559,29 @@ index 0000000..eee842b
 +
 +        assertThat(result.exitCode).isEqualTo(0)
 +        assertThat(decoded).containsExactlyElementsIn(arguments).inOrder()
++    }
++
++    @Test
++    fun `preserves Unicode arguments with a Unicode-capable child process`() {
++        val text = "中文"
++        if (!System.getProperty("os.name").startsWith("Windows")) {
++            val result = ProcessHdcCommandRunner().run(HdcProcessTestChild.command("arguments", text), Duration.ofSeconds(10))
++            assertThat(result.exitCode).isEqualTo(0)
++            assertThat(result.stdout.trim()).isEqualTo("arg:" + Base64.getEncoder().encodeToString(text.toByteArray()))
++            return
++        }
++
++        // The Windows Java 17 launcher converts its own argv through the ANSI code page.
++        // Use PowerShell 7 to check the Unicode actually sent by the Windows process runner.
++        TempFileHandler().use { temporary ->
++            val script = temporary.createTempFile("hdc-unicode", ".ps1")
++            script.writeText("""[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(${')))""")}args[0])))""")
++            val result = ProcessHdcCommandRunner().run(
++                listOf("pwsh.exe", "-NoProfile", "-NonInteractive", "-File", script.absolutePath, text), Duration.ofSeconds(10),
++            )
++            assertThat(result.exitCode).isEqualTo(0)
++            assertThat(result.stdout.trim()).isEqualTo(Base64.getEncoder().encodeToString(text.toByteArray()))
++        }
 +    }
 +
 +    @Test
