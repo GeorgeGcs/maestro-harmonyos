@@ -27,7 +27,12 @@ jobs:
           node-version: '22'
       - name: Build CLI and VSIX and run host tests
         shell: pwsh
-        run: ./scripts/ci/build-windows.ps1
+        run: |
+          $tempDirectory = Join-Path $env:RUNNER_TEMP 'maestro-host'
+          $null = New-Item -ItemType Directory -Path $tempDirectory
+          $env:TEMP = $tempDirectory
+          $env:TMP = $tempDirectory
+          ./scripts/ci/build-windows.ps1
       - name: Report failed build stage
         if: ${{ failure() }}
         shell: pwsh
@@ -43,15 +48,6 @@ jobs:
                   Select-String -Pattern '(^e: |Exception|Could not |Caused by:| FAILED|failed|timed out)' |
                   Select-Object -Last 12 -ExpandProperty Line
                 if ($detail) { $message += "`n" + ($detail -join "`n") }
-              }
-            }
-            $testClasses = 'HarmonyOSRecoveryJournalTest', 'ProcessHdcCommandRunnerTest', 'HdcDiagnosticLogConfigTest'
-            foreach ($testClass in $testClasses) {
-              $file = Get-ChildItem -Path 'artifacts/ci-host/junit' -Filter "TEST-*.$testClass.xml" -ErrorAction SilentlyContinue
-              if ($file) {
-                [xml]$junit = Get-Content -LiteralPath $file.FullName -Raw
-                $failure = $junit.SelectSingleNode('//failure')
-                if ($failure) { $message += "`n${testClass}: " + $failure.GetAttribute('message') }
               }
             }
             $escaped = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
