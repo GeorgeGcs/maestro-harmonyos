@@ -14,6 +14,7 @@ kotlin {
                 "maestro/harmonyos/**",
                 "maestro/TreeNode.kt",
                 "maestro/ScreenRecording.kt",
+                "maestro/debuglog/LogConfig.kt",
                 "maestro/debuglog/RecordingDiagnosticContext.kt",
                 "TempFileHandler.kt",
             )
@@ -38,6 +39,7 @@ dependencies {
     implementation(libs.jackson.module.kotlin)
     implementation(libs.square.okio.jvm)
     implementation(libs.logging.sl4j)
+    implementation(libs.log4j.core)
     testImplementation(libs.junit.jupiter.api)
     testImplementation(libs.junit.jupiter.params)
     testImplementation(libs.google.truth)
