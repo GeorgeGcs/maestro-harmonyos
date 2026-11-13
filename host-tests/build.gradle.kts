@@ -16,6 +16,7 @@ kotlin {
                 "maestro/ScreenRecording.kt",
                 "maestro/debuglog/LogConfig.kt",
                 "maestro/debuglog/RecordingDiagnosticContext.kt",
+                "maestro/debuglog/ScopedLogCapture.kt",
                 "TempFileHandler.kt",
             )
         }
