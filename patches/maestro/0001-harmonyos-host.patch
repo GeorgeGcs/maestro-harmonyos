@@ -21513,7 +21513,7 @@ index 0000000..5755356
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
 new file mode 100644
-index 0000000..2077cb2
+index 0000000..6322d73
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
 @@ -0,0 +1,223 @@
@@ -21575,7 +21575,7 @@ index 0000000..2077cb2
 +        // Use PowerShell 7 to check the Unicode actually sent by the Windows process runner.
 +        TempFileHandler().use { temporary ->
 +            val script = temporary.createTempFile("hdc-unicode", ".ps1")
-+            script.writeText("""[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(${')))""")}args[0])))""")
++            script.writeText("""[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(${'$'}args[0])))""")
 +            val result = ProcessHdcCommandRunner().run(
 +                listOf("pwsh.exe", "-NoProfile", "-NonInteractive", "-File", script.absolutePath, text), Duration.ofSeconds(10),
 +            )
