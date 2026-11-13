@@ -74,6 +74,17 @@ JVM 适配代码保存在 [0001-harmonyos-host.patch](../patches/maestro/0001-ha
 
 ## 3. 模块职责与代码入口
 
+### 实验性 RPC 取树
+
+默认通过 HDC 执行 UITest `dumpLayout`。如果测试环境已经为指定设备准备好 UITest 守护进程及本机转发，CLI 可通过两个环境变量启用只读取树的常驻连接：
+
+- `MAESTRO_HARMONYOS_LAYOUT_RPC_PORT`：本机 `127.0.0.1` 上的转发端口，范围 1024–65535。
+- `MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE`：转发所属设备的序列号，必须与 CLI 选中的设备一致。运行前核对 HDC 转发列表，确认该端口实际指向所选设备。
+
+两个变量都未设置时走默认路径。打开驱动时检查 RPC 可用性，关闭驱动时关闭本机连接。CLI 不管理设备端 agent、守护进程和转发的生命周期，操作者负责准备及释放这些资源。连接被对端提前关闭时，在原读取预算内重新连接一次。连接失败、协议错误和超时会显式报错。点击、输入、截图和录屏继续使用原有接口。
+
+RPC 响应交给现有布局解析器。不同设备或系统的控件树可能有差异，当前仅在 HarmonyOS 7 平板上验证了短断言 Flow。用于正式回归前，应先对照现有选择器和场景覆盖。设备工具及请求格式参考 [DevEco CLI](https://gitcode.com/openharmony-sig/deveco-cli/tree/c7513935017d75a8e42f0cfd81a232eccf4b30be)。
+
 下表中以 `maestro-` 开头的源码路径均相对本地 `.upstream/maestro/`。这些文件通过上面的版本化补丁交付，浏览本仓网页时应查看补丁；直接点击忽略目录不会获得源文件。
 
 | 模块 | 主要入口 | 负责什么 |
