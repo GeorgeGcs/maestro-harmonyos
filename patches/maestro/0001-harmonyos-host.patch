@@ -5574,10 +5574,10 @@ index 0000000..4baba89
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..ec2c9a2
+index 0000000..9198dd3
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,208 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -5657,6 +5657,11 @@ index 0000000..ec2c9a2
 +        HarmonyOSDriverConfig(
 +            abilityName = environment["MAESTRO_HARMONYOS_ABILITY"]?.trim()?.takeIf { it.isNotEmpty() },
 +            moduleName = environment["MAESTRO_HARMONYOS_MODULE"]?.trim()?.takeIf { it.isNotEmpty() },
++            layoutRpcPort = environment["MAESTRO_HARMONYOS_LAYOUT_RPC_PORT"]?.let {
++                it.toIntOrNull()?.takeIf { port -> port in 1024..65535 }
++                    ?: throw CliError("MAESTRO_HARMONYOS_LAYOUT_RPC_PORT must be 1024..65535.")
++            },
++            layoutRpcDevice = environment["MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE"],
 +            enableScreenRecording = when (val backend = environment["MAESTRO_HARMONYOS_RECORDING"]?.trim()) {
 +                null, "", "off" -> false
 +                "huawei-system" -> true
@@ -11274,10 +11279,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..36566fd
+index 0000000..c00d51a
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,431 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -11319,7 +11324,9 @@ index 0000000..36566fd
 +        deviceId: String,
 +        hdc: HdcClient = HdcClient(),
 +        config: HarmonyOSDriverConfig = HarmonyOSDriverConfig(),
-+    ) : this(HdcHarmonyOSDevice(deviceId, hdc), config)
++    ) : this(HdcHarmonyOSDevice(deviceId, hdc, config.layoutRpcPort.also {
++        require(it == null || deviceId == config.layoutRpcDevice) { "Layout RPC target differs from the selected device" }
++    }), config)
 +
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
@@ -11334,9 +11341,14 @@ index 0000000..36566fd
 +        if (opened) return
 +        checkInterrupted()
 +        device.connect()
-+        capture(config.commandTimeout)
-+        hierarchy()
-+        opened = true
++        try {
++            capture(config.commandTimeout)
++            hierarchy()
++            opened = true
++        } catch (error: Throwable) {
++            device.disconnect()
++            throw error
++        }
 +    }
 +
 +    @Synchronized
@@ -11348,6 +11360,8 @@ index 0000000..36566fd
 +            current?.close()
 +        } catch (error: Throwable) {
 +            rememberRecordingFailure(error)
++        } finally {
++            device.disconnect()
 +        }
 +        recordingFailure?.let { throw it }
 +    }
@@ -11744,10 +11758,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..c709222
+index 0000000..e5ed227
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,18 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -11758,6 +11772,7 @@ index 0000000..c709222
 +/** Device boundary; tests replace the transport while keeping the real Maestro driver. */
 +interface HarmonyOSDevice {
 +    fun connect()
++    fun disconnect() {}
 +    fun isAvailable(): Boolean
 +    fun hierarchy(timeout: Duration): TreeNode
 +    fun screenshot(timeout: Duration): ByteArray
@@ -11767,10 +11782,10 @@ index 0000000..c709222
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..a950816
+index 0000000..d74b873
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,45 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -11786,8 +11801,12 @@ index 0000000..a950816
 +    val recordingStopTimeout: Duration = Duration.ofSeconds(30),
 +    val recordingMaxBytes: Long = 512L * 1024 * 1024,
 +    val recordingRetainMedia: Boolean = false,
++    val layoutRpcPort: Int? = null,
++    val layoutRpcDevice: String? = null,
 +) {
 +    init {
++        require((layoutRpcPort == null) == (layoutRpcDevice == null)) { "Set both layout RPC port and target device" }
++        layoutRpcPort?.let { require(it in 1024..65535) { "Layout RPC port must be 1024..65535" } }
 +        for (timeout in listOf(commandTimeout, settleTimeout, pollInterval)) {
 +            require(timeout >= Duration.ofMillis(1) && timeout <= Duration.ofMinutes(5)) {
 +                "HarmonyOS timeouts must be between 1 ms and 5 minutes"
@@ -12596,10 +12615,10 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..df9d345
+index 0000000..45b04d2
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,197 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12611,6 +12630,7 @@ index 0000000..df9d345
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.layout.HierarchyReader
++import maestro.harmonyos.layout.LoopbackLayoutChannel
 +import maestro.utils.TempFileHandler
 +import java.nio.file.Files
 +import java.nio.file.LinkOption
@@ -12633,7 +12653,11 @@ index 0000000..df9d345
 +class HdcHarmonyOSDevice(
 +    private val deviceId: String,
 +    private val hdc: HdcClient = HdcClient(),
++    layoutPort: Int? = null,
 +) : HarmonyOSDevice {
++    private val layoutChannel = layoutPort?.let(::LoopbackLayoutChannel)
++
++    override fun disconnect() { layoutChannel?.close() }
 +    override fun connect() {
 +        hdc.selectDevice(deviceId)
 +    }
@@ -12646,6 +12670,7 @@ index 0000000..df9d345
 +        }, config, hdc.recordingResources()).start(out)
 +
 +    override fun hierarchy(timeout: Duration): TreeNode {
++        layoutChannel?.let { return it.snapshot(timeout) }
 +        return HierarchyReader(
 +            hdc, deviceId,
 +            commandTimeout = timeout,
@@ -15543,6 +15568,142 @@ index 0000000..ec58193
 +}
 +
 +class HierarchyReadException(message: String, cause: Throwable? = null) : HdcException(message, cause)
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
+new file mode 100644
+index 0000000..98d0246
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
+@@ -0,0 +1,130 @@
++package maestro.harmonyos.layout
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.TreeNode
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import java.io.BufferedInputStream
++import java.io.ByteArrayOutputStream
++import java.io.EOFException
++import java.io.FilterInputStream
++import java.io.IOException
++import java.net.InetSocketAddress
++import java.net.Socket
++import java.net.SocketTimeoutException
++import java.net.ConnectException
++import java.time.Duration
++
++/** Read-only UITest layout RPC over a separately managed loopback forward. */
++internal class LoopbackLayoutChannel(private val port: Int) : AutoCloseable {
++    private val mapper = ObjectMapper()
++    private val layouts = UitestLayoutParser()
++    private var connection: Socket? = null
++    private var input: BufferedInputStream? = null
++    private var readDeadlineNanos = 0L
++    private var sequence = 0L
++    private val logger = org.slf4j.LoggerFactory.getLogger(LoopbackLayoutChannel::class.java)
++
++    @Synchronized
++    fun snapshot(timeout: Duration): TreeNode {
++        readDeadlineNanos = System.nanoTime() + timeout.toNanos()
++        try {
++            return request(timeout)
++        } catch (error: EOFException) {
++            // Only this read-only request can be repeated after a peer closes the socket.
++            logger.debug("UITest closed the layout connection; opening it once more", error)
++            return request(timeout)
++        }
++    }
++
++    private fun request(timeout: Duration): TreeNode {
++        try {
++            val socket = connection ?: Socket().also {
++                connection = it
++                it.connect(InetSocketAddress("127.0.0.1", port), remainingMillis())
++                it.tcpNoDelay = true
++                input = BufferedInputStream(object : FilterInputStream(it.getInputStream()) {
++                    override fun read(bytes: ByteArray, offset: Int, length: Int): Int {
++                        it.soTimeout = remainingMillis()
++                        return super.read(bytes, offset, length)
++                    }
++                })
++            }
++            val id = (++sequence).toString()
++            socket.getOutputStream().write(mapper.writeValueAsBytes(mapOf(
++                "module" to "com.ohos.devicetest.hypiumApiHelper",
++                "method" to "Captures",
++                "params" to mapOf("api" to "captureLayout", "args" to emptyMap<String, String>()),
++                "request_id" to id,
++            )))
++            val source = checkNotNull(input)
++            val payload = receiveLayoutFrame {
++                source.read()
++            }
++            val result = mapper.readTree(payload)
++            val responseId = result.get("request_id")
++            if ((responseId != null && !responseId.isNull && responseId.asText() != id) ||
++                result.get("exception")?.let { !it.isNull && !(it.isTextual && it.asText().isEmpty()) } == true
++            ) throw HdcException("UITest layout RPC returned an error or a mismatched request ID")
++            val layout = result.get("result") ?: throw HdcException("UITest layout RPC returned no tree")
++            val tree = layouts.parse(if (layout.isTextual) layout.asText() else layout.toString())
++            remainingMillis()
++            return tree
++        } catch (error: Exception) {
++            close()
++            when (error) {
++                is SocketTimeoutException -> throw HdcTimeoutException(timeout, "UITest layout RPC exceeded its read deadline")
++                is EOFException -> throw error
++                is ConnectException -> throw HdcException("Cannot connect to the configured UITest layout forward", error)
++                is IOException -> throw HdcException("UITest layout RPC failed: ${error.message}", error)
++                else -> throw error
++            }
++        }
++    }
++
++    private fun remainingMillis(): Int {
++        if (Thread.currentThread().isInterrupted) throw InterruptedException("Layout RPC interrupted")
++        val nanos = readDeadlineNanos - System.nanoTime()
++        if (nanos <= 0) throw SocketTimeoutException("Layout RPC deadline expired")
++        return (nanos / 1_000_000).coerceAtLeast(1).toInt()
++    }
++
++    @Synchronized
++    override fun close() {
++        try { connection?.close() } catch (_: IOException) { /* Socket is no longer usable. */ }
++        connection = null
++        input = null
++    }
++}
++
++private const val MAX_FRAME = 8 * 1024 * 1024
++
++/** The supported daemon can reply with a bare object or a big-endian length prefix. */
++internal fun receiveLayoutFrame(read: () -> Int): ByteArray {
++    fun next(): Int = read().also { if (it < 0) throw EOFException("Incomplete UITest layout frame") }
++    var first = next()
++    while (first in listOf(9, 10, 13, 32)) first = next()
++    if (first != '{'.code) {
++        val size = (first shl 24) or (next() shl 16) or (next() shl 8) or next()
++        if (size !in 2..MAX_FRAME) throw IOException("Invalid UITest layout frame size")
++        return ByteArray(size) { next().toByte() }
++    }
++    val bytes = ByteArrayOutputStream()
++    bytes.write(first)
++    var depth = 1
++    var quoted = false
++    var escaped = false
++    while (depth != 0) {
++        if (bytes.size() >= MAX_FRAME) throw IOException("UITest layout frame exceeds 8 MiB")
++        val char = next()
++        bytes.write(char)
++        if (escaped) escaped = false
++        else if (quoted && char == '\\'.code) escaped = true
++        else if (char == '"'.code) quoted = !quoted
++        else if (!quoted) when (char) {
++            '{'.code -> depth++
++            '}'.code -> depth--
++        }
++    }
++    return bytes.toByteArray()
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/UitestLayoutParser.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/UitestLayoutParser.kt
 new file mode 100644
 index 0000000..7670c31
@@ -21352,10 +21513,10 @@ index 0000000..5755356
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
 new file mode 100644
-index 0000000..eee842b
+index 0000000..6322d73
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/ProcessHdcCommandRunnerTest.kt
-@@ -0,0 +1,200 @@
+@@ -0,0 +1,223 @@
 +package maestro.harmonyos.hdc
 +
 +import com.google.common.truth.Truth.assertThat
@@ -21383,7 +21544,7 @@ index 0000000..eee842b
 +    @Test
 +    fun `host arguments remain literal without a command shell`() {
 +        val arguments = listOf(
-+            "space separated", "中文", "a'\"b", "\$HOME; echo injected", "", "line\nbreak",
++            "space separated", "a'\"b", "\$HOME; echo injected", "", "line\nbreak",
 +            "\"", "\"\"", "\"quoted\"", "plain\\", "path with space\\", "\\", "\\\\",
 +            " leading ", "\ttab\t", "line\r\nbreak",
 +        ) + (0..5).flatMap { count ->
@@ -21398,6 +21559,29 @@ index 0000000..eee842b
 +
 +        assertThat(result.exitCode).isEqualTo(0)
 +        assertThat(decoded).containsExactlyElementsIn(arguments).inOrder()
++    }
++
++    @Test
++    fun `preserves Unicode arguments with a Unicode-capable child process`() {
++        val text = "中文"
++        if (!System.getProperty("os.name").startsWith("Windows")) {
++            val result = ProcessHdcCommandRunner().run(HdcProcessTestChild.command("arguments", text), Duration.ofSeconds(10))
++            assertThat(result.exitCode).isEqualTo(0)
++            assertThat(result.stdout.trim()).isEqualTo("arg:" + Base64.getEncoder().encodeToString(text.toByteArray()))
++            return
++        }
++
++        // The Windows Java 17 launcher converts its own argv through the ANSI code page.
++        // Use PowerShell 7 to check the Unicode actually sent by the Windows process runner.
++        TempFileHandler().use { temporary ->
++            val script = temporary.createTempFile("hdc-unicode", ".ps1")
++            script.writeText("""[Console]::WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(${'$'}args[0])))""")
++            val result = ProcessHdcCommandRunner().run(
++                listOf("pwsh.exe", "-NoProfile", "-NonInteractive", "-File", script.absolutePath, text), Duration.ofSeconds(10),
++            )
++            assertThat(result.exitCode).isEqualTo(0)
++            assertThat(result.stdout.trim()).isEqualTo(Base64.getEncoder().encodeToString(text.toByteArray()))
++        }
 +    }
 +
 +    @Test
@@ -21818,6 +22002,44 @@ index 0000000..503a66d
 +                else -> error("Unexpected command: $command")
 +            }
 +        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LoopbackLayoutChannelTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LoopbackLayoutChannelTest.kt
+new file mode 100644
+index 0000000..0ae66e9
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LoopbackLayoutChannelTest.kt
+@@ -0,0 +1,32 @@
++package maestro.harmonyos.layout
++
++import org.junit.jupiter.api.Assertions.assertArrayEquals
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import java.io.ByteArrayInputStream
++import java.io.EOFException
++import java.io.IOException
++import java.nio.ByteBuffer
++
++class LoopbackLayoutChannelTest {
++    @Test
++    fun `reads two adjacent bare frames without consuming the following response`() {
++        val first = """{"result":{"text":"brace } and \"quoted\" 测试"}}""".toByteArray()
++        val second = """{"result":{}}""".toByteArray()
++        val wire = ByteArrayInputStream(first + second)
++        assertArrayEquals(first, receiveLayoutFrame(wire::read))
++        assertArrayEquals(second, receiveLayoutFrame(wire::read))
++    }
++
++    @Test
++    fun `rejects truncated and oversized frames before parsing a layout`() {
++        val frame = """{"result":{}}""".toByteArray()
++        val header = ByteBuffer.allocate(4).putInt(frame.size).array()
++        assertArrayEquals(frame, receiveLayoutFrame(ByteArrayInputStream(header + frame)::read))
++        assertThrows(EOFException::class.java) {
++            receiveLayoutFrame(ByteArrayInputStream(header + frame.dropLast(1).toByteArray())::read)
++        }
++        val oversize = ByteBuffer.allocate(4).putInt(8 * 1024 * 1024 + 1).array()
++        assertThrows(IOException::class.java) { receiveLayoutFrame(ByteArrayInputStream(oversize)::read) }
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestLayoutParserTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/UitestLayoutParserTest.kt

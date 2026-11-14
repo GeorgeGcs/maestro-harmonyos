@@ -1,8 +1,10 @@
 import { Action, Connection, Snapshot, Transport, composeFlow, object, parseSnapshot, validateAction } from './protocol';
+import { ReplayFailure } from './replay-evidence';
 
 export interface SessionState {
   connected: boolean; busy: boolean; snapshot: Snapshot | null; steps: string[];
   appId: string; message: string; artifactsDir: string | null;
+  replayFailure?: ReplayFailure;
 }
 export class OperationStopped extends Error { constructor() { super('任务已停止。'); this.name = 'OperationStopped'; } }
 interface Operation { signal: AbortSignal; current(): boolean; check(): void }
@@ -66,10 +68,11 @@ export class RecorderSession {
 
   async disconnect(): Promise<void> { await this.perform(operation => this.disconnectInside(operation)); }
 
-  async replay(run: (connection: Connection, yaml: string, signal: AbortSignal) => Promise<{ exitCode: number; artifactsDir: string }>): Promise<void> {
+  async replay(run: (connection: Connection, yaml: string, signal: AbortSignal) => Promise<ReplayFailure & { exitCode: number }>): Promise<void> {
     await this.perform(async operation => {
       if (!this.connection || !this.state.steps.length) throw new Error('请先录制至少一个步骤。');
       const yaml = this.yaml(), connection = this.connection;
+      this.state.replayFailure = undefined;
       await this.disconnectInside(operation);
       operation.check();
       this.state.message = '正在回放。录制会话已断开。';
@@ -77,6 +80,7 @@ export class RecorderSession {
       const result = await run(connection, yaml, operation.signal);
       operation.check();
       this.state.artifactsDir = result.artifactsDir;
+      if (result.exitCode !== 0) this.state.replayFailure = { artifactsDir: result.artifactsDir, attemptDir: result.attemptDir };
       this.state.message = result.exitCode === 0 ? '回放通过。可重新连接继续录制。' : `回放失败（退出码 ${result.exitCode}），请查看运行日志和产物。`;
     });
   }
@@ -120,6 +124,7 @@ export class RecorderSession {
   clear(): void {
     if (this.state.busy) throw new Error('当前任务尚未结束。');
     this.state.steps = [];
+    this.state.replayFailure = undefined;
     this.state.message = '已新建空流程。';
     this.changed(this.state);
   }

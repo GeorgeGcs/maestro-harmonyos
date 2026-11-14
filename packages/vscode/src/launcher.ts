@@ -5,6 +5,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Connection } from './protocol';
 import { Launch } from './bridge';
+import { ReplayFailure } from './replay-evidence';
 
 export interface ToolSettings { cliDirectory: string; javaPath: string; hdcPath: string }
 export async function javaLaunch(root: string, settings: ToolSettings, args: string[], connection?: Connection): Promise<Launch> {
@@ -30,7 +31,7 @@ export async function createRunDirectory(root: string, kind: string): Promise<st
 }
 
 export async function replayFlow(root: string, settings: ToolSettings, connection: Connection, yaml: string,
-  log: (text: string) => void, onProcess: (process: ChildProcess | null) => void, signal?: AbortSignal): Promise<{ exitCode: number; artifactsDir: string }> {
+  log: (text: string) => void, onProcess: (process: ChildProcess | null) => void, signal?: AbortSignal): Promise<ReplayFailure & { exitCode: number }> {
   const check = () => { if (signal?.aborted) throw new Error('任务已停止，未启动新的回放。'); };
   check();
   const artifactsDir = await createRunDirectory(root, 'replay');
@@ -38,7 +39,12 @@ export async function replayFlow(root: string, settings: ToolSettings, connectio
   const flow = path.join(artifactsDir, 'recorded-flow.yaml');
   await fs.writeFile(flow, yaml, 'utf8');
   check();
-  const launch = await javaLaunch(root, settings, ['--device', connection.deviceId, 'test', '--test-output-dir', artifactsDir, flow], connection);
+  const agent = path.join(artifactsDir, 'agent');
+  const runId = randomUUID(), attemptId = randomUUID();
+  const attemptDir = path.join(agent, 'runs', runId, attemptId);
+  const launch = await javaLaunch(root, settings, ['--device', connection.deviceId, 'test',
+    '--test-output-dir', artifactsDir, '--harmonyos-agent-output', agent,
+    '--harmonyos-run-id', runId, '--harmonyos-attempt-id', attemptId, flow], connection);
   check();
   log(`回放产物：${artifactsDir}\n`);
   const output = createWriteStream(path.join(artifactsDir, 'cli.log'), { flags: 'wx' });
@@ -47,14 +53,14 @@ export async function replayFlow(root: string, settings: ToolSettings, connectio
   signal?.addEventListener('abort', abort, { once: true });
   onProcess(child);
   if (signal?.aborted) abort();
-  return new Promise<{ exitCode: number; artifactsDir: string }>((resolve, reject) => {
+  return new Promise<ReplayFailure & { exitCode: number }>((resolve, reject) => {
     let error: Error | undefined;
     output.on('error', failure => { error = failure; child.kill(); });
     child.on('error', failure => { error = failure; });
     for (const source of [child.stdout, child.stderr]) source.on('data', (bytes: Buffer) => { output.write(bytes); log(bytes.toString('utf8')); });
     child.once('close', (code, signal) => {
       onProcess(null);
-      output.end(() => error ? reject(error) : resolve({ exitCode: code ?? (signal ? 130 : 1), artifactsDir }));
+      output.end(() => error ? reject(error) : resolve({ exitCode: code ?? (signal ? 130 : 1), artifactsDir, attemptDir }));
     });
   }).finally(() => signal?.removeEventListener('abort', abort));
 }

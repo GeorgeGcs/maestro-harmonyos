@@ -2,7 +2,34 @@
 
 `scripts/ci/run-device-suite.ps1` 是平台无关的单设备入口。它先固定本次源码、构建文件和应用参数，再调用 Maestro CLI，核对执行结果、设备释放和原生 JUnit 场景清单；启用视频策略后，还会完整解码本次索引中的原视频。
 
-本机假执行器验证之外，已在一台真机上运行成功、预期断言失败及超时强制停止，检查后续阻止和 v2 恢复核销，见[补充验证记录](progress/2026-10-30-followup.md)。尚未配置或验证任何 CI 平台。此入口不安装服务、不下载工具、不构建 CLI、不安装 HAP，也不代表固定场景的稳定性验证已经完成。
+本机假执行器验证之外，已在一台真机上运行成功、预期断言失败及超时强制停止，检查后续阻止和 v2 恢复核销，见[补充验证记录](progress/2026-10-30-followup.md)。单设备入口使用预装工具、已构建的 CLI 和已准备的应用。
+
+## 在 GitHub Actions 上运行
+
+[Windows 主机构建](../.github/workflows/windows-build.yml)已在 GitHub 托管 runner 上通过。作业执行 JVM 和插件测试，从固定 Maestro 上游构建 CLI 和 VSIX，并上传日志、JUnit 和校验值。该次作业的 CLI 与 VSIX 下载后已在本机平板通过冒烟，验证了失败 YAML 行、截图与控制台日志的跳转，以及设备释放。[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)
+
+[真机冒烟工作流](../.github/workflows/windows-device-smoke.yml)由维护者在私有 CI 仓库的 main 分支手动派发。专用 Windows runner 通过 USB 连接设备，使用下文的工具、套件及设备变量。启用仓库变量 `MAESTRO_WINDOWS_DEVICE_CI_ENABLED` 后，工作流复用相同的设备入口并上传作业摘要。首次接入按下文验证成功、预期失败和取消三种状态。当前远端真机运行待验证。
+
+## 在 AtomGit Action 上运行
+
+工作流位于 [`.gitcode/workflows`](../.gitcode/workflows/)。需要仓库开通 Action，并在仓库的 Runner 列表确认所用 Windows 标签可调度。下面两份配置仍需用实际远端作业验证。
+
+**主机构建**在 Windows runner 上以 JDK 17 和 Node 22 执行，可手动运行，也会响应 `main` 和 `feat/ci-*` 的推送。入口从新检出回放固定补丁，跑鸿蒙 JVM 测试，构建并启动 CLI，执行插件测试并打包 VSIX。制品 `windows-build` 包含提交、上游及补丁摘要、日志、JUnit、CLI、VSIX 和包校验值。若仓库的托管资源池没有 Windows，可将主机 job 的标签指向已注册的 Windows runner，使用同一个 PowerShell 入口。
+
+**设备冒烟**由维护者手动派发。使用能够连接 HDC 的专用 Windows runner，标签包含 `self-hosted`、`Windows` 和 `maestro-harmonyos-device`，仅运行可信提交。确认已准备专用设备和套件后，将仓库变量 `MAESTRO_WINDOWS_DEVICE_CI_ENABLED` 设为 `true`。Runner 进程应使用同一 Windows 账户，并为每次构建提供干净的 checkout。安装 JDK 17、Node 22.12+、PowerShell 7 和 HDC，在 runner 账户环境中设置以下变量。
+
+| 变量 | 内容 |
+| --- | --- |
+| `JAVA_HOME` | JDK 17 根目录 |
+| `MAESTRO_HARMONYOS_HDC` | HDC 可执行文件绝对路径 |
+| `MAESTRO_CI_DEVICE_ID` | 专用设备序列号 |
+| `MAESTRO_CI_SUITE_TEMPLATE` | 已准备的 v2 套件模板，参照下文配置。路径相对模板解析，作业会为本次构建填写 `buildManifest` |
+| `MAESTRO_CI_DEVICE_STATE` | checkout 外的持久设备状态目录 |
+| `MAESTRO_CI_RAW_ROOT` | checkout 外的原始产物目录，与设备状态目录分开 |
+
+设备作业先构建当前提交，再调用 `run-device-suite.ps1`。平台上传的 `device-job.json` 提供提交、退出码、执行结果、设备释放、质量状态和可用的 JUnit 计数。原生报告、截图、日志和控制记录留在 runner；按摘要里的 `localRunKey` 在 `MAESTRO_CI_RAW_ROOT` 查找。需要完整归档时，在 runner 上对具体 `ci-UUID` 调用本文的收集入口，按测试数据的访问范围共享。
+
+首次联调分别派发成功 Flow、预期失败的断言 Flow，以及一次已开始执行后的平台取消。逐次核对作业链接和可下载摘要。硬取消可能使平台跳过摘要上传；此时检查 runner 外部状态目录，使用下一次作业及恢复核验确认设备是否可以接管。已有本机记录可用于对照预期行为。
 
 ## 准备
 

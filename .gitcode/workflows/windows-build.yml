@@ -1,0 +1,32 @@
+name: Windows 构建与主机回归
+
+on:
+  push:
+    branches: [main, 'feat/ci-*']
+  workflow_dispatch:
+
+permissions:
+  repository: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: checkout
+      - uses: setup-jdk
+        with:
+          jdk-version: '17'
+          distribution: temurin
+      - uses: setup-node
+        with:
+          node-version: '22'
+      - name: 构建 CLI 和 VSIX 并执行回归
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/build-windows.ps1
+      - name: 保存构建结果与测试报告
+        if: ${{ always() }}
+        uses: upload-artifact
+        with:
+          name: windows-build
+          path: artifacts/ci-host/

@@ -1,0 +1,36 @@
+name: Windows 专用设备冒烟
+
+on:
+  workflow_dispatch:
+
+permissions:
+  repository: read
+
+concurrency:
+  enable: true
+  max: 1
+  exceed-action: QUEUE
+
+jobs:
+  smoke:
+    if: ${{ vars.MAESTRO_WINDOWS_DEVICE_CI_ENABLED == 'true' }}
+    runs-on: [self-hosted, Windows, maestro-harmonyos-device]
+    timeout-minutes: 75
+    steps:
+      - uses: checkout
+      - name: 构建当前提交的 CLI
+        shell: pwsh
+        timeout-minutes: 45
+        run: pwsh -NoProfile -File scripts/ci/build-windows.ps1
+      - name: 运行固定套件并核验设备释放
+        shell: pwsh
+        timeout-minutes: 20
+        run: pwsh -NoProfile -File scripts/ci/run-device-job.ps1
+      - name: 上传构建报告和设备结果摘要
+        if: ${{ always() }}
+        uses: upload-artifact
+        with:
+          name: windows-device-smoke
+          path: |
+            artifacts/ci-host/host-job.json
+            artifacts/ci-device-report/
