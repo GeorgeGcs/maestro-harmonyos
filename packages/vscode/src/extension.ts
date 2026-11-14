@@ -105,6 +105,8 @@ class Recorder implements vscode.Disposable {
       this.bridge = undefined;
       await bridge?.dispose();
       if (this.preparationCancelled || this.disposed) return;
+      await this.recoverTouch(root, tools, deviceId);
+      if (this.preparationCancelled || this.disposed) return;
       const artifactsDir = await createRunDirectory(root, 'touch');
       if (this.preparationCancelled || this.disposed) return;
       const connection = { deviceId, appId, artifactsDir,
@@ -112,10 +114,12 @@ class Recorder implements vscode.Disposable {
       this.touchStopped = false;
       this.touchFlow = undefined;
       this.touchStatus = '正在启动录制，请等面板提示。';
+      const recordPath = path.join(artifactsDir, 'uitest-record.log');
       const recorder = new TouchRecording(this.hdc(tools), deviceId, appId,
         () => { if (!this.touchStopped) { this.touchStatus = '正在录制，请在测试应用内点击或滑动。'; this.render(); } },
         count => { if (!this.touchStopped) { this.touchStatus = `正在录制 · 已识别 ${count} 次点击或滑动`; this.render(); } },
-        error => this.output.appendLine(errorMessage(error)));
+        error => this.output.appendLine(errorMessage(error)),
+        async events => fs.writeFile(recordPath, events, { flag: 'wx', flush: true }));
       this.touch = recorder;
       this.touchTask = (async () => {
         try {
@@ -127,7 +131,6 @@ class Recorder implements vscode.Disposable {
           try { flow = importTouchRecording(appId, result.events); }
           catch (error) {
             if (result.events.trim()) {
-              await fs.writeFile(path.join(artifactsDir, 'uitest-record.log'), result.events, { encoding: 'utf8', flag: 'wx' });
               throw new Error(`${errorMessage(error)} 原始记录已保存到本次产物目录，录制已释放。`);
             }
             throw new Error(`${errorMessage(error)} 录制已释放。`);
@@ -172,6 +175,21 @@ class Recorder implements vscode.Disposable {
   }
   private hdc(tools: ToolSettings): string {
     return tools.hdcPath || process.env.MAESTRO_HARMONYOS_HDC || 'hdc';
+  }
+  private async recoverTouch(root: string, tools: ToolSettings, deviceId: string): Promise<void> {
+    let savedFile: string | undefined;
+    const result = await verifyTouchIdle(this.hdc(tools), deviceId, async events => {
+      const directory = await createRunDirectory(root, 'touch-recovery');
+      savedFile = path.join(directory, 'uitest-record.log');
+      await fs.writeFile(savedFile, events, { flag: 'wx', flush: true });
+      this.output.appendLine(`恢复的 UITest 记录：${savedFile}`);
+    });
+    if (!result.recovered) return;
+    this.touchStatus = savedFile ? '遗留录制已释放。原始记录已保存，可从命令面板导入。' : '空的遗留录制已清理，设备已释放。';
+    this.render();
+    if (savedFile) void vscode.window.showInformationMessage(this.touchStatus, '打开记录').then(action => {
+      if (action === '打开记录') return vscode.commands.executeCommand('vscode.open', vscode.Uri.file(savedFile!));
+    });
   }
   async pickTouchRecording(): Promise<void> {
     const files = await vscode.window.showOpenDialog({
@@ -223,7 +241,7 @@ class Recorder implements vscode.Disposable {
       const chosen = await vscode.window.showQuickPick(devices.map(device => ({ label: device.id })), { placeHolder: '选择本次操作的鸿蒙设备' });
       check();
       if (!chosen) return;
-      await verifyTouchIdle(this.hdc(this.settings()), chosen.label);
+      await this.recoverTouch(root, this.settings(), chosen.label);
       check();
       const config = vscode.workspace.getConfiguration('harmonyosRecorder');
       const appId = await vscode.window.showInputBox({ title: '测试应用 bundle 名称', value: this.session.state.appId || config.get<string>('appId', ''), ignoreFocusOut: true,
@@ -311,7 +329,7 @@ class Recorder implements vscode.Disposable {
     try {
       const request = await makeRequest(await this.workspaceRoot());
       if (!request || this.preparationCancelled || this.disposed) return;
-      await verifyTouchIdle(this.hdc(request.tools), request.connection.deviceId);
+      await this.recoverTouch(request.root, request.tools, request.connection.deviceId);
       await this.session.disconnect();
       const bridge = this.bridge;
       this.bridge = undefined;
