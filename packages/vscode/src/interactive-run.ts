@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { runFlow, ReplayAttempt, ReplayInput, ToolSettings } from './launcher';
-import { Connection } from './protocol';
+import { Connection, object } from './protocol';
 import { LiveTrace, readPreview, RunProgress } from './live-trace';
 import { localFile, record } from './replay-evidence';
 
@@ -16,6 +16,7 @@ export class InteractiveRun {
   previewEnabled = false;
   frame?: string;
   failure?: string;
+  failureReason?: string;
   attempt?: ReplayAttempt;
   private frameVersion?: number;
   private trace?: LiveTrace;
@@ -49,8 +50,12 @@ export class InteractiveRun {
       const data = await record(attempt.attemptDir, 'result.json', 'runResult');
       const matching = data?.runId === path.basename(path.dirname(attempt.attemptDir)) &&
         data?.attemptId === attempt.attemptId && data?.deviceId === connection.deviceId;
-      this.releaseConfirmed = matching && !!await localFile(attempt.agent, `${attempt.attemptId}.released`);
+      this.releaseConfirmed = matching && object(data.cleanup) && data.cleanup.state === 'complete' &&
+        !!await localFile(attempt.agent, `${attempt.attemptId}.released`);
       this.failure = matching && typeof data.failedStepId === 'string' ? this.trace!.failureStep(data.failedStepId) : undefined;
+      if (matching && object(data.error) && typeof data.error.message === 'string') {
+        this.failureReason = data.error.message.slice(0, 1200);
+      }
       if (!matching) this.status = '结果未确认';
       else if (data.status === 'cancelled') this.status = '已停止';
       else if (data.status === 'passed' && result.exitCode === 0) this.status = '通过';

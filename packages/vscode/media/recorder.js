@@ -25,6 +25,9 @@
       ? !state.run.canStop || state.run.status === '正在停止'
       : !state.busy && !state.connected;
     element('runFile').disabled = state.busy;
+    element('startTouch').disabled = state.busy;
+    element('stopTouch').disabled = !state.touch?.active || state.touch.stopping;
+    element('replayTouch').disabled = state.busy || !state.touch?.canReplay;
     element('runArtifacts').disabled = !state.run?.artifacts;
     element('rerun').disabled = state.busy || !state.run?.release;
     element('runPreview').disabled = !state.run?.active || !state.run.canPreview || state.run.status === '正在停止';
@@ -35,6 +38,8 @@
     element('runStatus').textContent = run
       ? run.status + (run.active ? '' : run.release ? ' · 设备已释放' : ' · 设备释放未确认')
       : '尚未运行';
+    element('runReason').textContent = run?.status === '失败' ? run.failureReason || '' : '';
+    element('runReason').hidden = !element('runReason').textContent;
     element('runPreview').checked = !!run?.preview;
     element('runPreviewStatus').hidden = !run?.preview || !!run.frame;
     element('runFrame').hidden = !run?.preview || !run.frame;
@@ -97,7 +102,7 @@
     selectedNode = selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null;
     paintSelection(); buttons();
   });
-  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun']) element(id).addEventListener('click', () => send(id));
+  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun', 'startTouch', 'stopTouch', 'replayTouch']) element(id).addEventListener('click', () => send(id));
   element('runPreview').addEventListener('change', event => send('runPreview', { enabled: event.currentTarget.checked }));
   element('runArtifacts').addEventListener('click', () => send('artifacts'));
   element('runEvidence').addEventListener('click', () => send('replayFailure'));
@@ -114,6 +119,7 @@
     if (!event.data || event.data.type !== 'state') return;
     state = event.data;
     element('status').textContent = state.message;
+    element('touchStatus').textContent = state.touch?.status ?? '';
     element('status').classList.toggle('busy', state.busy);
     element('yaml').value = state.yaml;
     element('stepCount').textContent = `${state.steps.length} 步`;
