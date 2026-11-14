@@ -24,7 +24,6 @@ file=${recordFile}
 ${processCheck}
 if active; then exit 1; fi
 if test ! -e "$dir" && test ! -L "$dir"; then
-  test ! -e "$file" && test ! -L "$file" || exit 1
   echo MAESTRO_IDLE
   exit 0
 fi
