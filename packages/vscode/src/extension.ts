@@ -3,10 +3,10 @@ import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { BridgeClient } from './bridge';
-import { createRunDirectory, javaLaunch, ReplayInput, ToolSettings } from './launcher';
+import { checkFlowSyntax, createRunDirectory, javaLaunch, ReplayInput, ToolSettings } from './launcher';
 import { object, parseDevices, string } from './protocol';
 import { RecorderSession, OperationStopped, errorMessage } from './session';
-import { boundedRead, replayEvidence, replayFileHash } from './replay-evidence';
+import { boundedRead, logTail, replayEvidence, replayFileHash, ReplayEvidenceLink } from './replay-evidence';
 import { InteractiveRun, RunRequest } from './interactive-run';
 import { sourceSnapshot, StepSource } from './live-trace';
 import { importTouchRecording } from './touch-import';
@@ -17,6 +17,7 @@ export function activate(context: vscode.ExtensionContext): { getStatus(): { pan
   recorder = new Recorder(context);
   context.subscriptions.push(recorder);
   context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.importTouch', () => recorder!.handle(() => recorder!.pickTouchRecording())));
+  context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.checkSyntax', () => recorder!.handle(() => recorder!.checkSyntax())));
   for (const [name, action] of Object.entries({ open: () => recorder!.open(), connect: () => recorder!.connect(), save: () => recorder!.save(), replay: () => recorder!.replay(), runFile: () => recorder!.pickFlow(), rerun: () => recorder!.rerun(), stop: () => recorder!.stop() })) {
     context.subscriptions.push(vscode.commands.registerCommand(`harmonyosRecorder.${name}`, () => recorder!.handle(action)));
   }
@@ -29,6 +30,8 @@ class Recorder implements vscode.Disposable {
   private bridge: BridgeClient | undefined;
   private run?: InteractiveRun;
   private runTask?: Promise<void>;
+  private evidenceLinks: ReplayEvidenceLink[] = [];
+  private evidenceRequest = 0;
   private touch?: TouchRecording;
   private touchTask?: Promise<void>;
   private touchStopped = false;
@@ -128,7 +131,7 @@ class Recorder implements vscode.Disposable {
           if (!result.released) throw new Error(result.detail ? `设备释放未确认。 ${result.detail}` : '录制进程或文件未确认清理，请检查设备后再试。');
           if (!result.started) throw new Error(result.detail ?? '录制未启动，请检查测试应用是否在前台。');
           let flow: ReturnType<typeof importTouchRecording>;
-          try { flow = importTouchRecording(appId, result.events); }
+          try { flow = importTouchRecording(appId, result.events, result.initialLayout); }
           catch (error) {
             if (result.events.trim()) {
               throw new Error(`${errorMessage(error)} 原始记录已保存到本次产物目录，录制已释放。`);
@@ -209,7 +212,25 @@ class Recorder implements vscode.Disposable {
     const result = importTouchRecording(appId, new TextDecoder('utf-8', { fatal: true }).decode(data));
     const document = await vscode.workspace.openTextDocument({ language: 'yaml', content: result.yaml });
     await vscode.window.showTextDocument(document);
-    void vscode.window.showInformationMessage(`已导入 ${result.steps} 步，跳过 ${result.skipped} 条记录。请检查坐标，再保存并回放。`);
+    void vscode.window.showInformationMessage(`已导入 ${result.steps} 步，跳过 ${result.skipped} 条记录。请检查选择器与坐标，再保存并回放。`);
+  }
+  async checkSyntax(preferred?: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor?.document;
+    const active = editor?.uri.scheme === 'file' && /\.ya?ml$/i.test(editor.uri.fsPath) ? editor.uri.fsPath : undefined;
+    const file = preferred ?? active ?? (await vscode.window.showOpenDialog({
+      canSelectMany: false, openLabel: '检查 Flow', filters: { YAML: ['yaml', 'yml'] },
+    }))?.find(uri => uri.scheme === 'file')?.fsPath;
+    if (!file) return;
+    if (vscode.workspace.textDocuments.some(doc => doc.uri.scheme === 'file' && doc.isDirty && this.matchesSource(doc.uri.fsPath, file))) {
+      throw new Error('请先保存当前 YAML，再运行语法检查。');
+    }
+    const result = await checkFlowSyntax(await this.workspaceRoot(), this.settings(), file);
+    this.output.appendLine(`语法检查 ${path.basename(file)}\n${result.output}`);
+    if (result.valid) void vscode.window.showInformationMessage(`${path.basename(file)} 通过 Maestro 语法检查。`);
+    else {
+      this.output.show(true);
+      void vscode.window.showErrorMessage(`${path.basename(file)} 的语法检查未通过，请查看 HarmonyOS Recorder 输出。`);
+    }
   }
   private async workspaceRoot(): Promise<string> {
     if (this.root) return this.root;
@@ -338,6 +359,7 @@ class Recorder implements vscode.Disposable {
       const run = new InteractiveRun(request, () => { this.render(); this.decorate(); }, text => this.output.append(text),
         () => this.panel?.visible === true);
       this.run = run;
+      this.clearEvidence();
       this.highlightRequest = '';
       this.runTask = run.execute();
     } finally { this.preparingRun = false; this.render(); }
@@ -357,14 +379,46 @@ class Recorder implements vscode.Disposable {
     const run = this.run;
     const failure = run?.attempt ?? this.session.state.replayFailure;
     if (!failure || this.busy) return;
+    const request = ++this.evidenceRequest;
+    const legacy = this.session.state.replayFailure;
     const links = await replayEvidence(failure, stepId ?? run?.failure);
-    if (run !== this.run) return;
-    if (!links.length) {
-      this.output.show(true);
-      return;
+    const yaml = links.find(link => link.offset !== undefined);
+    const image = links.find(link => /\.(png|jpe?g)$/i.test(link.file));
+    const log = links.find(link => link.label.startsWith('日志')) ?? links.find(link => link.label === '回放控制台日志');
+    const [sourceBytes, imageBytes, logPreview] = await Promise.all([
+      yaml ? boundedRead(yaml.file, 4 * 1024 * 1024).catch(() => undefined) : undefined,
+      image ? boundedRead(image.file, 4 * 1024 * 1024).catch(() => undefined) : undefined,
+      log ? logTail(log.file).catch(() => undefined) : undefined,
+    ]);
+    if (request !== this.evidenceRequest || run !== this.run || (!run && legacy !== this.session.state.replayFailure) || this.busy) return;
+    let source: string | undefined;
+    if (yaml && sourceBytes && replayFileHash(sourceBytes) === yaml.sha256) {
+      const text = sourceBytes.toString('utf8');
+      const line = text.slice(0, yaml.offset).split('\n').length;
+      source = text.split('\n').slice(Math.max(0, line - 3), line + 3)
+        .map((value, index) => {
+          const current = Math.max(1, line - 2) + index;
+          return `${current === line ? '▶' : ' '} ${current}  ${value}`;
+        }).join('\n');
     }
-    const picked = await vscode.window.showQuickPick(links, { placeHolder: '打开本次失败的 YAML、截图或日志' });
-    if (!picked || run !== this.run) return;
+    const prefix = imageBytes?.subarray(0, 8).toString('hex');
+    const mime = prefix === '89504e470d0a1a0a' ? 'png' : prefix?.startsWith('ffd8ff') ? 'jpeg' : undefined;
+    this.evidenceLinks = links;
+    await this.panel?.webview.postMessage({ type: 'stepEvidence', request, source,
+      reason: !stepId || stepId === run?.failure ? run?.failureReason : undefined,
+      log: logPreview,
+      image: mime ? `data:image/${mime};base64,${imageBytes!.toString('base64')}` : undefined,
+      links: links.map(link => link.label) });
+  }
+  private clearEvidence(): void {
+    ++this.evidenceRequest;
+    this.evidenceLinks = [];
+    void this.panel?.webview.postMessage({ type: 'clearEvidence' });
+  }
+  private async openEvidence(index: unknown, request: unknown): Promise<void> {
+    if (request !== this.evidenceRequest || typeof index !== 'number' || !Number.isInteger(index)) return;
+    const picked = this.evidenceLinks[index];
+    if (!picked || this.busy) return;
     const uri = vscode.Uri.file(picked.file);
     if (picked.offset === undefined) {
       await vscode.commands.executeCommand('vscode.open', uri, vscode.ViewColumn.Beside);
@@ -443,6 +497,8 @@ class Recorder implements vscode.Disposable {
       case 'startTouch': await this.startTouch(); return;
       case 'stopTouch': await this.stopTouch(); return;
       case 'replayTouch': await this.replayTouch(); return;
+      case 'checkSyntax': await this.checkSyntax(); return;
+      case 'checkTouchSyntax': await this.checkSyntax(this.touchFlow?.input.flowPath); return;
       case 'save': await this.save(); return;
       case 'replay': await this.replay(); return;
       case 'runFile': await this.pickFlow(); return;
@@ -461,6 +517,7 @@ class Recorder implements vscode.Disposable {
         return;
       }
       case 'replayFailure': await this.showReplayFailure(); return;
+      case 'openEvidence': await this.openEvidence(message.index, message.request); return;
       case 'stop': await this.stop(); return;
       case 'clear':
         if (!this.session.state.steps.length || await vscode.window.showWarningMessage('清空当前录制步骤？已保存的 YAML 文件不受影响。', { modal: true }, '清空') === '清空') this.session.clear();
@@ -491,13 +548,15 @@ class Recorder implements vscode.Disposable {
     return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${css}"><title>鸿蒙流程录制</title></head><body>
 <header><h1>鸿蒙流程录制</h1><p>在画面中选择控件，再执行操作。成功步骤会写入标准 YAML。</p></header>
 <nav aria-label="会话"><button id="connect">连接设备</button><button id="disconnect">断开</button><button id="refresh">刷新画面</button><button id="launch">启动应用</button><button id="back">返回</button><button id="stop" class="secondary">停止任务</button></nav>
-<section class="flow"><h2>真机触摸录制</h2><div class="row"><button id="startTouch">开始录制</button><button id="stopTouch">停止并生成 YAML</button><button id="replayTouch">回放触摸流程</button></div>
+<section class="flow"><h2>真机触摸录制</h2><div class="row"><button id="startTouch">开始录制</button><button id="stopTouch">停止并生成 YAML</button><button id="checkTouchSyntax">检查录制 YAML</button><button id="replayTouch">回放触摸流程</button></div>
 <p id="touchStatus" role="status"></p></section>
 <section class="flow"><h2>运行与证据</h2><div class="row">
-<button id="runFile">运行 YAML 或套件</button><button id="runArtifacts" class="secondary">打开本轮产物</button><button id="rerun">重跑</button><button id="runEvidence" hidden>查看失败证据</button>
+<button id="runFile">运行 YAML 或套件</button><button id="checkSyntax" class="secondary">检查 Flow 语法</button><button id="runArtifacts" class="secondary">打开本轮产物</button><button id="rerun">重跑</button><button id="runEvidence" hidden>查看失败证据</button>
 <label><input id="runPreview" type="checkbox"> 预览设备画面</label></div>
 <p id="runStatus" role="status">尚未运行</p><p id="runReason" hidden></p><ul id="runFlows"></ul>
 <details open><summary>最近步骤</summary><ul id="runSteps"></ul></details>
+<section id="stepEvidence" hidden aria-label="步骤证据"><h3>步骤证据</h3><p id="evidenceReason"></p>
+<pre id="evidenceSource" hidden></pre><img id="evidenceImage" alt="失败步骤截图" hidden><pre id="evidenceLog" aria-label="日志末尾摘要" hidden></pre><div class="row" id="evidenceLinks"></div></section>
 <p id="runPreviewStatus" hidden>等待执行过程中的截图。</p><img id="runFrame" alt="最近一次运行截图" hidden></section>
 <p id="status" role="status" aria-live="polite">连接手机后开始录制。</p><div class="workspace"><section class="device"><h2>设备画面 <span id="dimensions"></span></h2><p id="empty">连接设备后显示截图。每次操作后自动刷新。</p><div id="imageWrap"><img id="screen" alt="当前鸿蒙设备截图" hidden><div id="highlight" hidden></div><div id="point" hidden></div></div></section>
 <section class="controls"><h2>选择与操作</h2><p id="selection">尚未选择控件</p><div class="row"><button id="tap">点击控件</button><button id="assertNode">断言控件可见</button><button id="coordinate" class="secondary">按所选坐标点击</button></div>

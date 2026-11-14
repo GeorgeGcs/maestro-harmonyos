@@ -44,7 +44,8 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | 项目 | 已验证的结果 |
 | --- | --- |
 | RPC 取树 | 在同一台 HarmonyOS 7 平板上，用同一份 CLI 对 HMOS 代码工坊完整套件做了一组对照。默认 HDC **9 分 33 秒**，RPC **6 分 03 秒**，端到端耗时缩短 **36.6%**（约 **3 分 29 秒**）。两轮均通过，**98 条步骤结果逐条一致**，设备均已释放。见[验证范围与使用条件](docs/development-design.md#rpc-取树)。 |
-| VS Code 运行与失败定位 | 最新源码构建在平板实测。运行中高亮 YAML 并显示子 Flow 状态，失败后可打开对应的 YAML、截图和日志。支持停止、释放后重跑和按需画面预览。见[插件说明](packages/vscode/README.md)及[真机验收记录](docs/progress/2026-11-14-vscode-live-run.md)。 |
+| VS Code 运行与失败定位 | 运行中高亮 YAML 并显示子 Flow 状态。点击失败步骤可在同一区域查看失败行、截图和日志摘要，平板已验证停止、确认释放和重跑。见[插件说明](packages/vscode/README.md#看运行进度停止与重跑)及[真机验收记录](docs/progress/2026-11-14-vscode-live-run.md)。 |
+| VS Code 触摸录制与语法检查 | 点击优先生成控件 ID 或文本。插件用录制前的控件树核对首个点击，重复匹配时尝试用唯一父容器生成 `childOf`。同一条文本选择器已从平板录制并在手机回放通过。已保存的 Flow 可直接在 VS Code 调用 Maestro 语法检查，无需连接设备。见[录制与检查说明](packages/vscode/README.md#在-vs-code-里录制真机触摸)。 |
 | CI 与设备收尾 | GitHub Windows 构建通过，作业归档 CLI、VSIX、校验值和报告。真机入口核验执行结果、JUnit 与设备释放，远端设备派发待专用 runner。见[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43578173016)和[CI 说明](docs/ci.md)。 |
 | Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。 |
 
@@ -163,7 +164,7 @@ node examples/agent-client/run.mjs `
 | --- | --- |
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和 Windows CI 入口；实际 CI 服务平台尚未接入。首次与重试后的最终结果分别记录。 |
-| VSCode 辅助编写 | 提供代码片段、截图与控件树选择、动作执行、YAML 生成和回放。可在面板启动和停止真机触摸录制，将单指点击和滑动转为标准 Maestro YAML，也可导入已有 UITest 记录。 |
+| VS Code 辅助编写 | 提供代码片段、截图与控件树选择、真机触摸录制和 UITest 记录导入。生成的标准 Maestro YAML 可在插件内检查语法和回放。仅首个触摸事件有录制前的控件树，后续点击及离线导入的选择器需结合页面核对。 |
 | 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；完整场景三段原片均完整解码通过。长场景可使用[分段入口](examples/hmos-code-lab/flows/recorded-suite/README.md)。已确认锁屏拒绝、且未产生采集与媒体的旧资源可受控恢复；其他未知状态仍须逐案核查。 |
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前本仓不提供 HAP 安装、权限修改、清除应用数据、Studio、内置 MCP 服务、多设备分片或云端运行；面向 Agent 的 MCP 服务由上述鸿测项目提供。

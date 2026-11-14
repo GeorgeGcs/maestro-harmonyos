@@ -43,7 +43,7 @@ test -d "$dir" && test ! -L "$dir" || exit 1
     test "$((now - started))" -ge 132 || exit 1
   fi
   entries=$(ls -A "$dir") || exit 1
-  if printf '%s\\n' "$entries" | grep -Ev "^(owner|managed|$owner[.]stop)$" | grep -q .; then exit 1; fi
+  if printf '%s\\n' "$entries" | grep -Ev "^(owner|managed|initial[.]json|$owner[.]stop)$" | grep -q .; then exit 1; fi
   if active; then exit 1; fi
   fingerprint() {
     if test ! -e "$file" && test ! -L "$file"; then echo absent; return; fi
@@ -93,7 +93,7 @@ export async function verifyTouchIdle(hdc: string, serial: string, archive: Arch
   if test "$before" != absent; then rm "$file" || exit 1; fi
   # Release the guard with a single rename, even if deleting its markers is interrupted.
   mv -T "$dir" "$retired" || exit 1
-  rm -f "$retired/$owner.stop" "$retired/managed" "$retired/owner" && rmdir "$retired"
+  rm -f "$retired/$owner.stop" "$retired/managed" "$retired/owner" "$retired/initial.json" && rmdir "$retired"
   echo MAESTRO_IDLE
 ) 9<"$dir"`;
   if ((await shell(release).catch(() => '')).trim() !== 'MAESTRO_IDLE') {
@@ -116,6 +116,15 @@ if ! mkdir "$dir"; then echo MAESTRO_BUSY; exit 1; fi
   if test -e "$file" || test -L "$file" || active; then rmdir "$dir"; echo MAESTRO_BUSY; exit 1; fi
   echo '${token}' > "$dir/managed" && echo '${token}' > "$dir/owner" || exit 1
   echo MAESTRO_OWNED
+  if timeout -k 1s 4s uitest dumpLayout -p "$dir/initial.json" >/dev/null 2>&1 &&
+     test -f "$dir/initial.json" && test ! -L "$dir/initial.json"; then
+    size=$(wc -c < "$dir/initial.json")
+    if test "$size" -le ${limit}; then
+      printf 'MAESTRO_INITIAL '
+      base64 -w 0 "$dir/initial.json"
+      echo
+    fi
+  fi
   sh -c '
   timer=$$
   request=$1
@@ -135,7 +144,7 @@ export class TouchRecording {
   private readonly token = randomUUID();
   private readonly args: string[];
   private stopping?: Promise<void>;
-  readonly result: Promise<{ events: string; released: boolean; started: boolean; busy: boolean; detail?: string }>;
+  readonly result: Promise<{ events: string; initialLayout?: unknown; released: boolean; started: boolean; busy: boolean; detail?: string }>;
 
   constructor(private readonly hdc: string, serial: string, app: string,
     onRecording: () => void, onCount: (count: number) => void, onProblem: (error: unknown) => void,
@@ -149,10 +158,16 @@ export class TouchRecording {
       const decoder = new StringDecoder('utf8');
       let tail = '', count = 0, bytes = 0;
       let detail: string | undefined;
+      let initialLayout: unknown;
       let matched = false, started = false, owned = false, busy = false;
       const inspect = (line: string) => {
         if (line === 'MAESTRO_OWNED') owned = true;
         if (line === 'MAESTRO_BUSY') busy = true;
+        if (line.startsWith('MAESTRO_INITIAL ') && owned) {
+          try { initialLayout = JSON.parse(Buffer.from(line.slice('MAESTRO_INITIAL '.length), 'base64').toString('utf8')); }
+          catch { /* Gesture conversion can continue without a layout. */ }
+          return;
+        }
         if (line.startsWith('Current ForAbility :')) {
           matched = line.slice('Current ForAbility :'.length).split(',')[0].trim() === app;
           if (!matched) { detail = '当前前台应用与所选应用不一致。'; void this.stop().catch(onProblem); }
@@ -176,7 +191,7 @@ export class TouchRecording {
         if (tail) inspect((tail + decoder.end()).trimEnd());
         if (!owned) { resolve({ events: '', released: false, started, busy, detail }); return; }
         void verifyTouchIdle(hdc, serial, archive, this.token).then(
-          result => resolve({ events: result.events.toString('utf8'), released: true, started, busy, detail }),
+          result => resolve({ events: result.events.toString('utf8'), initialLayout, released: true, started, busy, detail }),
           reject,
         );
       });

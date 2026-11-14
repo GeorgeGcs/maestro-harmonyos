@@ -45,6 +45,19 @@ export async function boundedRead(file: string, limit: number): Promise<Buffer> 
   } finally { await handle.close(); }
 }
 
+export async function logTail(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const size = (await handle.stat()).size;
+    const offset = Math.max(0, size - 16384);
+    const bytes = Buffer.alloc(size - offset);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, offset);
+    const lines = bytes.subarray(0, bytesRead).toString('utf8').trimEnd().split(/\r?\n/);
+    if (offset && lines.length > 1) lines.shift();
+    return lines.slice(-12).join('\n').slice(-6000);
+  } finally { await handle.close(); }
+}
+
 export async function record(root: string, name: string, kind: string) {
   const file = await localFile(root, name);
   if (!file) return;

@@ -28,6 +28,7 @@
     element('startTouch').disabled = state.busy;
     element('stopTouch').disabled = !state.touch?.active || state.touch.stopping;
     element('replayTouch').disabled = state.busy || !state.touch?.canReplay;
+    element('checkTouchSyntax').disabled = !state.touch?.canReplay;
     element('runArtifacts').disabled = !state.run?.artifacts;
     element('rerun').disabled = state.busy || !state.run?.release;
     element('runPreview').disabled = !state.run?.active || !state.run.canPreview || state.run.status === '正在停止';
@@ -102,7 +103,7 @@
     selectedNode = selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null;
     paintSelection(); buttons();
   });
-  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun', 'startTouch', 'stopTouch', 'replayTouch']) element(id).addEventListener('click', () => send(id));
+  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun', 'startTouch', 'stopTouch', 'replayTouch', 'checkSyntax', 'checkTouchSyntax']) element(id).addEventListener('click', () => send(id));
   element('runPreview').addEventListener('change', event => send('runPreview', { enabled: event.currentTarget.checked }));
   element('runArtifacts').addEventListener('click', () => send('artifacts'));
   element('runEvidence').addEventListener('click', () => send('replayFailure'));
@@ -116,6 +117,32 @@
   element('swipe').addEventListener('click', () => action({ type: 'swipe', direction: element('direction').value, duration: 600 }));
   element('screenshot').addEventListener('click', () => action({ type: 'takeScreenshot', name: element('screenshotName').value }));
   window.addEventListener('message', event => {
+    if (event.data?.type === 'clearEvidence' || event.data?.type === 'stepEvidence') {
+      const evidence = event.data;
+      const panel = element('stepEvidence');
+      panel.hidden = evidence.type === 'clearEvidence';
+      element('evidenceReason').textContent = evidence.reason || (evidence.links?.length ? '' : '本步骤暂无可用产物。');
+      element('evidenceSource').textContent = evidence.source || '';
+      element('evidenceSource').hidden = !evidence.source;
+      element('evidenceLog').textContent = evidence.log || '';
+      element('evidenceLog').hidden = !evidence.log;
+      const image = element('evidenceImage');
+      image.hidden = !evidence.image;
+      if (evidence.image) image.src = evidence.image;
+      else image.removeAttribute('src');
+      const links = element('evidenceLinks');
+      links.replaceChildren();
+      for (const [index, label] of (evidence.links || []).entries()) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'secondary';
+        button.textContent = label;
+        button.addEventListener('click', () => send('openEvidence', { index, request: evidence.request }));
+        links.append(button);
+      }
+      if (!panel.hidden) panel.scrollIntoView({ block: 'nearest' });
+      return;
+    }
     if (!event.data || event.data.type !== 'state') return;
     state = event.data;
     element('status').textContent = state.message;

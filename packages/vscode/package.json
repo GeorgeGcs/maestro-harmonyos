@@ -54,6 +54,10 @@
         "title": "HarmonyOS: 导入设备触摸录制"
       },
       {
+        "command": "harmonyosRecorder.checkSyntax",
+        "title": "HarmonyOS: 检查 Flow 语法"
+      },
+      {
         "command": "harmonyosRecorder.rerun",
         "title": "HarmonyOS: 重跑上一轮"
       },

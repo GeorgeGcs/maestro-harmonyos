@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
-import { spawn, ChildProcess } from 'node:child_process';
+import { execFile, spawn, ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { Connection } from './protocol';
 import { Launch } from './bridge';
@@ -29,6 +29,18 @@ export async function createRunDirectory(root: string, kind: string): Promise<st
   const directory = path.join(root, 'artifacts', 'recorder', `${kind}-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}`);
   await fs.mkdir(directory, { recursive: true });
   return directory;
+}
+
+export async function checkFlowSyntax(root: string, settings: ToolSettings, file: string):
+  Promise<{ valid: boolean; output: string }> {
+  const launch = await javaLaunch(root, settings, ['check-syntax', '--', file]);
+  return new Promise((resolve, reject) => {
+    execFile(launch.executable, launch.args, { cwd: launch.cwd, env: launch.env, windowsHide: true,
+      timeout: 30000, maxBuffer: 256 * 1024 }, (error, stdout, stderr) => {
+      if (error && (typeof error.code !== 'number' || error.killed)) { reject(error); return; }
+      resolve({ valid: !error, output: [stdout, stderr].map(value => value.trim()).filter(Boolean).join('\n') });
+    });
+  });
 }
 
 export interface ReplayInput { yaml?: string; flowPath?: string; env?: readonly string[] }
