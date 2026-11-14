@@ -44,7 +44,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | 项目 | 已验证的结果 |
 | --- | --- |
 | RPC 取树 | 在同一台 HarmonyOS 7 平板上，用同一份 CLI 对 HMOS 代码工坊完整套件做了一组对照。默认 HDC **9 分 33 秒**，RPC **6 分 03 秒**，端到端耗时缩短 **36.6%**（约 **3 分 29 秒**）。两轮均通过，**98 条步骤结果逐条一致**，设备均已释放。见[验证范围与使用条件](docs/development-design.md#rpc-取树)。 |
-| VS Code 失败定位 | 同批 GitHub CLI 和 VSIX 在平板实测。预期断言失败后，可直接打开对应 YAML 第 3 行、失败截图和控制台日志。见[插件说明](packages/vscode/README.md)和[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)。 |
+| VS Code 运行与失败定位 | 最新源码构建在平板实测。运行中高亮 YAML 并显示子 Flow 状态，失败后可打开对应的 YAML、截图和日志。支持停止、释放后重跑和按需画面预览。见[插件说明](packages/vscode/README.md)及[真机验收记录](docs/progress/2026-11-14-vscode-live-run.md)。 |
 | CI 与设备收尾 | GitHub Windows 构建通过，作业归档 CLI、VSIX、校验值和报告。真机入口核验执行结果、JUnit 与设备释放，远端设备派发待专用 runner。见[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43578173016)和[CI 说明](docs/ci.md)。 |
 | Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。 |
 
