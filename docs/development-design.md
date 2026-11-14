@@ -83,7 +83,9 @@ JVM 适配代码保存在 [0001-harmonyos-host.patch](../patches/maestro/0001-ha
 
 两个变量都未设置时走默认路径。打开驱动时检查 RPC 可用性，关闭驱动时关闭本机连接。CLI 不管理设备端 agent、守护进程和转发的生命周期，操作者负责准备及释放这些资源。连接被对端提前关闭时，在原读取预算内重新连接一次。连接失败、协议错误和超时会显式报错。点击、输入、截图和录屏继续使用原有接口。
 
-RPC 响应交给现有布局解析器。不同设备或系统的控件树可能有差异，当前仅在 HarmonyOS 7 平板上验证了短断言 Flow。用于正式回归前，应先对照现有选择器和场景覆盖。设备工具及请求格式参考 [DevEco CLI](https://gitcode.com/openharmony-sig/deveco-cli/tree/c7513935017d75a8e42f0cfd81a232eccf4b30be)。
+RPC 响应交给现有布局解析器。2026 年 11 月 14 日，在同一台 HarmonyOS 7 平板上用同一份 GitHub 构建的 CLI 各跑一轮 HMOS 代码工坊完整组件套件。默认取树端到端耗时 620.52 秒，RPC 模式耗时 377.72 秒，较本次基线缩短 39.13%。两轮均通过并确认 Maestro 会话释放。RPC 轮少执行了一条按页面状态触发的准备分支。本次单组数据用于评估提速幅度，仍需在固定起始页面上重复验证。
+
+测试结束后已移除本次创建的 HDC 转发和临时文件。平板拒绝 shell 停止 UITest 守护进程，复核时系统套接字仍在。RPC 继续保持手动启用。设备工具及请求格式参考 [DevEco CLI](https://gitcode.com/openharmony-sig/deveco-cli/tree/c7513935017d75a8e42f0cfd81a232eccf4b30be)。
 
 下表中以 `maestro-` 开头的源码路径均相对本地 `.upstream/maestro/`。这些文件通过上面的版本化补丁交付，浏览本仓网页时应查看补丁；直接点击忽略目录不会获得源文件。
 
