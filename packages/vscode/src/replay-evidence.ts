@@ -19,7 +19,7 @@ export function replayFileHash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-async function localFile(root: string, relative: unknown): Promise<string | undefined> {
+export async function localFile(root: string, relative: unknown): Promise<string | undefined> {
   if (typeof relative !== 'string' || /[\\:\x00-\x1f]/.test(relative)) return;
   const parts = relative.split('/');
   if (parts.some(part => !part || part === '.' || part === '..' || /[ .]$/.test(part))) return;
@@ -33,7 +33,7 @@ async function localFile(root: string, relative: unknown): Promise<string | unde
   } catch { /* A capture can be missing or already removed. */ }
 }
 
-async function boundedRead(file: string, limit: number): Promise<Buffer> {
+export async function boundedRead(file: string, limit: number): Promise<Buffer> {
   const handle = await fs.open(file, 'r');
   try {
     const size = (await handle.stat()).size;
@@ -45,7 +45,7 @@ async function boundedRead(file: string, limit: number): Promise<Buffer> {
   } finally { await handle.close(); }
 }
 
-async function record(root: string, name: string, kind: string) {
+export async function record(root: string, name: string, kind: string) {
   const file = await localFile(root, name);
   if (!file) return;
   const doc: unknown = JSON.parse((await boundedRead(file, 16 * 1024 * 1024)).toString('utf8'));
@@ -53,7 +53,7 @@ async function record(root: string, name: string, kind: string) {
       doc.schemaVersion === 1 && doc.kind === kind && object(doc.data)) return doc.data;
 }
 
-export async function replayEvidence(failure: ReplayFailure): Promise<ReplayEvidenceLink[]> {
+export async function replayEvidence(failure: ReplayFailure, stepId?: string): Promise<ReplayEvidenceLink[]> {
   const links: ReplayEvidenceLink[] = [];
   const consoleLog = await localFile(failure.artifactsDir, 'cli.log');
   if (consoleLog) links.push({ label: '回放控制台日志', file: consoleLog });
@@ -64,9 +64,11 @@ export async function replayEvidence(failure: ReplayFailure): Promise<ReplayEvid
     const index = await record(root, 'evidence-index.json', 'evidenceIndex');
     if (!result || !index || result.runId !== path.basename(path.dirname(root)) ||
         result.attemptId !== path.basename(root) || result.runId !== index.runId ||
-        result.attemptId !== index.attemptId || typeof result.failedStepId !== 'string' ||
+        result.attemptId !== index.attemptId ||
         !Array.isArray(index.entries)) return links;
-    const entries = index.entries.filter(entry => object(entry) && entry.stepId === result.failedStepId);
+    const target = stepId ?? result.failedStepId;
+    if (typeof target !== 'string') return links;
+    const entries = index.entries.filter(entry => object(entry) && entry.stepId === target);
     if (entries.length !== 1 || !Array.isArray(entries[0].evidence)) return links;
     const evidence: unknown[] = entries[0].evidence;
     for (const item of evidence) {
@@ -93,7 +95,7 @@ export async function replayEvidence(failure: ReplayFailure): Promise<ReplayEvid
       if (!object(header) || header.event !== 'traceStarted' || header.protocol !== 'maestro.harmonyos.retry-trace' ||
           header.schemaVersion !== 2 || header.runId !== result.runId || header.attemptId !== result.attemptId) continue;
       const matches = events.filter(event => object(event) && event.event === 'stepFinished' && event.outcome === 'Failed' &&
-        event.flowExecutionId === header.flowExecutionId && event.stepId === result.failedStepId);
+        event.flowExecutionId === header.flowExecutionId && event.stepId === target);
       if (matches.length !== 1) continue;
       const step = matches[0];
       if (!object(step) || typeof step.sourceSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(step.sourceSha256) ||

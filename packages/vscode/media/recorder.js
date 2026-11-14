@@ -21,7 +21,55 @@
     element('artifacts').disabled = !state.artifactsDir;
     element('replayFailure').hidden = !state.hasReplayFailure;
     element('replayFailure').disabled = state.busy;
-    element('stop').disabled = !state.busy && !state.connected;
+    element('stop').disabled = state.run?.active
+      ? !state.run.canStop || state.run.status === '正在停止'
+      : !state.busy && !state.connected;
+    element('runFile').disabled = state.busy;
+    element('runArtifacts').disabled = !state.run?.artifacts;
+    element('rerun').disabled = state.busy || !state.run?.release;
+    element('runPreview').disabled = !state.run?.active || !state.run.canPreview || state.run.status === '正在停止';
+    element('runEvidence').hidden = !state.run?.artifacts || state.run.active || state.run.status === '通过';
+    element('artifacts').disabled = !state.artifactsDir && !state.run?.artifacts;
+  }
+  function paintRun(run) {
+    element('runStatus').textContent = run
+      ? run.status + (run.active ? '' : run.release ? ' · 设备已释放' : ' · 设备释放未确认')
+      : '尚未运行';
+    element('runPreview').checked = !!run?.preview;
+    element('runPreviewStatus').hidden = !run?.preview || !!run.frame;
+    element('runFrame').hidden = !run?.preview || !run.frame;
+    const src = run?.preview && run.frame ? 'data:image/png;base64,' + run.frame : '';
+    if (src && element('runFrame').getAttribute('src') !== src) element('runFrame').src = src;
+    if (!src) element('runFrame').removeAttribute('src');
+    if (!run) return;
+    const flows = element('runFlows'), steps = element('runSteps');
+    const key = JSON.stringify([run.progress.flows, run.progress.steps]);
+    if (flows.dataset.key === key) return;
+    flows.dataset.key = key;
+    flows.replaceChildren(); steps.replaceChildren();
+    for (const flow of run.progress.flows) {
+      const li = document.createElement('li');
+      li.textContent = flow.name + ' · ' + flow.state;
+      const children = document.createElement('ul');
+      for (const step of flow.subflows) {
+        const item = document.createElement('li');
+        item.textContent = `#${step.sequence + 1} ${step.child || '子 Flow'} · ${step.state}`;
+        if (step.tryNo) item.textContent += ` · 第 ${step.tryNo} 次尝试`;
+        children.append(item);
+      }
+      if (children.childElementCount) li.append(children);
+      flows.append(li);
+    }
+    for (const step of run.progress.steps) {
+      const li = document.createElement('li');
+      const button = document.createElement('button');
+      button.className = 'secondary runStep';
+      button.textContent = `#${step.sequence + 1} ${step.command.replace(/Command$/, '')} · ${step.state}`;
+      if (step.tryNo) button.textContent += ` · 第 ${step.tryNo} 次尝试`;
+      button.disabled = !step.source && step.state !== '失败';
+      button.addEventListener('click', () => send('runStep', { id: step.id }));
+      li.append(button); steps.append(li);
+    }
   }
   function paintSelection() {
     const highlight = element('highlight');
@@ -49,7 +97,10 @@
     selectedNode = selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null;
     paintSelection(); buttons();
   });
-  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts']) element(id).addEventListener('click', () => send(id));
+  for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun']) element(id).addEventListener('click', () => send(id));
+  element('runPreview').addEventListener('change', event => send('runPreview', { enabled: event.currentTarget.checked }));
+  element('runArtifacts').addEventListener('click', () => send('artifacts'));
+  element('runEvidence').addEventListener('click', () => send('replayFailure'));
   element('launch').addEventListener('click', () => action({ type: 'launchApp' }));
   element('back').addEventListener('click', () => action({ type: 'back' }));
   element('tap').addEventListener('click', () => { if (selectedNode && state.snapshot) action({ type: 'tapOn', snapshotId: state.snapshot.snapshotId, nodeId: selectedNode.nodeId }); });
@@ -86,7 +137,7 @@
       } else element('screen').removeAttribute('src');
     }
     element('nodeCount').textContent = state.snapshot ? `(${state.snapshot.nodes.length})` : '';
-    paintSelection(); buttons();
+    paintRun(state.run); paintSelection(); buttons();
   });
   buttons(); send('ready');
 })();

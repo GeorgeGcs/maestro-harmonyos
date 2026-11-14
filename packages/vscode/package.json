@@ -46,6 +46,14 @@
         "title": "HarmonyOS: 回放录制流程"
       },
       {
+        "command": "harmonyosRecorder.runFile",
+        "title": "HarmonyOS: 运行 YAML 或套件"
+      },
+      {
+        "command": "harmonyosRecorder.rerun",
+        "title": "HarmonyOS: 重跑上一轮"
+      },
+      {
         "command": "harmonyosRecorder.stop",
         "title": "HarmonyOS: 停止当前任务"
       }
@@ -67,6 +75,12 @@
           "type": "string",
           "default": "",
           "description": "HDC native executable. Empty uses MAESTRO_HARMONYOS_HDC or PATH."
+        },
+        "harmonyosRecorder.flowEnvironment": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "NAME=VALUE parameters for running a saved YAML or suite. Values can be recorded in local run artifacts."
         },
         "harmonyosRecorder.appId": {
           "type": "string",

@@ -15,6 +15,7 @@ export async function javaLaunch(root: string, settings: ToolSettings, args: str
   const java = settings.javaPath || (process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin', process.platform === 'win32' ? 'java.exe' : 'java') : 'java');
   if (/\.(cmd|bat)$/i.test(java) || java.includes('\0')) throw new Error('javaPath 必须是原生 Java 可执行文件。');
   const env: NodeJS.ProcessEnv = { ...process.env, MAESTRO_CLI_NO_ANALYTICS: '1', MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true' };
+  delete env.MAESTRO_HARMONYOS_INTERACTIVE;
   if (settings.hdcPath) env.MAESTRO_HARMONYOS_HDC = settings.hdcPath;
   if (connection) {
     env.MAESTRO_HARMONYOS_ABILITY = connection.abilityName;
@@ -30,21 +31,36 @@ export async function createRunDirectory(root: string, kind: string): Promise<st
   return directory;
 }
 
+export interface ReplayInput { yaml?: string; flowPath?: string; env?: readonly string[] }
+export interface ReplayAttempt { artifactsDir: string; attemptDir: string; agent: string; attemptId: string }
+
 export async function replayFlow(root: string, settings: ToolSettings, connection: Connection, yaml: string,
   log: (text: string) => void, onProcess: (process: ChildProcess | null) => void, signal?: AbortSignal): Promise<ReplayFailure & { exitCode: number }> {
+  return runFlow(root, settings, connection, { yaml }, log, onProcess, signal);
+}
+
+export async function runFlow(root: string, settings: ToolSettings, connection: Connection, input: ReplayInput,
+  log: (text: string) => void, onProcess: (process: ChildProcess | null) => void, signal?: AbortSignal,
+  onAttempt?: (attempt: ReplayAttempt) => Promise<void>): Promise<ReplayFailure & { exitCode: number }> {
   const check = () => { if (signal?.aborted) throw new Error('任务已停止，未启动新的回放。'); };
   check();
   const artifactsDir = await createRunDirectory(root, 'replay');
   check();
-  const flow = path.join(artifactsDir, 'recorded-flow.yaml');
-  await fs.writeFile(flow, yaml, 'utf8');
+  const flow = input.flowPath ?? path.join(artifactsDir, 'recorded-flow.yaml');
+  if (!input.flowPath) await fs.writeFile(flow, input.yaml ?? '', 'utf8');
   check();
   const agent = path.join(artifactsDir, 'agent');
   const runId = randomUUID(), attemptId = randomUUID();
   const attemptDir = path.join(agent, 'runs', runId, attemptId);
   const launch = await javaLaunch(root, settings, ['--device', connection.deviceId, 'test',
     '--test-output-dir', artifactsDir, '--harmonyos-agent-output', agent,
-    '--harmonyos-run-id', runId, '--harmonyos-attempt-id', attemptId, flow], connection);
+    '--harmonyos-run-id', runId, '--harmonyos-attempt-id', attemptId,
+    ...(input.env ?? []).flatMap(entry => ['-e', entry]), '--', flow], connection);
+  if (onAttempt) {
+    launch.env.MAESTRO_HARMONYOS_INTERACTIVE = '1';
+    await fs.mkdir(agent);
+    await onAttempt({ artifactsDir, attemptDir, agent, attemptId });
+  }
   check();
   log(`回放产物：${artifactsDir}\n`);
   const output = createWriteStream(path.join(artifactsDir, 'cli.log'), { flags: 'wx' });

@@ -396,19 +396,36 @@ index 15c5b42..b80acec 100644
  
      override fun call(): Int {
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
-index 064ff51..40cf533 100644
+index 064ff51dd020f13aef0805da2edb3b4f05767d5e..0ef15bad0033d8fe0aba4def859fa84dab4829b4 100644
 --- a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
-@@ -47,6 +47,8 @@ import maestro.cli.runner.TestSuiteInteractor
+@@ -19,6 +19,7 @@
+ 
+ package maestro.cli.command
+ 
++import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.CoroutineName
+ import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.async
+@@ -37,6 +38,7 @@ import maestro.cli.analytics.WorkspaceRunFailedEvent
+ import maestro.cli.analytics.WorkspaceRunFinishedEvent
+ import maestro.cli.analytics.WorkspaceRunStartedEvent
+ import maestro.device.Device
++import maestro.drivers.HarmonyOSDriver
+ import maestro.device.DeviceService
+ import maestro.cli.model.TestExecutionSummary
+ import maestro.cli.report.ReportFormat
+@@ -47,6 +49,9 @@ import maestro.cli.runner.TestSuiteInteractor
  import maestro.cli.runner.resultview.AnsiResultView
  import maestro.cli.runner.resultview.PlainTextResultView
  import maestro.cli.session.MaestroSessionManager
 +import maestro.cli.session.HarmonyOsSessionSupport
 +import maestro.cli.harmonyos.HarmonyOsCliAgentReport
++import maestro.cli.harmonyos.HarmonyOsInteractiveRun
  import maestro.cli.util.CiUtils
  import maestro.cli.util.isPortAvailable
  import maestro.cli.util.EnvUtils
-@@ -62,6 +64,7 @@ import maestro.cli.model.FlowStatus
+@@ -62,6 +67,7 @@ import maestro.cli.model.FlowStatus
  import maestro.cli.view.cyan
  import maestro.cli.promotion.PromotionStateManager
  import maestro.orchestra.error.ValidationError
@@ -416,7 +433,7 @@ index 064ff51..40cf533 100644
  import maestro.orchestra.workspace.WorkspaceExecutionPlanner
  import maestro.orchestra.workspace.WorkspaceExecutionPlanner.ExecutionPlan
  import maestro.utils.isSingleFile
-@@ -80,7 +83,7 @@ import maestro.device.Platform
+@@ -80,7 +86,7 @@ import maestro.device.Platform
  
  @CommandLine.Command(
      name = "test",
@@ -425,7 +442,7 @@ index 064ff51..40cf533 100644
  )
  class TestCommand : Callable<Int> {
  
-@@ -155,6 +158,20 @@ class TestCommand : Callable<Int> {
+@@ -155,6 +161,20 @@ class TestCommand : Callable<Int> {
      )
      private var testOutputDir: String? = null
  
@@ -446,7 +463,7 @@ index 064ff51..40cf533 100644
      @Option(
          names = ["--flatten-debug-output"],
          description = ["All file outputs from the test case are created in the folder without subfolders or timestamps for each run. It can be used with --debug-output. Useful for CI."]
-@@ -219,7 +236,7 @@ class TestCommand : Callable<Int> {
+@@ -219,7 +239,7 @@ class TestCommand : Callable<Int> {
      )
      private var appleTeamId: String? = null
  
@@ -455,7 +472,7 @@ index 064ff51..40cf533 100644
      var platform: String? = null
  
      @Option(
-@@ -247,6 +264,49 @@ class TestCommand : Callable<Int> {
+@@ -247,6 +267,52 @@ class TestCommand : Callable<Int> {
      }
    
      override fun call(): Int {
@@ -481,6 +498,9 @@ index 064ff51..40cf533 100644
 +                "format" to format.name),
 +        )
 +        val report = harmonyOsAgentReport!!
++        if (System.getenv("MAESTRO_HARMONYOS_INTERACTIVE") == "1") {
++            report.interactive = HarmonyOsInteractiveRun(agentRoot.toPath(), report.directory.fileName.toString())
++        }
 +        testOutputDir = report.directory.resolve("flows").toString()
 +        // Keep the existing JUnit reporter and bundle layout for opt-in invocations.
 +        if (format == ReportFormat.NOOP) format = ReportFormat.JUNIT
@@ -505,7 +525,7 @@ index 064ff51..40cf533 100644
          TestDebugReporter.install(
              debugOutputPathAsString = debugOutput,
              flattenDebugOutput = flattenDebugOutput,
-@@ -279,7 +339,7 @@ class TestCommand : Callable<Int> {
+@@ -279,7 +345,7 @@ class TestCommand : Callable<Int> {
                  config = configFile?.toPath()?.toAbsolutePath(),
              )
          } catch (e: ValidationError) {
@@ -514,7 +534,7 @@ index 064ff51..40cf533 100644
          }
  
          val resolvedTestOutputDir = resolveTestOutputDir(executionPlan)
-@@ -331,6 +391,7 @@ class TestCommand : Callable<Int> {
+@@ -331,6 +397,7 @@ class TestCommand : Callable<Int> {
       * Get the list of device IDs that will be used for test execution
       */
      private fun getDeviceIds(plan: ExecutionPlan): List<String> {
@@ -522,7 +542,7 @@ index 064ff51..40cf533 100644
          val includeWeb = executionPlanIncludesWebFlow(plan)
          val connectedDevices = DeviceService.listConnectedDevices(
              includeWeb = includeWeb,
-@@ -344,6 +405,25 @@ class TestCommand : Callable<Int> {
+@@ -344,6 +411,25 @@ class TestCommand : Callable<Int> {
              .toList()
      }
  
@@ -548,7 +568,7 @@ index 064ff51..40cf533 100644
      private fun resolveTestOutputDir(plan: ExecutionPlan): Path? {
          // Command line flag takes precedence
          testOutputDir?.let { return File(it).toPath() }
-@@ -368,27 +448,31 @@ class TestCommand : Callable<Int> {
+@@ -368,27 +454,31 @@ class TestCommand : Callable<Int> {
            PrintUtils.warn("Web support is in Beta. We would appreciate your feedback!\n")
          }
  
@@ -600,7 +620,7 @@ index 064ff51..40cf533 100644
  
          val missingDevices = requestedShards - deviceIds.size
          if (missingDevices > 0) {
-@@ -468,12 +552,14 @@ class TestCommand : Callable<Int> {
+@@ -468,12 +558,14 @@ class TestCommand : Callable<Int> {
          chunkPlans: List<ExecutionPlan>,
          debugOutputPath: Path,
      ): Triple<Int?, Int?, TestExecutionSummary?> {
@@ -616,16 +636,116 @@ index 064ff51..40cf533 100644
          return MaestroSessionManager.newSession(
              host = parent?.host,
              port = parent?.port,
-@@ -528,6 +614,8 @@ class TestCommand : Callable<Int> {
-                     runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
+@@ -489,44 +581,73 @@ class TestCommand : Callable<Int> {
+             val maestro = session.maestro
+             val device = session.device
+ 
+-            val isReplicatingSingleFile = shardAll != null && effectiveShards > 1 && flowFiles.isSingleFile
+-            val isMultipleFiles = flowFiles.isSingleFile.not()
+-            val isAskingForReport = format != ReportFormat.NOOP
+-            if (isMultipleFiles || isAskingForReport || isReplicatingSingleFile) {
+-                if (continuous) {
+-                    throw CommandLine.ParameterException(
+-                        commandSpec.commandLine(),
+-                        "Continuous mode is not supported when running multiple flows. (${flowFiles.joinToString(", ")})",
+-                    )
++            val report = harmonyOsAgentReport
++            val driver = maestro.driver as? HarmonyOSDriver
++            val interactive = report?.interactive
++            if (interactive != null) driver?.previewFrame = interactive::preview
++            try {
++                report?.checkStop()
++                runOnSession(maestro, device, chunkPlans, shardIndex, debugOutputPath, deviceId, effectiveShards).also {
++                    report?.checkStop()
                  }
-             }
+-                runBlocking {
+-                    runMultipleFlows(
+-                        maestro,
+-                        device,
+-                        chunkPlans,
+-                        shardIndex,
+-                        debugOutputPath,
+-                        deviceId,
+-                    )
++            } catch (error: CancellationException) {
++                if (interactive?.stopRequested != true) throw error
++                report.failed(error)
++                Triple(0, 1, null)
++            } finally {
++                if (interactive != null) driver?.previewFrame = null
++            }
 +        }.also {
 +            agentSession?.let { harmonyOsAgentReport?.sessionClosedNormally(it) }
++        }
++    }
++
++    private fun runOnSession(
++        maestro: Maestro,
++        device: Device?,
++        chunkPlans: List<ExecutionPlan>,
++        shardIndex: Int,
++        debugOutputPath: Path,
++        deviceId: String,
++        effectiveShards: Int,
++    ): Triple<Int?, Int?, TestExecutionSummary?> {
++        val isReplicatingSingleFile = shardAll != null && effectiveShards > 1 && flowFiles.isSingleFile
++        val isMultipleFiles = flowFiles.isSingleFile.not()
++        val isAskingForReport = format != ReportFormat.NOOP
++        return if (isMultipleFiles || isAskingForReport || isReplicatingSingleFile) {
++            if (continuous) {
++                throw CommandLine.ParameterException(
++                    commandSpec.commandLine(),
++                    "Continuous mode is not supported when running multiple flows. (${flowFiles.joinToString(", ")})",
++                )
++            }
++            runBlocking {
++                runMultipleFlows(
++                    maestro,
++                    device,
++                    chunkPlans,
++                    shardIndex,
++                    debugOutputPath,
++                    deviceId,
++                )
++            }
++        } else {
++            val flowFile = flowFiles.first()
++            if (continuous) {
++                if (!flattenDebugOutput) {
++                    TestDebugReporter.deleteOldFiles()
+                 }
++                TestRunner.runContinuous(
++                    maestro,
++                    device,
++                    flowFile,
++                    env,
++                    analyze,
++                    authToken,
++                    deviceId,
++                )
+             } else {
+-                val flowFile = flowFiles.first()
+-                if (continuous) {
+-                    if (!flattenDebugOutput) {
+-                        TestDebugReporter.deleteOldFiles()
+-                    }
+-                    TestRunner.runContinuous(
+-                        maestro,
+-                        device,
+-                        flowFile,
+-                        env,
+-                        analyze,
+-                        authToken,
+-                        deviceId,
+-                    )
+-                } else {
+-                    runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
+-                }
++                runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
+             }
          }
      }
- 
-@@ -573,6 +661,7 @@ class TestCommand : Callable<Int> {
+@@ -573,6 +694,7 @@ class TestCommand : Callable<Int> {
              analyze = analyze,
              apiKey = authToken,
              deviceId = deviceId,
@@ -633,7 +753,7 @@ index 064ff51..40cf533 100644
          )
          val duration = System.currentTimeMillis() - startTime
  
-@@ -620,6 +709,7 @@ class TestCommand : Callable<Int> {
+@@ -620,6 +742,7 @@ class TestCommand : Callable<Int> {
              reporter = ReporterFactory.buildReporter(format, testSuiteName),
              captureSteps = format == ReportFormat.HTML_DETAILED,
              captureFullArtifacts = analyze,
@@ -2311,10 +2431,10 @@ index 0000000..3ec5fe1
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000..5462705
+index 0000000000000000000000000000000000000000..cc93c1f56c90016ddd7fb03aab509e0805cbbadf
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,427 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -2355,6 +2475,12 @@ index 0000000..5462705
 +    private var abortedFlows = 0
 +    private var activeSession: UUID? = null
 +    private var closedSession: UUID? = null
++    internal var interactive: HarmonyOsInteractiveRun? = null
++
++    internal fun checkStop() {
++        if (interactive?.shouldStop() == true) attempt.requestCancel()
++        attempt.checkCancelled()
++    }
 +    private val shutdownHook = Thread({
 +        synchronized(this) {
 +            if (!completed) {
@@ -2381,6 +2507,7 @@ index 0000000..5462705
 +    @Synchronized internal fun sessionClosedNormally(session: UUID) {
 +        check(!completed && activeSession == session) { "The session does not belong to the current CLI execution." }
 +        closedSession = session
++        interactive?.markReleased()
 +    }
 +
 +    fun flow(flowFile: File, artifactsDir: Path, commands: List<MaestroCommand> = emptyList()): FlowObserver = FlowObserver(flowFile, artifactsDir, commands)
@@ -2484,7 +2611,7 @@ index 0000000..5462705
 +        /** Called by Orchestra's strict callback before device dispatch, outside listener isolation. */
 +        fun starting(cmd: MaestroCommand, commandIndex: Int = 0) {
 +            reportingFailure?.let { throw it }
-+            attempt.checkCancelled()
++            checkStop()
 +            val commandName = cmd.asCommand()?.javaClass?.simpleName ?: "UnknownCommand"
 +            val mutating = commandName !in READ_ONLY_COMMANDS
 +            val info = cmd.sourceInfo
@@ -2735,6 +2862,63 @@ index 0000000..5462705
 +        }
 +    }
 +}
+diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..62a9d2392ac615a32a06b2cb94fb60c96727a893
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
+@@ -0,0 +1,51 @@
++package maestro.cli.harmonyos
++
++import java.io.IOException
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.nio.file.StandardCopyOption
++import java.util.concurrent.TimeUnit
++
++/** Optional controls for the local process that owns this attempt. */
++internal class HarmonyOsInteractiveRun(root: Path, attemptId: String) {
++    private val release = root.resolve("$attemptId.released")
++    private val stopFile = root.resolve("$attemptId.stop")
++    private val previewFile = root.resolve("$attemptId.preview")
++    private val frame = root.resolve("$attemptId.png")
++    private var lastPreview = 0L
++    var stopRequested: Boolean = false
++        private set
++
++    init {
++        Files.createFile(root.resolve("$attemptId.interactive"))
++    }
++
++    fun markReleased() { try { Files.createFile(release) } catch (_: IOException) { /* Release is unconfirmed for the caller. */ } }
++
++    fun shouldStop(): Boolean {
++        if (Files.isRegularFile(stopFile, LinkOption.NOFOLLOW_LINKS)) stopRequested = true
++        return stopRequested
++    }
++
++    // The driver has already acquired and validated these bytes. No extra device I/O.
++    fun preview(bytes: ByteArray) {
++        val now = System.nanoTime()
++        if (lastPreview != 0L && now - lastPreview < TimeUnit.SECONDS.toNanos(2)) return
++        lastPreview = now
++        if (bytes.size > 4 * 1024 * 1024 ||
++            !Files.isRegularFile(previewFile, LinkOption.NOFOLLOW_LINKS) || shouldStop()) return
++        try {
++            val staging = Files.createTempFile(frame.parent, ".preview-", ".tmp")
++            try {
++                Files.write(staging, bytes)
++                Files.move(staging, frame, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
++            } finally {
++                Files.deleteIfExists(staging)
++            }
++        } catch (_: IOException) {
++            // A dropped preview frame must not change a Flow's outcome.
++        }
++    }
++}
++
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsRecorder.kt
 new file mode 100644
 index 0000000..b5470de
@@ -3583,7 +3767,7 @@ index ceab882..48cf6f9 100644
              }
          }
 diff --git a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
-index b79b107..7a38dd6 100644
+index b79b1070ad2eb6f801c21b032737ae03b200d4a5..a2726e610afec99dd723a45085f5b7cdff3c473f 100644
 --- a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 @@ -1,6 +1,7 @@
@@ -3602,7 +3786,15 @@ index b79b107..7a38dd6 100644
  ) {
  
      private val logger = LoggerFactory.getLogger(TestSuiteInteractor::class.java)
-@@ -182,6 +184,7 @@ class TestSuiteInteractor(
+@@ -160,6 +162,7 @@ class TestSuiteInteractor(
+         maestro: Maestro,
+         debugOutputPath: Path,
+     ): Pair<TestExecutionSummary.FlowResult, FlowAIOutput> {
++        agentReport?.checkStop()
+         // TODO(bartekpacia): merge TestExecutionSummary with AI suggestions
+         //  (i.e. consider them also part of the test output)
+         //  See #1973
+@@ -182,6 +185,7 @@ class TestSuiteInteractor(
  
          // Per-flow folder ArtifactsGenerator writes the bundle into (see BundleLayout).
          val flowDir = TestDebugReporter.createFlowDir(debugOutputPath, flowName, shardIndex)
@@ -3610,7 +3802,7 @@ index b79b107..7a38dd6 100644
  
          var debugOutput = FlowDebugOutput()
          val flowStartTime = System.currentTimeMillis()
-@@ -191,7 +194,8 @@ class TestSuiteInteractor(
+@@ -191,7 +195,8 @@ class TestSuiteInteractor(
                      maestro = maestro,
                      artifactsDir = flowDir,
                      captureFullArtifacts = captureFullArtifacts,
@@ -3620,7 +3812,7 @@ index b79b107..7a38dd6 100644
                      onCommandFailed = { _, _, _ -> Orchestra.ErrorResolution.FAIL },
                      onCommandGeneratedOutput = { command, defects, screenshot ->
                          logger.info("${shardPrefix}${command.description()} generated output")
-@@ -205,10 +209,12 @@ class TestSuiteInteractor(
+@@ -205,10 +210,13 @@ class TestSuiteInteractor(
                      },
                  )
  
@@ -3631,6 +3823,7 @@ index b79b107..7a38dd6 100644
                  debugOutput = result.debugOutput
              } catch (e: Exception) {
 +                agentObserver?.aborted(e)
++                if (agentReport?.interactive?.stopRequested == true && e is java.util.concurrent.CancellationException) throw e
                  logger.error("${shardPrefix}Failed to complete flow", e)
                  flowStatus = FlowStatus.ERROR
                  errorMessage = ErrorViewUtils.exceptionToMessage(e)
@@ -11279,10 +11472,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..c00d51a
+index 0000000000000000000000000000000000000000..4f61db44c7a85fc35a62450f253375c60b7967b8
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,431 @@
+@@ -0,0 +1,434 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -11331,6 +11524,7 @@ index 0000000..c00d51a
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
 +    private var recordingFailure: Throwable? = null
++    var previewFrame: ((ByteArray) -> Unit)? = null
 +    private var queryFailure: HdcTimeoutException? = null
 +
 +    override fun name(): String = "HarmonyOS"
@@ -11618,7 +11812,9 @@ index 0000000..c00d51a
 +    private fun capture(timeout: Duration): Screenshot {
 +        return query {
 +            val bytes = device.screenshot(timeout)
-+            Screenshot(bytes, decodeScreenshot(bytes))
++            val image = decodeScreenshot(bytes)
++            previewFrame?.invoke(bytes)
++            Screenshot(bytes, image)
 +        }
 +    }
 +

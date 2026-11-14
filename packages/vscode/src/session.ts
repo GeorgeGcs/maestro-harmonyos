@@ -68,6 +68,8 @@ export class RecorderSession {
 
   async disconnect(): Promise<void> { await this.perform(operation => this.disconnectInside(operation)); }
 
+  get replayConnection(): Connection | undefined { return this.connection; }
+
   async replay(run: (connection: Connection, yaml: string, signal: AbortSignal) => Promise<ReplayFailure & { exitCode: number }>): Promise<void> {
     await this.perform(async operation => {
       if (!this.connection || !this.state.steps.length) throw new Error('请先录制至少一个步骤。');
