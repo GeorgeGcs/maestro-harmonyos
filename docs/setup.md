@@ -188,6 +188,41 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 
 按[测试计划与验证记录](acceptance.md)分别记录插件录制回放、视频录屏和设备兼容结果。早期插件 0.1.0 已在 VSCode 1.140 和 API 26 手机完成 8 步录制、保存及一键回放；此前 `728859cb` 交付版又通过真实 VSCode 的断言、截图两步保存与回放检查，插件的第二台设备验证仍待补。HMOS 完整套件已完成固定版本 20/20 轮首次通过；本批录屏关闭，历史视频尾部解码问题仍待定位。
 
+## 启用 RPC 取树
+
+使用包含 RPC 取树及回退逻辑的源码构建。先在专用测试设备上准备支持 `captureLayout` 的 UITest 服务。已验证环境为 HarmonyOS 7 平板、UITest `7.0.0.1`，配套 agent 来自固定版本的 DevEco CLI。服务应由测试环境提供并保持在线。确认设备序列号，并选择一个空闲本机端口。下例中的 `$device`、`$port`、`$hdc` 和 `$cli` 分别是设备序列号、端口号、HDC 路径和 Maestro CLI 路径。
+
+```powershell
+$local = "tcp:$port"
+$endpoint = 'localabstract:uitest_socket'
+$rules = @(& $hdc fport ls)
+if ($LASTEXITCODE -ne 0 -or $rules -match "(?:^|\s)$local(?:\s|$)") {
+    throw "无法确认端口空闲：$local"
+}
+$created = (& $hdc -t $device fport $local $endpoint | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $created -cne 'Forwardport result:OK') {
+    throw "HDC 转发未确认：$created"
+}
+$previousPort = $env:MAESTRO_HARMONYOS_LAYOUT_RPC_PORT
+$previousDevice = $env:MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE
+try {
+    $env:MAESTRO_HARMONYOS_LAYOUT_RPC_PORT = [string]$port
+    $env:MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE = $device
+    & $cli --platform harmonyos --device $device test .\flow.yaml
+    $testExitCode = $LASTEXITCODE
+} finally {
+    $env:MAESTRO_HARMONYOS_LAYOUT_RPC_PORT = $previousPort
+    $env:MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE = $previousDevice
+    $rules = @(& $hdc fport ls)
+    if ($LASTEXITCODE -eq 0 -and @($rules | ForEach-Object { $_.Trim() -replace '\s+', ' ' }) -contains "$device $local $endpoint [Forward]") {
+        & $hdc -t $device fport rm $local $endpoint
+    }
+    & $hdc fport ls
+}
+```
+
+仅清理本次创建的转发。共用服务由其原管理方维护。CLI 日志中的 `UITest RPC layout enabled` 表示会话启用了 RPC，`using HDC layout` 表示取树回退。排查时一并核对实际执行结果与会话释放凭据。更换系统版本后，用实际应用检查选择器与完整 Flow。[设计及实测范围](development-design.md#rpc-取树)
+
 ## 资料
 
 - [Maestro 上游](https://github.com/mobile-dev-inc/Maestro)

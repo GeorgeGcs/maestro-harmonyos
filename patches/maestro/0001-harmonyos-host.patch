@@ -12615,10 +12615,10 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..45b04d2
+index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf4c11f872
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,237 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12631,6 +12631,8 @@ index 0000000..45b04d2
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.layout.HierarchyReader
 +import maestro.harmonyos.layout.LoopbackLayoutChannel
++import maestro.harmonyos.layout.UitestLayoutException
++import org.slf4j.LoggerFactory
 +import maestro.utils.TempFileHandler
 +import java.nio.file.Files
 +import java.nio.file.LinkOption
@@ -12653,13 +12655,23 @@ index 0000000..45b04d2
 +class HdcHarmonyOSDevice(
 +    private val deviceId: String,
 +    private val hdc: HdcClient = HdcClient(),
-+    layoutPort: Int? = null,
++    private val layoutPort: Int? = null,
 +) : HarmonyOSDevice {
-+    private val layoutChannel = layoutPort?.let(::LoopbackLayoutChannel)
++    private var layoutChannel: LoopbackLayoutChannel? = null
 +
-+    override fun disconnect() { layoutChannel?.close() }
++    override fun disconnect() {
++        layoutChannel?.close()
++        layoutChannel = null
++    }
 +    override fun connect() {
 +        hdc.selectDevice(deviceId)
++        val port = layoutPort ?: return
++        if (hasLayoutForward(port, Duration.ofSeconds(2))) {
++            layoutChannel = LoopbackLayoutChannel(port)
++            logger.info("UITest RPC layout enabled for this session")
++        } else {
++            logger.warn("UITest RPC layout forward unavailable; using HDC layout for this session")
++        }
 +    }
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
@@ -12670,13 +12682,40 @@ index 0000000..45b04d2
 +        }, config, hdc.recordingResources()).start(out)
 +
 +    override fun hierarchy(timeout: Duration): TreeNode {
-+        layoutChannel?.let { return it.snapshot(timeout) }
++        val deadline = System.nanoTime() + timeout.toNanos()
++        layoutChannel?.let { channel ->
++            val rpcBudget = minOf(timeout.dividedBy(2), Duration.ofSeconds(2))
++            if (rpcBudget >= Duration.ofMillis(1)) {
++                try {
++                    return channel.snapshot(rpcBudget)
++                } catch (error: HdcException) {
++                    disableLayoutRpc(channel, error)
++                } catch (error: UitestLayoutException) {
++                    disableLayoutRpc(channel, error)
++                }
++            }
++        }
++        val budget = remainingBudget(deadline, timeout)
 +        return HierarchyReader(
 +            hdc, deviceId,
-+            commandTimeout = timeout,
++            commandTimeout = budget,
 +            cleanupTimeout = Duration.ofSeconds(2),
-+            totalTimeout = timeout,
++            totalTimeout = budget,
 +        ).read()
++    }
++
++    private fun hasLayoutForward(port: Int, timeout: Duration): Boolean = try {
++        hdc.hasUitestLayoutForward(deviceId, port, timeout)
++    } catch (_: HdcException) {
++        checkInterrupted()
++        false
++    }
++
++    private fun disableLayoutRpc(channel: LoopbackLayoutChannel, error: Exception) {
++        channel.close()
++        layoutChannel = null
++        checkInterrupted()
++        logger.warn("UITest RPC layout failed ({}); using HDC layout for the rest of this session", error.javaClass.simpleName)
 +    }
 +
 +    override fun execute(arguments: List<String>, timeout: Duration): String {
@@ -12812,6 +12851,7 @@ index 0000000..45b04d2
 +    }
 +
 +    private companion object {
++        val logger = LoggerFactory.getLogger(HdcHarmonyOSDevice::class.java)
 +        const val MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 +        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
 +    }
@@ -14650,7 +14690,7 @@ index 0000000..c460847
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 new file mode 100644
-index 0000000..2c4ca24
+index 0000000000000000000000000000000000000000..03e0f60cdb3c4296fa99aa890161b6c17fdc6511
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 @@ -0,0 +1,151 @@
@@ -14668,7 +14708,7 @@ index 0000000..2c4ca24
 +
 +/** Categories are selected before shell wrapping. Never derive log fields from arbitrary argv. */
 +internal enum class HdcCommandCategory {
-+    LIST_TARGETS, DUMP_LAYOUT, SCREEN_CAPTURE, INPUT_TAP, INPUT_SWIPE, INPUT_TEXT, INPUT_KEY,
++    LIST_TARGETS, LAYOUT_FORWARD_LIST, DUMP_LAYOUT, SCREEN_CAPTURE, INPUT_TAP, INPUT_SWIPE, INPUT_TEXT, INPUT_KEY,
 +    INPUT_OTHER, FILE_RECEIVE, REMOVE_FILE, APP_START, APP_STOP, PROCESS_QUERY, SERVICE_QUERY,
 +    MEDIA_QUERY, MEDIA_RECEIVE, MEDIA_DELETE, FILE_STAT, FILE_TEST, SHELL_SCRIPT, SHELL_OTHER, UNKNOWN;
 +
@@ -14807,10 +14847,10 @@ index 0000000..2c4ca24
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..c70347e
+index 0000000000000000000000000000000000000000..8bffb1e41150fc04e8c4589ca8697283c0856949
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,258 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -14874,6 +14914,14 @@ index 0000000..c70347e
 +            1 -> devices.single()
 +            else -> throw HdcDeviceSelectionException("Multiple HDC devices found. Select a device explicitly.")
 +        }
++    }
++
++    /** Verify the exact owner and endpoint before any loopback connection. */
++    internal fun hasUitestLayoutForward(deviceId: String, port: Int, timeout: Duration): Boolean {
++        validateDeviceId(deviceId)
++        val result = execute(listOf("fport", "ls"), timeout, category = HdcCommandCategory.LAYOUT_FORWARD_LIST)
++        if (result.stderr.isNotBlank()) throw HdcException("HDC forward listing returned diagnostics")
++        return matchesUitestLayoutForward(result.stdout, deviceId, port)
 +    }
 +
 +    /**
@@ -15032,6 +15080,13 @@ index 0000000..c70347e
 +            ?.takeIf { it.isNotBlank() } ?: "hdc"
 +
 +        private fun hasHdcFailure(output: String): Boolean = hdcFailurePattern.containsMatchIn(output)
++
++        internal fun matchesUitestLayoutForward(output: String, deviceId: String, port: Int): Boolean {
++            val local = "tcp:$port"
++            val matching = output.lineSequence().map { it.trim().split(Regex("\\s+")) }
++                .filter { it.getOrNull(1) == local }.toList()
++            return matching == listOf(listOf(deviceId, local, "localabstract:uitest_socket", "[Forward]"))
++        }
 +
 +        internal fun parseDeviceList(output: String): List<String> {
 +            val lines = output.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
@@ -15570,10 +15625,10 @@ index 0000000..ec58193
 +class HierarchyReadException(message: String, cause: Throwable? = null) : HdcException(message, cause)
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
 new file mode 100644
-index 0000000..98d0246
+index 0000000000000000000000000000000000000000..45454ab9a7027ae6fa3b151ce94935d252268168
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,135 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -15609,7 +15664,11 @@ index 0000000..98d0246
 +        } catch (error: EOFException) {
 +            // Only this read-only request can be repeated after a peer closes the socket.
 +            logger.debug("UITest closed the layout connection; opening it once more", error)
-+            return request(timeout)
++            return try {
++                request(timeout)
++            } catch (repeated: EOFException) {
++                throw HdcException("UITest closed the layout connection again", repeated)
++            }
 +        }
 +    }
 +
@@ -15638,6 +15697,7 @@ index 0000000..98d0246
 +                source.read()
 +            }
 +            val result = mapper.readTree(payload)
++            if (result == null || !result.isObject) throw HdcException("Invalid UITest layout RPC response")
 +            val responseId = result.get("request_id")
 +            if ((responseId != null && !responseId.isNull && responseId.asText() != id) ||
 +                result.get("exception")?.let { !it.isNull && !(it.isTextual && it.asText().isEmpty()) } == true
@@ -22001,6 +22061,110 @@ index 0000000..503a66d
 +                }
 +                else -> error("Unexpected command: $command")
 +            }
++        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
+new file mode 100644
+index 0000000000000000000000000000000000000000..189f57e2120a357904af64dfe360f41f9fb0e325
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
+@@ -0,0 +1,98 @@
++package maestro.harmonyos.layout
++
++import com.google.common.truth.Truth.assertThat
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
++import maestro.harmonyos.hdc.HdcClient
++import maestro.harmonyos.hdc.HdcCommandResult
++import maestro.harmonyos.hdc.HdcCommandRunner
++import org.junit.jupiter.api.Test
++import java.net.InetAddress
++import java.net.ServerSocket
++import java.nio.file.Files
++import java.nio.file.Path
++import java.time.Duration
++import java.util.concurrent.Executors
++import java.util.concurrent.TimeUnit
++
++class LayoutBackendTest {
++    private val deviceId = "TEST-01"
++    private val budget = Duration.ofSeconds(4)
++
++    @Test
++    fun `requires a unique forward for the selected target and the UITest endpoint`() {
++        val rule = "TEST-01\ttcp:12345 localabstract:uitest_socket   [Forward]"
++        assertThat(HdcClient.matchesUitestLayoutForward(rule, deviceId, 12345)).isTrue()
++        for (invalid in listOf("[Empty]", rule.replace("TEST-01", "TEST-02"),
++            rule.replace("uitest_socket", "another_socket"), rule.replace("[Forward]", "[Reverse]"),
++            "$rule\n" + rule.replace("TEST-01", "TEST-02"))) {
++            assertThat(HdcClient.matchesUitestLayoutForward(invalid, deviceId, 12345)).isFalse()
++        }
++    }
++
++    @Test
++    fun `a mismatched forward never connects to the loopback listener`() {
++        listener().use { server ->
++            val fixture = HdcFixture(server.localPort, "OTHER-DEVICE")
++            val device = fixture.device()
++            device.connect()
++            try {
++                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
++                server.soTimeout = 100
++                org.junit.jupiter.api.Assertions.assertThrows(java.net.SocketTimeoutException::class.java) { server.accept() }
++            } finally { device.disconnect() }
++        }
++    }
++
++    @Test
++    fun `a failed RPC read closes the socket and falls back for the session`() {
++        listener().use { server ->
++            val fixture = HdcFixture(server.localPort)
++            val device = fixture.device()
++            val executor = Executors.newSingleThreadExecutor()
++            try {
++                val peer = executor.submit {
++                    server.accept().use { socket ->
++                        socket.soTimeout = 3000
++                        val input = socket.getInputStream()
++                        val request = receiveLayoutFrame { input.read() }
++                        check(String(request).contains("captureLayout"))
++                        socket.getOutputStream().write("""{"exception":"fixture failure"}""".toByteArray())
++                        check(input.read() == -1) { "Failed RPC connection was left open" }
++                    }
++                }
++                device.connect()
++                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
++                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
++                peer.get(5, TimeUnit.SECONDS)
++                assertThat(fixture.dumps).isEqualTo(2)
++            } finally {
++                device.disconnect()
++                executor.shutdownNow()
++            }
++        }
++    }
++
++    private fun listener() = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 4000 }
++
++    private inner class HdcFixture(private val port: Int, private val owner: String = deviceId) {
++        var dumps = 0
++
++        fun device(): HdcHarmonyOSDevice {
++            val runner = HdcCommandRunner { command, _ ->
++                val response = when {
++                    command.drop(1) == listOf("list", "targets") -> deviceId
++                    command.drop(1) == listOf("fport", "ls") -> "$owner tcp:$port localabstract:uitest_socket [Forward]"
++                    command.last().startsWith("'uitest' 'dumpLayout'") -> { dumps++; "layout saved" }
++                    command.getOrNull(3) == "file" && command.getOrNull(4) == "recv" -> {
++                        Files.writeString(Path.of(command.last()), """{"attributes":{"text":"HDC"},"children":[]}""")
++                        "FileTransfer finish"
++                    }
++                    command.last().startsWith("'rm' '-f'") -> ""
++                    else -> error("Unexpected HDC command: $command")
++                }
++                HdcCommandResult(0, response, "")
++            }
++            return HdcHarmonyOSDevice(deviceId, HdcClient("hdc", runner), port)
 +        }
 +    }
 +}

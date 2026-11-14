@@ -28,7 +28,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 旧版 20 轮的四次失败均发生在顶部标题栏覆盖的按钮入口，20 轮清理均完成，执行期间无人工操作、重装或重启。当前修复针对示例页面，不提供通用遮挡检测；原始结果分别保留，详见[导航修复记录](docs/progress/2026-11-04-hmos-navigation.md)及[历史稳定性记录](docs/progress/2026-11-03-hmos-stability.md)。
 
-长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)。手机完整套件 20 轮结果见[手机记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)；平板新版本的 20 轮、人工干预复核及耗时见[平板记录](docs/progress/2026-11-06-tablet-v012.md)，两批分别统计。包含查询超时和长会话恢复修复的 [v0.1.2](docs/releases/0.1.2.md)已发布，实际 CLI 冒烟与平板长测均通过。实际 CI 平台部署、更多设备和 OpenHarmony 真机属于后续补充验证。20 轮批次录屏关闭，不将它记为录屏重复验证。
+长场景录屏留证和真实 VSCode 回放已有[验证记录](docs/progress/2026-11-04-delivery.md)。手机完整套件 20 轮结果见[手机记录](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)；平板新版本的 20 轮、人工干预复核及耗时见[平板记录](docs/progress/2026-11-06-tablet-v012.md)，两批分别统计。包含查询超时和长会话恢复修复的 [v0.1.2](docs/releases/0.1.2.md)已发布，实际 CLI 冒烟与平板长测均通过。GitHub Windows 主机构建已接入。远端真机派发、更多设备和 OpenHarmony 真机属于后续补充验证。20 轮批次录屏关闭，不将它记为录屏重复验证。
 
 **测试时间成本：** 手机与平板分别执行完整场景套件，实测如下。
 
@@ -38,6 +38,17 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | [平板](docs/progress/2026-11-06-tablet-v012.md) | 约 **3 小时 29 分钟** | 约 **10 分 25 秒** | **20/20，100%** |
 
 耗时包含逐轮启动、执行和清理。两批分别保留各自的固定版本与设备环境，其他环境耗时会变化；上述数据不作为不同设备的性能对比。批次由脚本独立执行，两批均无重试、无人工干预，全部正常清理并释放设备。
+
+## 取树性能、失败定位和设备恢复
+
+| 项目 | 已验证的结果 |
+| --- | --- |
+| RPC 取树 | 在同一台 HarmonyOS 7 平板上，用同一份 CLI 对 HMOS 代码工坊完整套件做了一组对照。默认 HDC **9 分 33 秒**，RPC **6 分 03 秒**，端到端耗时缩短 **36.6%**（约 **3 分 29 秒**）。两轮均通过，**98 条步骤结果逐条一致**，设备均已释放。见[验证范围与使用条件](docs/development-design.md#rpc-取树)。 |
+| VS Code 失败定位 | 同批 GitHub CLI 和 VSIX 在平板实测。预期断言失败后，可直接打开对应 YAML 第 3 行、失败截图和控制台日志。见[插件说明](packages/vscode/README.md)和[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)。 |
+| CI 与设备收尾 | GitHub Windows 构建通过，作业归档 CLI、VSIX、校验值和报告。真机入口核验执行结果、JUnit 与设备释放，远端设备派发待专用 runner。见[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43578173016)和[CI 说明](docs/ci.md)。 |
+| Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。 |
+
+RPC 需要使用包含该功能的源码构建。默认使用 HDC 取树，配好转发后可按会话启用 RPC。转发缺失或 RPC 读取失败时自动回到 HDC。[配置步骤](docs/setup.md#启用-rpc-取树)
 
 ## 背景与用途
 
@@ -192,7 +203,7 @@ node examples/agent-client/run.mjs `
 | 执行失败重试与尝试证据 | 标准 YAML retry 已有真机恢复和耗尽记录；首次与最终结果分开统计 | [重试恢复](docs/progress/2026-10-30.md#重试证据)、[重试耗尽](docs/progress/2026-10-30-followup.md#标准-yaml-重试耗尽)；稳定性分子不包含重试后才成功的轮次 |
 | 执行过程录屏留证 | 完整场景三段原片均完整解码通过，正常清理 | [分段录屏记录](docs/progress/2026-11-04-delivery.md#完整场景与三段原片)；当前为可选 Huawei 系统后端，默认关闭 |
 | 单命令批量执行 | 一次 CLI、同一会话执行四条 Flow，4/4 通过 | [同会话批次](docs/progress/2026-11-01.md#同会话录屏批次)；CLI 退出 0、清理完成 |
-| 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有本机真机证据；具体 CI 平台尚未配置 | [报告与 CI 证据](docs/requirements-evidence.md#批量执行与报告)：两条 Flow 的 JUnit 为 2 tests / 0 failures，成功批次归档 40 文件、0 问题；[CI 入口](docs/ci.md) |
+| 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有本机真机证据。GitHub 已完成 Windows 主机构建，远端设备派发待验证 | [报告与 CI 证据](docs/requirements-evidence.md#批量执行与报告)：两条 Flow 的 JUnit 为 2 tests / 0 failures，成功批次归档 40 文件、0 问题；[CI 入口](docs/ci.md) |
 | VSCode 高亮与操作录制辅助，生成标准 YAML 并由 CLI 回放 | 真实 VSCode 八步录制、保存及回放通过；另有交付版两步回放记录 | [录制证据](docs/requirements-evidence.md#vscode-录制保存与回放)、[插件说明](packages/vscode/README.md)；当前记录插件动作，不捕获手机手工触摸 |
 | 官方示例应用典型交互覆盖 | 采用固定版本 HMOS 代码工坊，套件覆盖输入、按钮、弹窗及导航 | [官方示例来源与获取](examples/hmos-code-lab/README.md)、[完整套件](examples/hmos-code-lab/flows/suite/README.md)；按所选场景核验，不声称覆盖应用全部功能 |
 | 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板同版 CLI 完整套件 20/20 通过，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板 20 轮](docs/progress/2026-11-06-tablet-v012.md)；API 级别与产品系统版本分别登记 |
