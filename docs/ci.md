@@ -4,6 +4,12 @@
 
 本机假执行器验证之外，已在一台真机上运行成功、预期断言失败及超时强制停止，检查后续阻止和 v2 恢复核销，见[补充验证记录](progress/2026-10-30-followup.md)。单设备入口使用预装工具、已构建的 CLI 和已准备的应用。
 
+## 在 GitHub Actions 上运行
+
+[Windows 主机构建](../.github/workflows/windows-build.yml)已在 GitHub 托管 runner 上通过。作业执行 JVM 和插件测试，从固定 Maestro 上游构建 CLI 和 VSIX，并上传日志、JUnit 和校验值。该次作业的 CLI 与 VSIX 下载后已在本机平板通过冒烟，验证了失败 YAML 行、截图与控制台日志的跳转，以及设备释放。[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)
+
+[真机冒烟工作流](../.github/workflows/windows-device-smoke.yml)由维护者在私有 CI 仓库的 main 分支手动派发。专用 Windows runner 通过 USB 连接设备，使用下文的工具、套件及设备变量。启用仓库变量 `MAESTRO_WINDOWS_DEVICE_CI_ENABLED` 后，工作流复用相同的设备入口并上传作业摘要。首次接入按下文验证成功、预期失败和取消三种状态。当前远端真机运行待验证。
+
 ## 在 AtomGit Action 上运行
 
 工作流位于 [`.gitcode/workflows`](../.gitcode/workflows/)。需要仓库开通 Action，并在仓库的 Runner 列表确认所用 Windows 标签可调度。下面两份配置仍需用实际远端作业验证。

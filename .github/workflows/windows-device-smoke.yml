@@ -1,0 +1,37 @@
+name: Windows device smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maestro-harmonyos-device
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: github.ref == 'refs/heads/main' && github.event.repository.private && vars.MAESTRO_WINDOWS_DEVICE_CI_ENABLED == 'true'
+    runs-on: [self-hosted, Windows, maestro-harmonyos-device]
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and test the CLI
+        shell: pwsh
+        timeout-minutes: 45
+        run: pwsh -NoProfile -File scripts/ci/build-windows.ps1
+      - name: Run the device suite and verify release
+        shell: pwsh
+        timeout-minutes: 22
+        run: pwsh -NoProfile -File scripts/ci/run-device-job.ps1
+      - name: Upload the CI summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-device-smoke
+          path: |
+            artifacts/ci-host/host-job.json
+            artifacts/ci-device-report/device-job.json
