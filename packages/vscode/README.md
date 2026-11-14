@@ -4,7 +4,7 @@
 
 首次准备完整工具链请按仓库 `docs/user-guide.md` 操作；维护扩展或桥接接口前可阅读 `docs/development-design.md`。
 
-当前记录通过插件发出的操作，不监听手机上的手动触摸，也不启动系统视频录屏。操作仍由已有 HarmonyOSDriver 和 Maestro 执行；本地桥接协议见仓库 `docs/recorder-protocol.md`。
+插件通过面板生成操作步骤，也提供 UITest 真机触摸录制和记录导入。回放由 HarmonyOSDriver 和 Maestro 执行。桥接协议见仓库 `docs/recorder-protocol.md`。
 
 ## 安装与配置
 
@@ -39,6 +39,24 @@
 输入通过 UTF-8 JSON 标准输入传给桥接，避免 Windows 命令行编码改变文字。桥接负责生成和执行同一条 YAML；不能安全表示的内容会明确拒绝，不会悄悄改写。可见文字断言可用于检查输入结果。
 
 插件提供 `maestro-flow`、`maestro-tap` 和 `maestro-assert` 三个 YAML 片段，使用 VSCode 的 YAML 高亮。生成的文件可以继续手工编辑，再从面板运行。点击“回放流程”执行当前面板中的步骤。
+
+## 在 VS Code 里录制真机触摸
+
+在测试设备打开目标应用。在录制面板点击 **开始录制**，选择设备和应用包名，等面板显示「正在录制」后再用手指操作。录制最长两分钟。部分设备会延迟输出操作日志，最终生成的步数以停止后的记录为准。请在整个录制期间保持目标测试应用前台。
+
+点击 **停止并生成 YAML**。插件确认设备端录制进程结束并读取记录后，会在工作区的 `artifacts/recorder/touch-*/touch-flow.yaml` 打开生成的文件。检查步骤并保存修改，再点 **回放触摸流程**。回放失败时可查看错误原因、源码位置、截图和日志。停止回放后，等到「设备已释放」即可继续重跑。
+
+在 HarmonyOS 7.0.0.111 手机的 HMOS 代码工坊上，从 VS Code 录入两次实际手指滑动、生成两条 `swipe` 并在同一台手机回放通过。生成的步骤使用屏幕坐标，适合在相同尺寸、方向和初始页面上复现。
+
+如果设备有正在运行的 UITest 录制或既有录制文件，插件会提示检查归属。设备意外断开时会显示释放未确认。重新连接后，先确认 UITest 录制进程已退出、归档属于该会话的 `/data/local/tmp/record.csv`，再处理对应的 `/data/local/tmp/maestro-touch` 会话目录。前台录制与回放共用该面板，请避免同时从其他工具操作同一设备。
+
+## 导入已有触摸录制
+
+在测试设备上打开目标应用。在终端用 `hdc -t <设备序列号> shell uitest uiRecord record` 开始，执行测试手势后按 Ctrl+C 停止。用 `hdc -t <设备序列号> shell uitest uiRecord read` 读取，保存为 UTF-8 的 `.jsonl` 文件。原始操作记录保存在设备的 `/data/local/tmp/record.csv`，开始前请确认这个文件可以由本次测试使用。[华为 UITest 操作录制说明](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/uitest-guidelines/)
+
+从 VS Code 命令面板运行 **HarmonyOS: 导入设备触摸录制**，选择文件并确认应用包名。插件把单指点击和滑动转换为坐标 YAML，显示跳过的记录数。导入结果会打开在编辑器中，可检查、保存，再在相同设备尺寸和方向下回放。记录中的应用包名为空时，以手动确认的应用为准，请只录制该测试应用。
+
+在 HarmonyOS 7 平板（UITest 7.0.0.1）上，已验证手指滑动可以导出、转换为 YAML，并用 CLI 在同一设备上回放。点击转换已有测试覆盖。
 
 ## 看运行进度、停止与重跑
 

@@ -44,6 +44,7 @@ footer { margin-top: 16px; }
 
 #runFrame { display: block; max-width: min(100%, 360px); max-height: 320px; object-fit: contain; }
 #runFrame[hidden] { display: none; }
+#runReason, #touchStatus { overflow-wrap: anywhere; }
 #runFlows, #runSteps { padding-inline-start: 1.5rem; }
 #runSteps li { list-style: none; margin-bottom: 3px; }
 .runStep { text-align: left; }

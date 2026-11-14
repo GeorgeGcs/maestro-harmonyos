@@ -163,7 +163,7 @@ node examples/agent-client/run.mjs `
 | --- | --- |
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和 Windows CI 入口；实际 CI 服务平台尚未接入。首次与重试后的最终结果分别记录。 |
-| VSCode 辅助编写 | 提供代码片段、截图与控件树选择、动作执行、YAML 生成和回放；记录插件发出的动作，不监听手机手工触摸。 |
+| VSCode 辅助编写 | 提供代码片段、截图与控件树选择、动作执行、YAML 生成和回放。可在面板启动和停止真机触摸录制，将单指点击和滑动转为标准 Maestro YAML，也可导入已有 UITest 记录。 |
 | 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；完整场景三段原片均完整解码通过。长场景可使用[分段入口](examples/hmos-code-lab/flows/recorded-suite/README.md)。已确认锁屏拒绝、且未产生采集与媒体的旧资源可受控恢复；其他未知状态仍须逐案核查。 |
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前本仓不提供 HAP 安装、权限修改、清除应用数据、Studio、内置 MCP 服务、多设备分片或云端运行；面向 Agent 的 MCP 服务由上述鸿测项目提供。
@@ -204,7 +204,7 @@ node examples/agent-client/run.mjs `
 | 执行过程录屏留证 | 完整场景三段原片均完整解码通过，正常清理 | [分段录屏记录](docs/progress/2026-11-04-delivery.md#完整场景与三段原片)；当前为可选 Huawei 系统后端，默认关闭 |
 | 单命令批量执行 | 一次 CLI、同一会话执行四条 Flow，4/4 通过 | [同会话批次](docs/progress/2026-11-01.md#同会话录屏批次)；CLI 退出 0、清理完成 |
 | 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有本机真机证据。GitHub 已完成 Windows 主机构建，远端设备派发待验证 | [报告与 CI 证据](docs/requirements-evidence.md#批量执行与报告)：两条 Flow 的 JUnit 为 2 tests / 0 failures，成功批次归档 40 文件、0 问题；[CI 入口](docs/ci.md) |
-| VSCode 高亮与操作录制辅助，生成标准 YAML 并由 CLI 回放 | 真实 VSCode 八步录制、保存及回放通过；另有交付版两步回放记录 | [录制证据](docs/requirements-evidence.md#vscode-录制保存与回放)、[插件说明](packages/vscode/README.md)；当前记录插件动作，不捕获手机手工触摸 |
+| VSCode 高亮与操作录制辅助，生成标准 YAML 并由 CLI 回放 | 真实 VSCode 八步录制、保存及回放通过；另有交付版两步回放记录 | [录制证据](docs/requirements-evidence.md#vscode-录制保存与回放) · [插件及触摸导入说明](packages/vscode/README.md) |
 | 官方示例应用典型交互覆盖 | 采用固定版本 HMOS 代码工坊，套件覆盖输入、按钮、弹窗及导航 | [官方示例来源与获取](examples/hmos-code-lab/README.md)、[完整套件](examples/hmos-code-lab/flows/suite/README.md)；按所选场景核验，不声称覆盖应用全部功能 |
 | 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板同版 CLI 完整套件 20/20 通过，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板 20 轮](docs/progress/2026-11-06-tablet-v012.md)；API 级别与产品系统版本分别登记 |
 | 完整场景套件 20 轮，首次通过率 ≥95% | 手机与平板各自在固定环境 20/20 首次通过，100%；均无重试、无人工干预、全部清理完成；手机 20 轮 4 小时 17 分 34 秒，平板约 3 小时 29 分钟 | [手机 20 轮](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)、[平板补充验证](docs/progress/2026-11-06-tablet-v012.md)、[统计方法](docs/validation-plan.md)；版本、设备与结果分别统计，不混算 |

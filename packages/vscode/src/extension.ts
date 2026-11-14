@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import { BridgeClient } from './bridge';
 import { createRunDirectory, javaLaunch, ReplayInput, ToolSettings } from './launcher';
 import { object, parseDevices, string } from './protocol';
@@ -8,11 +9,14 @@ import { RecorderSession, OperationStopped, errorMessage } from './session';
 import { boundedRead, replayEvidence, replayFileHash } from './replay-evidence';
 import { InteractiveRun, RunRequest } from './interactive-run';
 import { sourceSnapshot, StepSource } from './live-trace';
+import { importTouchRecording } from './touch-import';
+import { TouchRecording, verifyTouchIdle } from './touch-recording';
 
 let recorder: Recorder | undefined;
 export function activate(context: vscode.ExtensionContext): { getStatus(): { panelOpen: boolean; connected: boolean; busy: boolean; steps: number } } {
   recorder = new Recorder(context);
   context.subscriptions.push(recorder);
+  context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.importTouch', () => recorder!.handle(() => recorder!.pickTouchRecording())));
   for (const [name, action] of Object.entries({ open: () => recorder!.open(), connect: () => recorder!.connect(), save: () => recorder!.save(), replay: () => recorder!.replay(), runFile: () => recorder!.pickFlow(), rerun: () => recorder!.rerun(), stop: () => recorder!.stop() })) {
     context.subscriptions.push(vscode.commands.registerCommand(`harmonyosRecorder.${name}`, () => recorder!.handle(action)));
   }
@@ -25,6 +29,11 @@ class Recorder implements vscode.Disposable {
   private bridge: BridgeClient | undefined;
   private run?: InteractiveRun;
   private runTask?: Promise<void>;
+  private touch?: TouchRecording;
+  private touchTask?: Promise<void>;
+  private touchStopped = false;
+  private touchStatus = '在测试设备上打开目标应用，然后开始录制。';
+  private touchFlow?: RunRequest;
   private preparingRun = false;
   private preparationCancelled = false;
   private disposed = false;
@@ -46,7 +55,7 @@ class Recorder implements vscode.Disposable {
   constructor(private readonly context: vscode.ExtensionContext) {}
 
   status() { return { panelOpen: !!this.panel, connected: this.session.state.connected, busy: this.busy, steps: this.session.state.steps.length }; }
-  private get busy(): boolean { return this.session.state.busy || this.connecting || this.preparingRun || !!this.run?.active; }
+  private get busy(): boolean { return this.session.state.busy || this.connecting || this.preparingRun || !!this.run?.active || !!this.touch; }
   private trusted(): void { if (!vscode.workspace.isTrusted) throw new Error('请先信任当前工作区，再运行本地设备工具。'); }
   async handle(action: () => void | Promise<void>): Promise<void> {
     try { this.trusted(); await action(); }
@@ -69,6 +78,120 @@ class Recorder implements vscode.Disposable {
   private settings(): ToolSettings {
     const config = vscode.workspace.getConfiguration('harmonyosRecorder');
     return { cliDirectory: config.get<string>('cliDirectory', ''), javaPath: config.get<string>('javaPath', ''), hdcPath: config.get<string>('hdcPath', '') };
+  }
+  async startTouch(): Promise<void> {
+    if (this.busy) return;
+    await this.prepare(async root => {
+      const tools = this.settings();
+      const discovery = new BridgeClient(await javaLaunch(root, tools, ['harmonyos-bridge']), text => this.output.append(text));
+      let deviceId: string | undefined;
+      try {
+        const devices = parseDevices(await discovery.request('devices'));
+        deviceId = await vscode.window.showQuickPick(devices.map(device => device.id), { placeHolder: '选择录制用的鸿蒙测试设备' });
+      } finally { await discovery.dispose(); }
+      if (!deviceId || this.preparationCancelled || this.disposed) return;
+      if (this.run?.request.connection.deviceId === deviceId && !this.run.releaseConfirmed) {
+        throw new Error('上一轮回放未确认释放设备，请先检查设备会话。');
+      }
+      const config = vscode.workspace.getConfiguration('harmonyosRecorder');
+      const appId = await vscode.window.showInputBox({
+        title: '确认当前在前台的测试应用包名',
+        value: this.session.state.appId || config.get<string>('appId', ''),
+        validateInput: value => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value) ? null : '请输入有效的应用包名。',
+      });
+      if (!appId || this.preparationCancelled || this.disposed) return;
+      await this.session.disconnect();
+      const bridge = this.bridge;
+      this.bridge = undefined;
+      await bridge?.dispose();
+      if (this.preparationCancelled || this.disposed) return;
+      const artifactsDir = await createRunDirectory(root, 'touch');
+      if (this.preparationCancelled || this.disposed) return;
+      const connection = { deviceId, appId, artifactsDir,
+        abilityName: config.get<string>('abilityName', 'EntryAbility'), moduleName: config.get<string>('moduleName', '') || undefined };
+      this.touchStopped = false;
+      this.touchFlow = undefined;
+      this.touchStatus = '正在启动录制，请等面板提示。';
+      const recorder = new TouchRecording(this.hdc(tools), deviceId, appId,
+        () => { if (!this.touchStopped) { this.touchStatus = '正在录制，请在测试应用内点击或滑动。'; this.render(); } },
+        count => { if (!this.touchStopped) { this.touchStatus = `正在录制 · 已识别 ${count} 次点击或滑动`; this.render(); } },
+        error => this.output.appendLine(errorMessage(error)));
+      this.touch = recorder;
+      this.touchTask = (async () => {
+        try {
+          const result = await recorder.result;
+          if (result.busy) throw new Error('设备已有录制或遗留录制文件，请检查归属后重试。');
+          if (!result.released) throw new Error(result.detail ? `设备释放未确认。 ${result.detail}` : '录制进程或文件未确认清理，请检查设备后再试。');
+          if (!result.started) throw new Error(result.detail ?? '录制未启动，请检查测试应用是否在前台。');
+          let flow: ReturnType<typeof importTouchRecording>;
+          try { flow = importTouchRecording(appId, result.events); }
+          catch (error) {
+            if (result.events.trim()) {
+              await fs.writeFile(path.join(artifactsDir, 'uitest-record.log'), result.events, { encoding: 'utf8', flag: 'wx' });
+              throw new Error(`${errorMessage(error)} 原始记录已保存到本次产物目录，录制已释放。`);
+            }
+            throw new Error(`${errorMessage(error)} 录制已释放。`);
+          }
+          const flowPath = path.join(artifactsDir, 'touch-flow.yaml');
+          await fs.writeFile(flowPath, flow.yaml, { encoding: 'utf8', flag: 'wx' });
+          this.touchFlow = { root, tools, connection, input: { flowPath } };
+          this.touchStatus = `已生成 ${flow.steps} 步，跳过 ${flow.skipped} 条 · 录制已释放`;
+          if (!this.disposed && this.panel) await vscode.window.showTextDocument(vscode.Uri.file(flowPath), { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true });
+        } catch (error) {
+          this.touchStatus = errorMessage(error);
+        } finally {
+          this.touch = undefined;
+          this.render();
+        }
+      })();
+    });
+  }
+  async stopTouch(): Promise<void> {
+    const recorder = this.touch;
+    if (!recorder || this.touchStopped) return;
+    this.touchStopped = true;
+    this.touchStatus = '正在停止并读取录制结果。';
+    this.render();
+    try { await recorder.stop(); }
+    catch (error) {
+      if (this.touch !== recorder) return;
+      this.touchStopped = false;
+      this.touchStatus = '停止请求未确认，设备端录制到期后会自动停止。';
+      this.render();
+      throw error;
+    }
+  }
+  async replayTouch(): Promise<void> {
+    const request = this.touchFlow;
+    if (!request) return;
+    const file = request.input.flowPath;
+    if (vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.fsPath === file)) {
+      throw new Error('请先保存对录制 YAML 的修改。');
+    }
+    await this.prepare(async () => request);
+  }
+  private hdc(tools: ToolSettings): string {
+    return tools.hdcPath || process.env.MAESTRO_HARMONYOS_HDC || 'hdc';
+  }
+  async pickTouchRecording(): Promise<void> {
+    const files = await vscode.window.showOpenDialog({
+      openLabel: '导入 UITest 触摸记录',
+      canSelectMany: false,
+      filters: { 'UITest JSON Lines': ['jsonl', 'txt', 'log'] },
+    });
+    if (!files?.[0] || files[0].scheme !== 'file') return;
+    const config = vscode.workspace.getConfiguration('harmonyosRecorder');
+    const appId = await vscode.window.showInputBox({
+      title: '确认录制时操作的测试应用包名',
+      value: this.session.state.appId || config.get<string>('appId', ''),
+      validateInput: value => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value) ? null : '请输入有效的应用包名。',
+    });
+    if (!appId) return;
+    const data = await boundedRead(files[0].fsPath, 4 * 1024 * 1024);
+    const result = importTouchRecording(appId, new TextDecoder('utf-8', { fatal: true }).decode(data));
+    const document = await vscode.workspace.openTextDocument({ language: 'yaml', content: result.yaml });
+    await vscode.window.showTextDocument(document);
+    void vscode.window.showInformationMessage(`已导入 ${result.steps} 步，跳过 ${result.skipped} 条记录。请检查坐标，再保存并回放。`);
   }
   private async workspaceRoot(): Promise<string> {
     if (this.root) return this.root;
@@ -100,6 +223,8 @@ class Recorder implements vscode.Disposable {
       const chosen = await vscode.window.showQuickPick(devices.map(device => ({ label: device.id })), { placeHolder: '选择本次操作的鸿蒙设备' });
       check();
       if (!chosen) return;
+      await verifyTouchIdle(this.hdc(this.settings()), chosen.label);
+      check();
       const config = vscode.workspace.getConfiguration('harmonyosRecorder');
       const appId = await vscode.window.showInputBox({ title: '测试应用 bundle 名称', value: this.session.state.appId || config.get<string>('appId', ''), ignoreFocusOut: true,
         validateInput: value => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value) ? null : '请输入 bundle 名称，例如 org.example.app' });
@@ -177,7 +302,7 @@ class Recorder implements vscode.Disposable {
     const request = this.run.request;
     await this.prepare(async () => request);
   }
-  private async prepare(makeRequest: (root: string) => Promise<RunRequest | undefined>): Promise<void> {
+  private async prepare(makeRequest: (root: string) => Promise<RunRequest | void>): Promise<void> {
     if (this.busy) throw new Error('请等待当前操作完成。');
     this.open();
     this.preparingRun = true;
@@ -186,6 +311,7 @@ class Recorder implements vscode.Disposable {
     try {
       const request = await makeRequest(await this.workspaceRoot());
       if (!request || this.preparationCancelled || this.disposed) return;
+      await verifyTouchIdle(this.hdc(request.tools), request.connection.deviceId);
       await this.session.disconnect();
       const bridge = this.bridge;
       this.bridge = undefined;
@@ -197,9 +323,11 @@ class Recorder implements vscode.Disposable {
       this.highlightRequest = '';
       this.runTask = run.execute();
     } finally { this.preparingRun = false; this.render(); }
+    await this.touchTask;
     await this.runTask;
   }
   async stop(): Promise<void> {
+    if (this.touch) { await this.stopTouch(); return; }
     if (this.run?.active) { await this.run.stop(); return; }
     if (this.preparingRun) { this.preparationCancelled = true; return; }
     ++this.connectionAttempt; this.connecting = false;
@@ -230,7 +358,8 @@ class Recorder implements vscode.Disposable {
     await vscode.window.showTextDocument(document, { viewColumn: vscode.ViewColumn.Beside, selection: line.range });
   }
   async shutdown(): Promise<void> {
-    await this.stop();
+    await this.stop().catch(error => this.output.appendLine(errorMessage(error)));
+    await this.touchTask;
     await this.runTask;
   }
   dispose(): void {
@@ -293,6 +422,9 @@ class Recorder implements vscode.Disposable {
       case 'disconnect': await this.session.disconnect(); return;
       case 'refresh': await this.session.refresh(); return;
       case 'action': await this.session.action(message.action); return;
+      case 'startTouch': await this.startTouch(); return;
+      case 'stopTouch': await this.stopTouch(); return;
+      case 'replayTouch': await this.replayTouch(); return;
       case 'save': await this.save(); return;
       case 'replay': await this.replay(); return;
       case 'runFile': await this.pickFlow(); return;
@@ -326,9 +458,10 @@ class Recorder implements vscode.Disposable {
     const { replayFailure, ...state } = this.session.state;
     void this.panel?.webview.postMessage({ type: 'state', ...state, hasReplayFailure: !!replayFailure,
       busy: this.busy, yaml: this.session.yaml(),
+      touch: { active: !!this.touch, stopping: this.touchStopped, status: this.touchStatus, canReplay: !!this.touchFlow },
       run: this.run ? { status: this.run.status, active: this.run.active, canStop: this.run.status === '正在启动' || this.run.canStop,
         canPreview: this.run.canStop,
-        release: this.run.releaseConfirmed, progress: this.run.progress, failure: this.run.failure,
+        release: this.run.releaseConfirmed, progress: this.run.progress, failure: this.run.failure, failureReason: this.run.failureReason,
         preview: this.run.previewEnabled, artifacts: !!this.run.attempt,
         frame: this.run.previewEnabled && this.panel?.visible ? this.run.frame : undefined } : undefined });
   }
@@ -340,10 +473,12 @@ class Recorder implements vscode.Disposable {
     return `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';"><link rel="stylesheet" href="${css}"><title>鸿蒙流程录制</title></head><body>
 <header><h1>鸿蒙流程录制</h1><p>在画面中选择控件，再执行操作。成功步骤会写入标准 YAML。</p></header>
 <nav aria-label="会话"><button id="connect">连接设备</button><button id="disconnect">断开</button><button id="refresh">刷新画面</button><button id="launch">启动应用</button><button id="back">返回</button><button id="stop" class="secondary">停止任务</button></nav>
+<section class="flow"><h2>真机触摸录制</h2><div class="row"><button id="startTouch">开始录制</button><button id="stopTouch">停止并生成 YAML</button><button id="replayTouch">回放触摸流程</button></div>
+<p id="touchStatus" role="status"></p></section>
 <section class="flow"><h2>运行与证据</h2><div class="row">
 <button id="runFile">运行 YAML 或套件</button><button id="runArtifacts" class="secondary">打开本轮产物</button><button id="rerun">重跑</button><button id="runEvidence" hidden>查看失败证据</button>
 <label><input id="runPreview" type="checkbox"> 预览设备画面</label></div>
-<p id="runStatus" role="status">尚未运行</p><ul id="runFlows"></ul>
+<p id="runStatus" role="status">尚未运行</p><p id="runReason" hidden></p><ul id="runFlows"></ul>
 <details open><summary>最近步骤</summary><ul id="runSteps"></ul></details>
 <p id="runPreviewStatus" hidden>等待执行过程中的截图。</p><img id="runFrame" alt="最近一次运行截图" hidden></section>
 <p id="status" role="status" aria-live="polite">连接手机后开始录制。</p><div class="workspace"><section class="device"><h2>设备画面 <span id="dimensions"></span></h2><p id="empty">连接设备后显示截图。每次操作后自动刷新。</p><div id="imageWrap"><img id="screen" alt="当前鸿蒙设备截图" hidden><div id="highlight" hidden></div><div id="point" hidden></div></div></section>

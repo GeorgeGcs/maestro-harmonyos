@@ -50,6 +50,10 @@
         "title": "HarmonyOS: 运行 YAML 或套件"
       },
       {
+        "command": "harmonyosRecorder.importTouch",
+        "title": "HarmonyOS: 导入设备触摸录制"
+      },
+      {
         "command": "harmonyosRecorder.rerun",
         "title": "HarmonyOS: 重跑上一轮"
       },
