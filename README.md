@@ -46,10 +46,30 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | RPC 取树 | 在同一台 HarmonyOS 7 平板上，用同一份 CLI 对 HMOS 代码工坊完整套件做了一组对照。默认 HDC **9 分 33 秒**，RPC **6 分 03 秒**，端到端耗时缩短 **36.6%**（约 **3 分 29 秒**）。两轮均通过，**98 条步骤结果逐条一致**，设备均已释放。见[验证范围与使用条件](docs/development-design.md#rpc-取树)。 |
 | VS Code 运行与失败定位 | 运行中高亮 YAML 并显示子 Flow 状态。点击失败步骤可在同一区域查看失败行、截图和日志摘要，平板已验证停止、确认释放和重跑。见[插件说明](packages/vscode/README.md#看运行进度停止与重跑)及[真机验收记录](docs/progress/2026-11-14-vscode-live-run.md)。 |
 | VS Code 触摸录制与语法检查 | 点击优先生成控件 ID 或文本。插件用录制前的控件树核对首个点击，重复匹配时尝试用唯一父容器生成 `childOf`。同一条文本选择器已从平板录制并在手机回放通过。源码版插件已在真实 VS Code 中验证常用命令和参数补全，以及保存后定位 Maestro 语法错误，无需连接设备。见[录制与检查说明](packages/vscode/README.md#在-vs-code-里录制真机触摸)。 |
-| CI 与设备收尾 | GitHub Windows 构建通过，作业归档 CLI、VSIX、校验值和报告。真机入口核验执行结果、JUnit 与设备释放，远端设备派发待专用 runner。见[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43578173016)和[CI 说明](docs/ci.md)。 |
+| CI 与设备收尾 | 通用 Windows CI 已从干净源码构建 CLI、自动启动 API 22 模拟器、安装 HAP 并执行 Flow。已归档 JUnit 和截图，确认会话释放、模拟器关闭。见[流程与证据](docs/ci.md)。 |
 | Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。 |
 
-RPC 需要使用包含该功能的源码构建。默认使用 HDC 取树，配好转发后可按会话启用 RPC。转发缺失或 RPC 读取失败时自动回到 HDC。[配置步骤](docs/setup.md#启用-rpc-取树)
+### API 26 真机性能
+
+2026 年 11 月 15 日在同一台 HUAWEI Mate 60 Pro（HarmonyOS 7.0.0.111 / API 26）上分阶段测试。各阶段在同一场景中使用相同的 HAP 和 YAML。表中为通过轮次的耗时中位数，原生数据排除预热。CLI 总耗时从进程启动算到退出，Flow 内耗时从启动应用算到显式截图完成。
+
+| 原生冒烟阶段 | 通过轮次 | CLI 总耗时 | Flow 内耗时 | `tapOn` |
+| --- | ---: | ---: | ---: | ---: |
+| 初始 HDC 实现 | 10/10 | 34.60 秒 | 23.12 秒 | 13.87 秒 |
+| 独立尺寸查询、短时复用组件树 | 4/4 | 26.42 秒 | 16.25 秒 | 9.54 秒 |
+| RPC 取树 | 2/2 | 12.54 秒 | 5.49 秒 | 2.01 秒 |
+| RPC 取树和尺寸查询 | 2/2 | **9.68 秒** | **3.94 秒** | **1.29 秒** |
+
+| ArkWeb 滚动阶段 | 通过轮次 | CLI 总耗时 | 滚动步骤 |
+| --- | ---: | ---: | ---: |
+| 初始 HDC 实现 | 1/1 | 80.49 秒 | 45.39 秒 |
+| 独立尺寸查询、减少重复取树 | 2/2 | 41.30 秒 | 20.32 秒 |
+| RPC 取树、复用 ArkWeb 页面连接 | 2/2 | 20.07 秒 | 8.41 秒 |
+| RPC 取树和尺寸查询、复用页面连接 | 2/2 | **14.59 秒** | **5.98 秒** |
+
+各阶段的显式截图均成功保存。最终构建的四轮均使用 RPC 取树和查询尺寸，ArkWeb 测试结束后恢复了原 HAP 并移除了转发。以上为源码构建的短用例数据，完整套件的稳定性记录见前文。
+
+RPC 需要使用包含该功能的源码构建，并在测试设备上准备 UITest 服务和转发。默认使用 HDC，转发缺失或 RPC 取树失败时回退到 HDC。[配置步骤](docs/setup.md#启用-rpc-取树)
 
 ## 背景与用途
 
@@ -163,7 +183,7 @@ node examples/agent-client/run.mjs `
 | 能力 | 当前范围 |
 | --- | --- |
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
-| 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和 Windows CI 入口；实际 CI 服务平台尚未接入。首次与重试后的最终结果分别记录。 |
+| 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和通用 Windows CI 入口。首次与重试后的最终结果分别记录。 |
 | VS Code 辅助编写 | 提供代码片段、截图与控件树选择、真机触摸录制和 UITest 记录导入。检查器可预览 ID 或文字候选在面板控件树中的匹配数量，并复制唯一匹配的选择器。生成的标准 Maestro YAML 可在插件内检查语法和回放。仅首个触摸事件有录制前的控件树，后续点击及离线导入的选择器需结合页面核对。 |
 | 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；完整场景三段原片均完整解码通过。长场景可使用[分段入口](examples/hmos-code-lab/flows/recorded-suite/README.md)。已确认锁屏拒绝、且未产生采集与媒体的旧资源可受控恢复；其他未知状态仍须逐案核查。 |
 
@@ -204,7 +224,7 @@ node examples/agent-client/run.mjs `
 | 执行失败重试与尝试证据 | 标准 YAML retry 已有真机恢复和耗尽记录；首次与最终结果分开统计 | [重试恢复](docs/progress/2026-10-30.md#重试证据)、[重试耗尽](docs/progress/2026-10-30-followup.md#标准-yaml-重试耗尽)；稳定性分子不包含重试后才成功的轮次 |
 | 执行过程录屏留证 | 完整场景三段原片均完整解码通过，正常清理 | [分段录屏记录](docs/progress/2026-11-04-delivery.md#完整场景与三段原片)；当前为可选 Huawei 系统后端，默认关闭 |
 | 单命令批量执行 | 一次 CLI、同一会话执行四条 Flow，4/4 通过 | [同会话批次](docs/progress/2026-11-01.md#同会话录屏批次)；CLI 退出 0、清理完成 |
-| 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有本机真机证据。GitHub 已完成 Windows 主机构建，远端设备派发待验证 | [报告与 CI 证据](docs/requirements-evidence.md#批量执行与报告)：两条 Flow 的 JUnit 为 2 tests / 0 failures，成功批次归档 40 文件、0 问题；[CI 入口](docs/ci.md) |
+| 标准报告输出、可接入 CI/CD | 原生 JUnit、结构化结果、非零失败退出码和归档入口均有真机证据。API 22 模拟器作业通过通用 CI 流程。 | [真机批量执行](docs/requirements-evidence.md#批量执行与报告)：JUnit 2 项通过、归档 40 个文件；[模拟器 CI](docs/ci.md#gitee-和-jenkins-验证记录)：JUnit 1 项通过、已归档截图并确认会话释放。 |
 | VSCode 高亮与操作录制辅助，生成标准 YAML 并由 CLI 回放 | 真实 VSCode 八步录制、保存及回放通过；另有交付版两步回放记录 | [录制证据](docs/requirements-evidence.md#vscode-录制保存与回放) · [插件及触摸导入说明](packages/vscode/README.md) |
 | 官方示例应用典型交互覆盖 | 采用固定版本 HMOS 代码工坊，套件覆盖输入、按钮、弹窗及导航 | [官方示例来源与获取](examples/hmos-code-lab/README.md)、[完整套件](examples/hmos-code-lab/flows/suite/README.md)；按所选场景核验，不声称覆盖应用全部功能 |
 | 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板同版 CLI 完整套件 20/20 通过，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板 20 轮](docs/progress/2026-11-06-tablet-v012.md)；API 级别与产品系统版本分别登记 |

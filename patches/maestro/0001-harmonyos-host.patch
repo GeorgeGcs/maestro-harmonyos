@@ -396,7 +396,7 @@ index 15c5b42..b80acec 100644
  
      override fun call(): Int {
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
-index 064ff51..0ef15ba 100644
+index 064ff51..fd1ed96 100644
 --- a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 @@ -19,6 +19,7 @@
@@ -636,7 +636,7 @@ index 064ff51..0ef15ba 100644
          return MaestroSessionManager.newSession(
              host = parent?.host,
              port = parent?.port,
-@@ -489,44 +581,73 @@ class TestCommand : Callable<Int> {
+@@ -489,44 +581,79 @@ class TestCommand : Callable<Int> {
              val maestro = session.maestro
              val device = session.device
  
@@ -652,7 +652,10 @@ index 064ff51..0ef15ba 100644
 +            val report = harmonyOsAgentReport
 +            val driver = maestro.driver as? HarmonyOSDriver
 +            val interactive = report?.interactive
-+            if (interactive != null) driver?.previewFrame = interactive::preview
++            if (interactive != null && driver != null) {
++                driver.previewFrame = interactive::preview
++                driver.shouldCapturePreview = interactive::wantsPreview
++            }
 +            try {
 +                report?.checkStop()
 +                runOnSession(maestro, device, chunkPlans, shardIndex, debugOutputPath, deviceId, effectiveShards).also {
@@ -672,7 +675,27 @@ index 064ff51..0ef15ba 100644
 +                report.failed(error)
 +                Triple(0, 1, null)
 +            } finally {
-+                if (interactive != null) driver?.previewFrame = null
++                if (interactive != null && driver != null) {
++                    driver.shouldCapturePreview = null
++                    driver.previewFrame = null
+                 }
+-            } else {
+-                val flowFile = flowFiles.first()
+-                if (continuous) {
+-                    if (!flattenDebugOutput) {
+-                        TestDebugReporter.deleteOldFiles()
+-                    }
+-                    TestRunner.runContinuous(
+-                        maestro,
+-                        device,
+-                        flowFile,
+-                        env,
+-                        analyze,
+-                        authToken,
+-                        deviceId,
+-                    )
+-                } else {
+-                    runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
 +            }
 +        }.also {
 +            agentSession?.let { harmonyOsAgentReport?.sessionClosedNormally(it) }
@@ -723,29 +746,12 @@ index 064ff51..0ef15ba 100644
 +                    authToken,
 +                    deviceId,
 +                )
-             } else {
--                val flowFile = flowFiles.first()
--                if (continuous) {
--                    if (!flattenDebugOutput) {
--                        TestDebugReporter.deleteOldFiles()
--                    }
--                    TestRunner.runContinuous(
--                        maestro,
--                        device,
--                        flowFile,
--                        env,
--                        analyze,
--                        authToken,
--                        deviceId,
--                    )
--                } else {
--                    runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
--                }
++            } else {
 +                runSingleFlow(maestro, device, flowFile, debugOutputPath, deviceId)
              }
          }
      }
-@@ -573,6 +694,7 @@ class TestCommand : Callable<Int> {
+@@ -573,6 +700,7 @@ class TestCommand : Callable<Int> {
              analyze = analyze,
              apiKey = authToken,
              deviceId = deviceId,
@@ -753,7 +759,7 @@ index 064ff51..0ef15ba 100644
          )
          val duration = System.currentTimeMillis() - startTime
  
-@@ -620,6 +742,7 @@ class TestCommand : Callable<Int> {
+@@ -620,6 +748,7 @@ class TestCommand : Callable<Int> {
              reporter = ReporterFactory.buildReporter(format, testSuiteName),
              captureSteps = format == ReportFormat.HTML_DETAILED,
              captureFullArtifacts = analyze,
@@ -2864,10 +2870,10 @@ index 0000000..cc93c1f
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
 new file mode 100644
-index 0000000..62a9d23
+index 0000000..478c8b5
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,54 @@
 +package maestro.cli.harmonyos
 +
 +import java.io.IOException
@@ -2898,13 +2904,16 @@ index 0000000..62a9d23
 +        return stopRequested
 +    }
 +
-+    // The driver has already acquired and validated these bytes. No extra device I/O.
-+    fun preview(bytes: ByteArray) {
++    fun wantsPreview(): Boolean {
 +        val now = System.nanoTime()
-+        if (lastPreview != 0L && now - lastPreview < TimeUnit.SECONDS.toNanos(2)) return
-+        lastPreview = now
-+        if (bytes.size > 4 * 1024 * 1024 ||
-+            !Files.isRegularFile(previewFile, LinkOption.NOFOLLOW_LINKS) || shouldStop()) return
++        return (lastPreview == 0L || now - lastPreview >= TimeUnit.SECONDS.toNanos(2)) &&
++            Files.isRegularFile(previewFile, LinkOption.NOFOLLOW_LINKS) && !shouldStop()
++    }
++
++    fun preview(bytes: ByteArray) {
++        if (!wantsPreview()) return
++        lastPreview = System.nanoTime()
++        if (bytes.size > 4 * 1024 * 1024) return
 +        try {
 +            val staging = Files.createTempFile(frame.parent, ".preview-", ".tmp")
 +            try {
@@ -5767,10 +5776,10 @@ index 0000000..4baba89
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..432fc7d
+index 0000000..178fb91
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,218 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -5860,6 +5869,11 @@ index 0000000..432fc7d
 +                    ?: throw CliError("MAESTRO_HARMONYOS_ARKWEB_PORT must be 1024..65535.")
 +            },
 +            arkWebBundle = environment["MAESTRO_HARMONYOS_ARKWEB_BUNDLE"],
++            strictFaultDiagnostics = when (environment["MAESTRO_HARMONYOS_STRICT_FAULT_DIAGNOSTICS"]?.trim()) {
++                null, "", "false" -> false
++                "true" -> true
++                else -> throw CliError("MAESTRO_HARMONYOS_STRICT_FAULT_DIAGNOSTICS must be true or false.")
++            },
 +            enableScreenRecording = when (val backend = environment["MAESTRO_HARMONYOS_RECORDING"]?.trim()) {
 +                null, "", "off" -> false
 +                "huawei-system" -> true
@@ -11341,6 +11355,31 @@ index 0000000..e54096b
 +            "failureFingerprint" to "bad")))).isNull()
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/Maestro.kt b/maestro-client/src/main/java/maestro/Maestro.kt
+index ddedf17..683ff67 100644
+--- a/maestro-client/src/main/java/maestro/Maestro.kt
++++ b/maestro-client/src/main/java/maestro/Maestro.kt
+@@ -391,6 +391,11 @@ class Maestro(
+     ) {
+         recentScroll = false // consume the scroll hint (MA-4135)
+ 
++        if (driver is maestro.drivers.HarmonyOSDriver && !retryIfNoChange) {
++            hierarchyBasedTap(x, y, false, longPress, initialHierarchy, tapRepeat, waitToSettleTimeoutMs)
++            return
++        }
++
+         val capabilities = runInterruptible(Dispatchers.IO) { driver.capabilities() }
+ 
+         if (Capability.FAST_HIERARCHY in capabilities) {
+@@ -411,7 +416,7 @@ class Maestro(
+     ) {
+         LOGGER.info("Tapping at ($x, $y) using hierarchy based logic for wait")
+ 
+-        val hierarchyBeforeTap = initialHierarchy ?: viewHierarchy()
++        val hierarchyBeforeTap = if (retryIfNoChange) initialHierarchy ?: viewHierarchy() else null
+ 
+         val retries = getNumberOfRetries(retryIfNoChange)
+         repeat(retries) {
 diff --git a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt b/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
 index 5a191dd..c6199bf 100644
 --- a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
@@ -11477,10 +11516,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..2ff9688
+index 0000000..d418d57
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,434 @@
+@@ -0,0 +1,467 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -11492,11 +11531,13 @@ index 0000000..2ff9688
 +import maestro.SwipeDirection
 +import maestro.TreeNode
 +import maestro.ViewHierarchy
++import maestro.filterOutOfBounds
 +import maestro.device.DeviceOrientation
 +import maestro.device.Platform
 +import maestro.harmonyos.driver.HarmonyOSCommandException
 +import maestro.harmonyos.driver.HarmonyOSDevice
 +import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.driver.HarmonyOSFlowFaults
 +import maestro.harmonyos.driver.HdcHarmonyOSDevice
 +import maestro.harmonyos.driver.requireIdentifier
 +import maestro.harmonyos.hdc.HdcClient
@@ -11530,9 +11571,21 @@ index 0000000..2ff9688
 +    private var recording: ScreenRecording? = null
 +    private var recordingFailure: Throwable? = null
 +    var previewFrame: ((ByteArray) -> Unit)? = null
++    var shouldCapturePreview: (() -> Boolean)? = null
 +    private var queryFailure: HdcTimeoutException? = null
++    private var useDisplaySize = false
++    private var lastDeviceInfo: DeviceInfo? = null
++    private data class HierarchySample(val root: TreeNode, val finishedAt: Long)
++    private var lastHierarchy: HierarchySample? = null
 +
 +    override fun name(): String = "HarmonyOS"
++
++    val strictFaultDiagnostics: Boolean get() = config.strictFaultDiagnostics
++
++    fun flowFaults(appId: String, startMs: Long, endMs: Long): HarmonyOSFlowFaults? {
++        if (!opened || queryFailure != null) return null
++        return device.flowFaults(appId, startMs, endMs, minOf(config.commandTimeout, Duration.ofSeconds(6)))
++    }
 +
 +    @Synchronized
 +    override fun open() {
@@ -11541,7 +11594,8 @@ index 0000000..2ff9688
 +        checkInterrupted()
 +        device.connect()
 +        try {
-+            capture(config.commandTimeout)
++            val image = capture(config.commandTimeout).image
++            useDisplaySize = query { device.displaySize(config.commandTimeout) } == (image.width to image.height)
 +            hierarchy()
 +            opened = true
 +        } catch (error: Throwable) {
@@ -11553,6 +11607,8 @@ index 0000000..2ff9688
 +    @Synchronized
 +    override fun close() {
 +        opened = false
++        lastHierarchy = null
++        lastDeviceInfo = null
 +        val current = recording
 +        recording = null
 +        try {
@@ -11567,9 +11623,12 @@ index 0000000..2ff9688
 +
 +    override fun deviceInfo(): DeviceInfo {
 +        requireOpen()
-+        val image = capture(config.commandTimeout).image
 +        // UITest coordinates and bounds are physical pixels, including system bars.
-+        return DeviceInfo(Platform.HARMONYOS, image.width, image.height, image.width, image.height)
++        val size = if (useDisplaySize && shouldCapturePreview?.invoke() != true) {
++            query { device.displaySize(config.commandTimeout) }
++        } else null
++        val (width, height) = size ?: capture(config.commandTimeout).image.let { it.width to it.height }
++        return DeviceInfo(Platform.HARMONYOS, width, height, width, height).also { lastDeviceInfo = it }
 +    }
 +
 +    override fun launchApp(appId: String, launchArguments: Map<String, Any>) {
@@ -11640,13 +11699,16 @@ index 0000000..2ff9688
 +    override fun contentDescriptor(excludeKeyboardElements: Boolean): TreeNode {
 +        requireOpen()
 +        if (excludeKeyboardElements) unsupported("excluding keyboard elements from the hierarchy")
-+        return hierarchy()
++        return hierarchy().also { lastHierarchy = HierarchySample(it, System.nanoTime()) }
 +    }
 +
 +    override fun scrollVertical() = swipe(SwipeDirection.UP, 400)
 +
 +    override fun swipe(start: Point, end: Point, durationMs: Long) {
-+        val info = deviceInfo()
++        swipe(start, end, durationMs, deviceInfo())
++    }
++
++    private fun swipe(start: Point, end: Point, durationMs: Long, info: DeviceInfo) {
 +        validatePoint(start, info)
 +        validatePoint(end, info)
 +        require(durationMs > 0) { "Swipe duration must be positive" }
@@ -11666,7 +11728,7 @@ index 0000000..2ff9688
 +            SwipeDirection.LEFT -> Point(info.widthGrid * 4 / 5, center.y) to Point(info.widthGrid / 5, center.y)
 +            SwipeDirection.RIGHT -> Point(info.widthGrid / 5, center.y) to Point(info.widthGrid * 4 / 5, center.y)
 +        }
-+        swipe(start, end, durationMs)
++        swipe(start, end, durationMs, info)
 +    }
 +
 +    override fun swipe(elementPoint: Point, direction: SwipeDirection, durationMs: Long) {
@@ -11677,7 +11739,7 @@ index 0000000..2ff9688
 +            SwipeDirection.LEFT -> Point(maxOf(1, elementPoint.x - info.widthGrid * 3 / 5), elementPoint.y)
 +            SwipeDirection.RIGHT -> Point(minOf(info.widthGrid - 1, elementPoint.x + info.widthGrid * 3 / 5), elementPoint.y)
 +        }
-+        swipe(elementPoint, end, durationMs)
++        swipe(elementPoint, end, durationMs, info)
 +    }
 +
 +    override fun backPress() = pressKey(KeyCode.BACK)
@@ -11724,9 +11786,17 @@ index 0000000..2ff9688
 +    override fun waitForAppToSettle(initialHierarchy: ViewHierarchy?, appId: String?, timeoutMs: Int?): ViewHierarchy? {
 +        requireOpen()
 +        val deadline = deadline(timeoutMs?.toLong() ?: config.settleTimeout.toMillis())
-+        var previous: TreeNode? = null
++        val sample = lastHierarchy
++        lastHierarchy = null
++        val info = lastDeviceInfo
++        var previous = sample?.root?.takeIf { root ->
++            initialHierarchy != null && info != null &&
++                System.nanoTime() - sample.finishedAt <= config.pollInterval.toNanos().coerceAtLeast(250_000_000) &&
++                (root.filterOutOfBounds(info.widthGrid, info.heightGrid) ?: root) == initialHierarchy.root
++        }
 +        var previousSampleNanos = 0L
-+        // Require two fresh samples. A caller's snapshot can predate the last input event.
++        // Reuse a matching pre-action sample from this driver. Input invalidates the sample.
++        // Post-action settling still needs two fresh samples.
 +        while (true) {
 +            if (!canSample(deadline, previousSampleNanos)) return null
 +            val started = System.nanoTime()
@@ -11802,10 +11872,12 @@ index 0000000..2ff9688
 +
 +    private fun input(vararg arguments: String) {
 +        requireOpen()
++        lastHierarchy = null
 +        device.execute(listOf("uitest", "uiInput") + arguments, config.commandTimeout)
 +    }
 +
 +    private fun aa(arguments: List<String>, expectedSuccess: String) {
++        lastHierarchy = null
 +        val output = device.execute(arguments, config.commandTimeout)
 +        if (output.lineSequence().none { it.trim() == expectedSuccess }) {
 +            throw HarmonyOSCommandException("aa did not confirm success", output, "")
@@ -11959,10 +12031,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..e5ed227
+index 0000000..4aed3d5
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,18 @@
+@@ -0,0 +1,20 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -11975,6 +12047,8 @@ index 0000000..e5ed227
 +    fun connect()
 +    fun disconnect() {}
 +    fun isAvailable(): Boolean
++    fun displaySize(timeout: Duration): Pair<Int, Int>? = null
++    fun flowFaults(appId: String, startMs: Long, endMs: Long, timeout: Duration): HarmonyOSFlowFaults? = null
 +    fun hierarchy(timeout: Duration): TreeNode
 +    fun screenshot(timeout: Duration): ByteArray
 +    fun execute(arguments: List<String>, timeout: Duration): String
@@ -11983,10 +12057,10 @@ index 0000000..e5ed227
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..1f5d193
+index 0000000..a1914cf
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,51 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -12006,6 +12080,7 @@ index 0000000..1f5d193
 +    val layoutRpcDevice: String? = null,
 +    val arkWebPort: Int? = null,
 +    val arkWebBundle: String? = null,
++    val strictFaultDiagnostics: Boolean = false,
 +) {
 +    init {
 +        require((layoutRpcPort == null) == (layoutRpcDevice == null)) { "Set both layout RPC port and target device" }
@@ -12036,6 +12111,48 @@ index 0000000..1f5d193
 +    require(value.isNotBlank() && !value.startsWith('-') && value.none { it.isWhitespace() || it == '\u0000' }) {
 +        "$name must be non-empty and cannot contain whitespace, NUL, or start with '-'"
 +    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt
+new file mode 100644
+index 0000000..024c799
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt
+@@ -0,0 +1,36 @@
++package maestro.harmonyos.driver
++
++import com.fasterxml.jackson.databind.ObjectMapper
++
++data class HarmonyOSFlowFault(val event: String, val timeMs: Long, val reason: String) {
++    val message: String get() = if (reason.isBlank()) event else "$event: ${reason.lineSequence().first()}"
++}
++
++data class HarmonyOSFlowFaults(val crash: HarmonyOSFlowFault?, val freeze: HarmonyOSFlowFault?)
++
++private val mapper = ObjectMapper()
++private val crashEvents = setOf("CPP_CRASH", "JS_ERROR", "RUST_PANIC", "CJ_ERROR", "APP_CRASH")
++private val bundleFields = listOf("PACKAGE_NAME", "MODULE", "PROCESS_NAME", "PNAME", "bundle_name")
++
++internal fun parseFlowFaults(output: String, appId: String, startMs: Long, endMs: Long): HarmonyOSFlowFaults {
++    var crash: HarmonyOSFlowFault? = null
++    var freeze: HarmonyOSFlowFault? = null
++    output.lineSequence().filter { it.trimStart().startsWith("{") }.forEach { line ->
++        val event = runCatching { mapper.readTree(line) }.getOrNull() ?: return@forEach
++        val name = event.path("name_").asText()
++        if (name !in crashEvents && name != "APP_FREEZE") return@forEach
++        if (bundleFields.none { event.path(it).asText() == appId }) return@forEach
++        val time = event.path("HAPPEN_TIME").asLong().takeIf { it > 0 } ?: event.path("time_").asLong()
++        if (time !in startMs..endMs) return@forEach
++        val reason = listOf("REASON", "SUMMARY", "MSG").firstNotNullOfOrNull { key ->
++            event.path(key).asText().takeIf(String::isNotBlank)
++        }.orEmpty().take(8192)
++        val fault = HarmonyOSFlowFault(name, time, reason)
++        if (name == "APP_FREEZE") {
++            if (time >= (freeze?.timeMs ?: 0)) freeze = fault
++        } else if (time >= (crash?.timeMs ?: 0)) {
++            crash = fault
++        }
++    }
++    return HarmonyOSFlowFaults(crash, freeze)
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSRecordingDiagnostics.kt
 new file mode 100644
@@ -12821,10 +12938,10 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..1401fb5
+index 0000000..8a0056c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,293 @@
+@@ -0,0 +1,347 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12867,12 +12984,18 @@ index 0000000..1401fb5
 +    private val arkWebBundle: String? = null,
 +) : HarmonyOSDevice {
 +    private var layoutChannel: LoopbackLayoutChannel? = null
++    private var displayRpcUnsupported = false
 +    private var reportedArkWebSource: String? = null
++    private val arkWeb = arkWebPort?.let(::ArkWebLoopback)
++    private var arkWebWindow: String? = null
 +
 +    override fun disconnect() {
 +        layoutChannel?.close()
 +        layoutChannel = null
++        displayRpcUnsupported = false
 +        reportedArkWebSource = null
++        arkWeb?.close()
++        arkWebWindow = null
 +    }
 +    override fun connect() {
 +        hdc.selectDevice(deviceId)
@@ -12886,6 +13009,42 @@ index 0000000..1401fb5
 +    }
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
++
++    override fun flowFaults(appId: String, startMs: Long, endMs: Long, timeout: Duration): HarmonyOSFlowFaults {
++        val output = execute(
++            listOf("hisysevent", "-l", "-s", startMs.toString(), "-e", endMs.toString(), "-g", "FAULT", "-m", "256"),
++            timeout,
++        )
++        return parseFlowFaults(output, appId, startMs, endMs)
++    }
++
++    override fun displaySize(timeout: Duration): Pair<Int, Int>? {
++        val channel = layoutChannel
++        if (channel != null && !displayRpcUnsupported && timeout >= Duration.ofMillis(2)) {
++            val deadline = System.nanoTime() + timeout.toNanos()
++            try {
++                return channel.displaySize(minOf(timeout.dividedBy(2), Duration.ofSeconds(2)))
++            } catch (error: HdcException) {
++                checkInterrupted()
++                displayRpcUnsupported = true
++                logger.info("UITest RPC display size unavailable ({}); using the display service", error.javaClass.simpleName)
++            }
++            return displaySizeFromService(remainingBudget(deadline, timeout))
++        }
++        return displaySizeFromService(timeout)
++    }
++
++    private fun displaySizeFromService(timeout: Duration): Pair<Int, Int>? {
++        val dump = try {
++            execute(listOf("hidumper", "-s", "DisplayManagerService", "-a", "-a"), timeout)
++        } catch (error: HdcTimeoutException) {
++            throw error
++        } catch (_: HdcException) {
++            checkInterrupted()
++            return null
++        }
++        return primaryDisplaySize(dump)
++    }
 +
 +    override fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
 +        HarmonyOSSystemScreenRecorder(deviceId, this, { remote, local, timeout ->
@@ -12931,14 +13090,20 @@ index 0000000..1401fb5
 +            ?.let { Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""").matchEntire(it) }
 +            ?.groupValues?.drop(1)?.map(String::toInt)
 +        if (webView == null || bounds == null) return arkWebFallback(nativeTree)
++        val window = webView.attributes["hostWindowId"]
++        if (arkWebWindow != window) {
++            arkWeb?.close()
++            arkWebWindow = window
++        }
 +
 +        val dom = try {
 +            val budget = minOf(remainingBudget(deadline, timeout), Duration.ofSeconds(3))
-+            val webDeadline = System.nanoTime() + budget.toNanos()
-+            val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, budget))
-+            if (!pid.matches(Regex("[1-9][0-9]*")) ||
-+                !hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, budget))) return arkWebFallback(nativeTree)
-+            ArkWebLoopback(port).snapshot(bounds, remainingBudget(webDeadline, budget))
++            arkWeb?.snapshot(bounds, budget) { verificationBudget ->
++                val webDeadline = System.nanoTime() + verificationBudget.toNanos()
++                val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, verificationBudget))
++                pid.matches(Regex("[1-9][0-9]*")) &&
++                    hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, verificationBudget))
++            }
 +        } catch (error: InterruptedException) {
 +            Thread.currentThread().interrupt()
 +            throw error
@@ -12957,6 +13122,8 @@ index 0000000..1401fb5
 +    }
 +
 +    private fun arkWebFallback(nativeTree: TreeNode): TreeNode {
++        arkWeb?.close()
++        arkWebWindow = null
 +        reportArkWebSource("UITest")
 +        return nativeTree
 +    }
@@ -12983,6 +13150,10 @@ index 0000000..1401fb5
 +    override fun execute(arguments: List<String>, timeout: Duration): String {
 +        checkInterrupted()
 +        require(arguments.isNotEmpty()) { "A device command is required" }
++        if (arguments.first() == "aa") {
++            arkWeb?.close()
++            arkWebWindow = null
++        }
 +        val marker = "MAESTRO_EXIT_${UUID.randomUUID().toString().replace("-", "")}="
 +        val script = arguments.joinToString(" ") { HdcClient.quoteShellArgument(it) } +
 +            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
@@ -13330,6 +13501,36 @@ index 0000000..b7ea2b2
 +    private val CONTAINERS = setOf("minf", "stbl", "edts", "dinf", "udta", "mvex", "moof", "traf", "mfra", "tref", "sinf", "schi", "meco", "hnti", "hinf")
 +
 +    private fun invalid(message: String): Nothing = throw InvalidMp4RecordingException(message)
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/PrimaryDisplaySize.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/PrimaryDisplaySize.kt
+new file mode 100644
+index 0000000..25a231f
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/PrimaryDisplaySize.kt
+@@ -0,0 +1,24 @@
++package maestro.harmonyos.driver
++
++private val sessionHeader = Regex("(?m)^\\s*\\[SCREEN SESSION]\\h*$")
++private val nextSection = Regex("(?m)^\\h*\\[")
++private val displayId = Regex("(?m)^\\h*DisplayId:\\h*(\\d+)\\h*$")
++private val activeMode = Regex("(?m)^\\h*activeModes<id, W, H, RS>:\\h*\\d+,\\h*(\\d+),\\h*(\\d+),\\h*\\d+\\h*$")
++private val rotation = Regex("(?m)^\\h*Rotation:\\h*([0-3])\\h*$")
++
++/** Read the primary screen session in physical pixels. An unfamiliar dump falls back to UITest capture. */
++internal fun primaryDisplaySize(dump: String): Pair<Int, Int>? {
++    val primary = sessionHeader.split(dump).drop(1)
++        .map { nextSection.split(it, limit = 2).first() }
++        .singleOrNull { displayId.find(it)?.groupValues?.get(1) == "0" }
++        ?: return null
++    val mode = activeMode.find(primary) ?: return null
++    val width = mode.groupValues[1].toIntOrNull()?.takeIf { it > 0 } ?: return null
++    val height = mode.groupValues[2].toIntOrNull()?.takeIf { it > 0 } ?: return null
++    if (width.toLong() * height > 16_000_000) return null
++    return when (rotation.find(primary)?.groupValues?.get(1)) {
++        "0", "2" -> width to height
++        "1", "3" -> height to width
++        else -> null
++    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSCleanupFenceTransport.kt
 new file mode 100644
@@ -14952,10 +15153,10 @@ index 0000000..c460847
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 new file mode 100644
-index 0000000..03e0f60
+index 0000000..c8542aa
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,152 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -14972,7 +15173,7 @@ index 0000000..03e0f60
 +internal enum class HdcCommandCategory {
 +    LIST_TARGETS, LAYOUT_FORWARD_LIST, DUMP_LAYOUT, SCREEN_CAPTURE, INPUT_TAP, INPUT_SWIPE, INPUT_TEXT, INPUT_KEY,
 +    INPUT_OTHER, FILE_RECEIVE, REMOVE_FILE, APP_START, APP_STOP, PROCESS_QUERY, SERVICE_QUERY,
-+    MEDIA_QUERY, MEDIA_RECEIVE, MEDIA_DELETE, FILE_STAT, FILE_TEST, SHELL_SCRIPT, SHELL_OTHER, UNKNOWN;
++    MEDIA_QUERY, MEDIA_RECEIVE, MEDIA_DELETE, FILE_STAT, FILE_TEST, FAULT_QUERY, SHELL_SCRIPT, SHELL_OTHER, UNKNOWN;
 +
 +    companion object {
 +        fun shell(arguments: List<String>): HdcCommandCategory = when (arguments.firstOrNull()) {
@@ -14992,6 +15193,7 @@ index 0000000..03e0f60
 +            "aa" -> when (arguments.getOrNull(1)) { "start" -> APP_START; "force-stop" -> APP_STOP; else -> SHELL_OTHER }
 +            "ps" -> PROCESS_QUERY
 +            "hidumper" -> SERVICE_QUERY
++            "hisysevent" -> FAULT_QUERY
 +            "stat" -> FILE_STAT
 +            "test" -> FILE_TEST
 +            "mediatool" -> when (arguments.getOrNull(1)) {
@@ -15109,10 +15311,10 @@ index 0000000..03e0f60
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..a7726c5
+index 0000000..5d5e612
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,270 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -15331,6 +15533,7 @@ index 0000000..a7726c5
 +                (arguments.take(2) == listOf("rm", "-f") && arguments.size == 3) ||
 +                (arguments == listOf("ps", "-ef")) ||
 +                (arguments == listOf("hidumper", "-s", "3002", "-a", "-h")) ||
++                (arguments == listOf("hidumper", "-s", "DisplayManagerService", "-a", "-a")) ||
 +                (arguments == listOf("bm", "dump", "-n", "com.huawei.hmos.screenrecorder")) ||
 +                (arguments.take(3) == listOf("stat", "-c", "%s") && arguments.size == 4 && recordingScratch(arguments[3])) ||
 +                (arguments.size == 3 && arguments[0] == "test" && arguments[1] in setOf("-L", "-e", "-f") && recordingScratch(arguments[2])) ||
@@ -15729,10 +15932,10 @@ index 0000000..a733559
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
 new file mode 100644
-index 0000000..c98aa93
+index 0000000..99e74c2
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,130 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -15747,18 +15950,19 @@ index 0000000..c98aa93
 +import java.time.Duration
 +import java.util.concurrent.CompletableFuture
 +import java.util.concurrent.TimeUnit
++import java.util.concurrent.atomic.AtomicReference
 +
 +/** Reads a test WebView through an already configured, device-verified HDC forward. */
-+internal class ArkWebLoopback(private val port: Int) {
++internal class ArkWebLoopback(private val port: Int) : AutoCloseable {
 +    private val endpoint = "127.0.0.1:$port"
++    private var connection: Connection? = null
++    private var sequence = 0L
 +
-+    fun snapshot(bounds: List<Int>, timeout: Duration): TreeNode? {
-+        val started = System.nanoTime()
-+        val budgetMs = timeout.toMillis().coerceAtLeast(1)
++    private fun discoverPage(timeout: Duration): String? {
 +        val request = Request.Builder().url("http://$endpoint/json/list").build()
 +        val call = client.newCall(request)
-+        call.timeout().timeout(budgetMs, TimeUnit.MILLISECONDS)
-+        val path = call.execute().use { response ->
++        call.timeout().timeout(timeout.toNanos(), TimeUnit.NANOSECONDS)
++        return call.execute().use { response ->
 +            if (!response.isSuccessful) return null
 +            val body = response.peekBody(MAX_JSON_BYTES + 1).string()
 +            if (body.length > MAX_JSON_BYTES) return null
@@ -15770,48 +15974,90 @@ index 0000000..c98aa93
 +                uri.host in setOf("localhost", "127.0.0.1") &&
 +                it.matches(Regex("/devtools/page/[A-Za-z0-9_-]+")) } ?: return null
 +        }
++    }
 +
++    @Synchronized
++    fun snapshot(bounds: List<Int>, timeout: Duration, verifyForward: (Duration) -> Boolean): TreeNode? {
++        val deadline = System.nanoTime() + timeout.toNanos()
++        fun remaining(): Duration {
++            val nanos = deadline - System.nanoTime()
++            if (nanos <= 0) throw java.util.concurrent.TimeoutException("ArkWeb snapshot deadline expired")
++            return Duration.ofNanos(nanos)
++        }
++        var active = connection?.takeIf { !it.failed && System.nanoTime() - it.openedAt < FORWARD_TTL_NANOS }
++        if (active == null) {
++            close()
++            if (!verifyForward(remaining())) return null
++            val path = discoverPage(remaining()) ?: return null
++            active = Connection()
++            active.socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), active)
++            connection = active
++        }
 +        val (left, top, right, bottom) = bounds
 +        val expression = "$script; maestro.viewportX = $left; maestro.viewportY = $top;" +
 +            " maestro.viewportWidth = ${right - left}; maestro.viewportHeight = ${bottom - top};" +
 +            " JSON.stringify(window.maestro.getContentDescription(), window.maestro.cycleSafeReplacer());"
-+        val payload = json.writeValueAsString(mapOf("id" to 1, "method" to "Runtime.evaluate",
++        val id = ++sequence
++        val payload = json.writeValueAsString(mapOf("id" to id, "method" to "Runtime.evaluate",
 +            "params" to mapOf("expression" to expression, "returnByValue" to true)))
-+        val result = CompletableFuture<String>()
-+        val socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), object : WebSocketListener() {
-+            override fun onOpen(webSocket: WebSocket, response: Response) {
-+                if (!webSocket.send(payload)) result.completeExceptionally(IllegalStateException("Could not send ArkWeb snapshot request"))
-+            }
-+
-+            override fun onMessage(webSocket: WebSocket, text: String) {
-+                if (text.length > MAX_JSON_BYTES) {
-+                    result.completeExceptionally(IllegalStateException("ArkWeb snapshot exceeds size limit"))
-+                    return
-+                }
-+                try {
-+                    val message = json.readTree(text)
-+                    if (message.path("id").asInt() == 1) {
-+                        result.complete(message.path("result").path("result").path("value").asText())
-+                    }
-+                } catch (error: Exception) {
-+                    result.completeExceptionally(error)
-+                }
-+            }
-+
-+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-+                result.completeExceptionally(t)
-+            }
-+        })
++        val pending = Pending(id, CompletableFuture())
++        active.pending.set(pending)
 +        return try {
-+            val remainingMs = (budgetMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).coerceAtLeast(1)
-+            val snapshot = result.get(remainingMs, TimeUnit.MILLISECONDS)
-+            if (snapshot.isEmpty() || snapshot == "null") null else json.readValue(snapshot, TreeNode::class.java)
++            check(!active.failed && active.socket.send(payload)) { "Could not send ArkWeb snapshot request" }
++            val snapshot = pending.result.get(remaining().toNanos(), TimeUnit.NANOSECONDS)
++            if (snapshot.isEmpty() || snapshot == "null") {
++                close()
++                null
++            } else json.readValue(snapshot, TreeNode::class.java)
++        } catch (error: Exception) {
++            close()
++            throw error
 +        } finally {
-+            socket.cancel()
++            active.pending.compareAndSet(pending, null)
++        }
++    }
++
++    @Synchronized
++    override fun close() {
++        connection?.socket?.cancel()
++        connection = null
++    }
++
++    private data class Pending(val id: Long, val result: CompletableFuture<String>)
++
++    private class Connection : WebSocketListener() {
++        lateinit var socket: WebSocket
++        val openedAt = System.nanoTime()
++        val pending = AtomicReference<Pending?>()
++        @Volatile var failed = false
++            private set
++
++        override fun onMessage(webSocket: WebSocket, text: String) {
++            val current = pending.get() ?: return
++            try {
++                check(text.length <= MAX_JSON_BYTES) { "ArkWeb snapshot exceeds size limit" }
++                val message = json.readTree(text)
++                if (message.path("id").asLong() == current.id) {
++                    current.result.complete(message.path("result").path("result").path("value").asText())
++                }
++            } catch (error: Exception) {
++                current.result.completeExceptionally(error)
++            }
++        }
++
++        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
++            onFailure(webSocket, IllegalStateException("ArkWeb closed the page connection"), null)
++            webSocket.cancel()
++        }
++
++        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
++            failed = true
++            pending.get()?.result?.completeExceptionally(t)
 +        }
 +    }
 +
 +    private companion object {
++        val FORWARD_TTL_NANOS = TimeUnit.SECONDS.toNanos(5)
 +        const val MAX_JSON_BYTES = 4L * 1024 * 1024
 +        val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).build()
 +        val json = jacksonObjectMapper()
@@ -15991,12 +16237,13 @@ index 0000000..ec58193
 +class HierarchyReadException(message: String, cause: Throwable? = null) : HdcException(message, cause)
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
 new file mode 100644
-index 0000000..45454ab
+index 0000000..493de5d
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,174 @@
 +package maestro.harmonyos.layout
 +
++import com.fasterxml.jackson.databind.JsonNode
 +import com.fasterxml.jackson.databind.ObjectMapper
 +import maestro.TreeNode
 +import maestro.harmonyos.hdc.HdcException
@@ -16012,7 +16259,7 @@ index 0000000..45454ab
 +import java.net.ConnectException
 +import java.time.Duration
 +
-+/** Read-only UITest layout RPC over a separately managed loopback forward. */
++/** Read-only UITest queries over a separately managed loopback forward. */
 +internal class LoopbackLayoutChannel(private val port: Int) : AutoCloseable {
 +    private val mapper = ObjectMapper()
 +    private val layouts = UitestLayoutParser()
@@ -16020,6 +16267,7 @@ index 0000000..45454ab
 +    private var input: BufferedInputStream? = null
 +    private var readDeadlineNanos = 0L
 +    private var sequence = 0L
++    private var driverRef: String? = null
 +    private val logger = org.slf4j.LoggerFactory.getLogger(LoopbackLayoutChannel::class.java)
 +
 +    @Synchronized
@@ -16039,6 +16287,44 @@ index 0000000..45454ab
 +    }
 +
 +    private fun request(timeout: Duration): TreeNode {
++        val layout = exchange("Captures", mapOf("api" to "captureLayout", "args" to emptyMap<String, String>()), timeout)
++        return try {
++            val tree = layouts.parse(if (layout.isTextual) layout.asText() else layout.toString())
++            remainingMillis()
++            tree
++        } catch (error: SocketTimeoutException) {
++            close()
++            throw HdcTimeoutException(timeout, "UITest layout RPC exceeded its read deadline")
++        } catch (error: UitestLayoutException) {
++            close()
++            throw error
++        }
++    }
++
++    @Synchronized
++    fun displaySize(timeout: Duration): Pair<Int, Int> {
++        readDeadlineNanos = System.nanoTime() + timeout.toNanos()
++        fun call(api: String, receiver: String?): JsonNode = exchange(
++            "callHypiumApi",
++            mapOf("api" to api, "this" to receiver, "args" to emptyList<Any>(), "message_type" to "hypium"),
++            timeout,
++        )
++        try {
++            val receiver = driverRef ?: call("Driver.create", null).asText().takeIf(String::isNotBlank)
++                ?.also { driverRef = it } ?: throw HdcException("UITest returned no driver reference")
++            val size = call("Driver.getDisplaySize", receiver)
++            val width = size.path("x").asInt()
++            val height = size.path("y").asInt()
++            if (width <= 0 || height <= 0 || width.toLong() * height > 16_000_000) {
++                throw HdcException("UITest returned invalid display dimensions")
++            }
++            return width to height
++        } catch (error: EOFException) {
++            throw HdcException("UITest closed the display-size connection", error)
++        }
++    }
++
++    private fun exchange(method: String, params: Map<String, Any?>, timeout: Duration): JsonNode {
 +        try {
 +            val socket = connection ?: Socket().also {
 +                connection = it
@@ -16054,8 +16340,8 @@ index 0000000..45454ab
 +            val id = (++sequence).toString()
 +            socket.getOutputStream().write(mapper.writeValueAsBytes(mapOf(
 +                "module" to "com.ohos.devicetest.hypiumApiHelper",
-+                "method" to "Captures",
-+                "params" to mapOf("api" to "captureLayout", "args" to emptyMap<String, String>()),
++                "method" to method,
++                "params" to params,
 +                "request_id" to id,
 +            )))
 +            val source = checkNotNull(input)
@@ -16068,10 +16354,8 @@ index 0000000..45454ab
 +            if ((responseId != null && !responseId.isNull && responseId.asText() != id) ||
 +                result.get("exception")?.let { !it.isNull && !(it.isTextual && it.asText().isEmpty()) } == true
 +            ) throw HdcException("UITest layout RPC returned an error or a mismatched request ID")
-+            val layout = result.get("result") ?: throw HdcException("UITest layout RPC returned no tree")
-+            val tree = layouts.parse(if (layout.isTextual) layout.asText() else layout.toString())
 +            remainingMillis()
-+            return tree
++            return result.get("result") ?: throw HdcException("UITest RPC returned no result")
 +        } catch (error: Exception) {
 +            close()
 +            when (error) {
@@ -16096,6 +16380,7 @@ index 0000000..45454ab
 +        try { connection?.close() } catch (_: IOException) { /* Socket is no longer usable. */ }
 +        connection = null
 +        input = null
++        driverRef = null
 +    }
 +}
 +
@@ -16327,10 +16612,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..95ffb08
+index 0000000..e7c7ee2
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,593 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -16641,6 +16926,46 @@ index 0000000..95ffb08
 +    }
 +
 +    @Test
++    fun `geometry queries follow rotation without capturing frames`() {
++        val device = Device().apply { size = 80 to 120 }
++        val driver = driver(device)
++        driver.open()
++        device.size = 120 to 80
++        assertThat(driver.deviceInfo().widthGrid).isEqualTo(120)
++        assertThat(driver.deviceInfo().heightGrid).isEqualTo(80)
++        driver.tap(Point(119, 79))
++        assertThat(device.screenshots).isEqualTo(1)
++        assertThat(device.commands.last()).containsExactly("uitest", "uiInput", "click", "119", "79").inOrder()
++        driver.takeScreenshot(Buffer(), false)
++        assertThat(device.screenshots).isEqualTo(2)
++        driver.shouldCapturePreview = { true }
++        var preview: ByteArray? = null
++        driver.previewFrame = { preview = it }
++        driver.deviceInfo()
++        assertThat(preview).isEqualTo(device.image)
++        assertThat(device.screenshots).isEqualTo(3)
++    }
++
++    @Test
++    fun `matching pre-tap lookup saves a sample but input invalidates it`() {
++        val device = Device().apply { size = 80 to 120 }
++        val driver = driver(device)
++        driver.open()
++
++        fun lookup() = ViewHierarchy.from(driver, false)
++        val initial = lookup()
++        val beforeSettle = device.layoutReads
++        assertThat(driver.waitForAppToSettle(initial, null, 1000)).isNotNull()
++        assertThat(device.layoutReads - beforeSettle).isEqualTo(1)
++
++        val beforeTap = lookup()
++        driver.tap(Point(20, 20))
++        val afterTap = device.layoutReads
++        assertThat(driver.waitForAppToSettle(beforeTap, null, 1000)).isNotNull()
++        assertThat(device.layoutReads - afterTap).isEqualTo(2)
++    }
++
++    @Test
 +    fun `settling requires two fresh matching hierarchies`() {
 +        val device = Device()
 +        val driver = driver(device)
@@ -16825,6 +17150,7 @@ index 0000000..95ffb08
 +        var layoutReads = 0
 +        var screenshots = 0
 +        var image = png(80, 120)
++        var size: Pair<Int, Int>? = null
 +        var layout: () -> TreeNode = { tree("ready") }
 +        var output: String? = null
 +        var executeFailure: Throwable? = null
@@ -16839,6 +17165,7 @@ index 0000000..95ffb08
 +        var beforeScreenshot: () -> Unit = {}
 +        override fun connect() { connections++ }
 +        override fun isAvailable(): Boolean = true
++        override fun displaySize(timeout: Duration): Pair<Int, Int>? = size
 +        override fun hierarchy(timeout: Duration): TreeNode { layoutReads++; layoutBudgets += timeout; return layout() }
 +        override fun screenshot(timeout: Duration): ByteArray {
 +            screenshots++
@@ -16880,6 +17207,34 @@ index 0000000..95ffb08
 +            ImageIO.write(BufferedImage(width, height, BufferedImage.TYPE_INT_RGB), "png", out)
 +            out.toByteArray()
 +        }
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt
+new file mode 100644
+index 0000000..f32a4af
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt
+@@ -0,0 +1,22 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++
++class HarmonyOSFlowFaultsTest {
++    @Test
++    fun `uses only matching app events within the requested window and separates freezes`() {
++        val output = """
++            {"name_":"CPP_CRASH","MODULE":"demo.target","time_":90,"SUMMARY":"before"}
++            {"name_":"CPP_CRASH","MODULE":"demo.target","time_":140,"SUMMARY":"older crash"}
++            {"name_":"APP_FREEZE","PNAME":"demo.target","HAPPEN_TIME":155,"time_":180,"REASON":"main thread"}
++            {"name_":"JS_ERROR","PACKAGE_NAME":"demo.target","time_":160,"MSG":"latest crash"}
++            {"name_":"JS_ERROR","PACKAGE_NAME":"demo.target.other","time_":165,"MSG":"another app"}
++            {"name_":"CPP_CRASH","MODULE":"demo.target","time_":210,"SUMMARY":"after"}
++            {"name_":"USER_ACTION","MODULE":"demo.target","time_":170}
++        """.trimIndent()
++        val report = parseFlowFaults(output, "demo.target", 100, 200)
++        assertThat(report.crash).isEqualTo(HarmonyOSFlowFault("JS_ERROR", 160, "latest crash"))
++        assertThat(report.freeze).isEqualTo(HarmonyOSFlowFault("APP_FREEZE", 155, "main thread"))
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSPlatformTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSPlatformTest.kt
@@ -16925,7 +17280,7 @@ index 0000000..db63669
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt
 new file mode 100644
-index 0000000..af21111
+index 0000000..0505810
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSQueryRecoveryTest.kt
 @@ -0,0 +1,94 @@
@@ -17014,7 +17369,7 @@ index 0000000..af21111
 +                failure = error
 +                throw error
 +            }
-+            check(listOf("dumpLayout", "screenCap", "rm").any(wrapper::contains))
++            check(listOf("dumpLayout", "screenCap", "DisplayManagerService", "rm").any(wrapper::contains))
 +            if (failure != null && wrapper.contains("rm")) cleanupAcknowledgements++
 +            val inner = Regex("MAESTRO_EXIT_[0-9a-f]{32}=").find(wrapper)?.value
 +            return HdcCommandResult(0, (inner?.let { "\n${it}0\n" } ?: "") + "\n${outer}0\n", "")
@@ -19070,6 +19425,39 @@ index 0000000..93af213
 +        private fun box(type: String, bytes: ByteArray, extended: Boolean = false): ByteArray =
 +            if (extended) int(1) + type.toByteArray() + long(bytes.size + 16L) + bytes
 +            else int(bytes.size + 8) + type.toByteArray() + bytes
++    }
++}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/PrimaryDisplaySizeTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/PrimaryDisplaySizeTest.kt
+new file mode 100644
+index 0000000..73d8b4d
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/PrimaryDisplaySizeTest.kt
+@@ -0,0 +1,27 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Test
++
++class PrimaryDisplaySizeTest {
++    @Test
++    fun `reads the primary physical mode and applies its rotation only`() {
++        val dump = """
++            [SCREEN SESSION]
++            DisplayId: 1
++            activeModes<id, W, H, RS>: 4, 1920, 1080, 60
++            Rotation: 0
++            [SCREEN SESSION]
++            DisplayId: 0
++            activeModes<id, W, H, RS>: 512, 1260, 2720, 60
++            Rotation: 1
++            [SCREEN INFO]
++            VirtualWidth: 387
++            VirtualHeight: 836
++            Rotation: 0
++        """.trimIndent()
++        assertThat(primaryDisplaySize(dump)).isEqualTo(2720 to 1260)
++        assertThat(primaryDisplaySize(dump.replace("DisplayId: 0", "DisplayId: 2"))).isNull()
++        assertThat(primaryDisplaySize(dump.replace("Rotation: 1", "Rotation: 4"))).isNull()
 +    }
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSJournalFileWriterTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSJournalFileWriterTest.kt
@@ -22166,6 +22554,55 @@ index 0000000..6322d73
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
+new file mode 100644
+index 0000000..9cbbe3c
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
+@@ -0,0 +1,43 @@
++package maestro.harmonyos.layout
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import com.google.common.truth.Truth.assertThat
++import okhttp3.WebSocket
++import okhttp3.WebSocketListener
++import okhttp3.mockwebserver.MockResponse
++import okhttp3.mockwebserver.MockWebServer
++import org.junit.jupiter.api.Test
++import java.time.Duration
++
++class ArkWebLoopbackTest {
++    @Test
++    fun `an established page connection reads new snapshots without repeating forward discovery`() {
++        val json = ObjectMapper()
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            server.enqueue(MockResponse().setBody(
++                """[{"type":"page","webSocketDebuggerUrl":"ws://127.0.0.1:${server.port}/devtools/page/test"}]"""
++            ))
++            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
++                override fun onMessage(webSocket: WebSocket, text: String) {
++                    val id = json.readTree(text).path("id").asLong()
++                    val tree = """{"attributes":{"text":"snapshot $id"},"children":[]}"""
++                    webSocket.send(json.writeValueAsString(mapOf(
++                        "id" to id, "result" to mapOf("result" to mapOf("value" to tree))
++                    )))
++                }
++            }))
++            ArkWebLoopback(server.port).use { browser ->
++                var verifications = 0
++                fun snapshot() = browser.snapshot(listOf(0, 0, 100, 100), Duration.ofSeconds(2)) {
++                    verifications++
++                    true
++                }
++                assertThat(snapshot()?.attributes?.get("text")).isEqualTo("snapshot 1")
++                assertThat(snapshot()?.attributes?.get("text")).isEqualTo("snapshot 2")
++                assertThat(verifications).isEqualTo(1)
++                assertThat(server.requestCount).isEqualTo(2)
++            }
++        }
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/HierarchyReaderTest.kt
 new file mode 100644
 index 0000000..503a66d
@@ -22432,10 +22869,10 @@ index 0000000..503a66d
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
 new file mode 100644
-index 0000000..189f57e
+index 0000000..726a3ab
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,132 @@
 +package maestro.harmonyos.layout
 +
 +import com.google.common.truth.Truth.assertThat
@@ -22511,6 +22948,40 @@ index 0000000..189f57e
 +    }
 +
 +    private fun listener() = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 4000 }
++
++    @Test
++    fun `the verified socket serves live display dimensions and layouts`() {
++        listener().use { server ->
++            val device = HdcFixture(server.localPort).device()
++            val executor = Executors.newSingleThreadExecutor()
++            try {
++                val peer = executor.submit {
++                    server.accept().use { socket ->
++                        socket.soTimeout = 3000
++                        val input = socket.getInputStream()
++                        val output = socket.getOutputStream()
++                        fun respond(api: String, result: String) {
++                            val request = String(receiveLayoutFrame { input.read() })
++                            check(request.contains(api))
++                            output.write("""{"result":$result}""".toByteArray())
++                        }
++                        respond("Driver.create", "\"Driver#1\"")
++                        respond("Driver.getDisplaySize", """{"x":1260,"y":2720}""")
++                        respond("captureLayout", """{"attributes":{"text":"RPC"},"children":[]}""")
++                        respond("Driver.getDisplaySize", """{"x":2720,"y":1260}""")
++                    }
++                }
++                device.connect()
++                assertThat(device.displaySize(budget)).isEqualTo(1260 to 2720)
++                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("RPC")
++                assertThat(device.displaySize(budget)).isEqualTo(2720 to 1260)
++                peer.get(5, TimeUnit.SECONDS)
++            } finally {
++                device.disconnect()
++                executor.shutdownNow()
++            }
++        }
++    }
 +
 +    private inner class HdcFixture(private val port: Int, private val owner: String = deviceId) {
 +        var dumps = 0
@@ -22869,18 +23340,38 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..220a585 100644
+index c388689..41e178f 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-@@ -36,6 +36,7 @@ import maestro.Maestro
+@@ -20,7 +20,9 @@
+ package maestro.orchestra
+ 
+ import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
+ import kotlinx.coroutines.NonCancellable
++import kotlinx.coroutines.runInterruptible
+ import kotlinx.coroutines.withContext
+ import kotlinx.coroutines.currentCoroutineContext
+ import kotlinx.coroutines.isActive
+@@ -36,11 +38,17 @@ import maestro.Maestro
  import maestro.DeviceConnectionException
  import maestro.MaestroException
  import maestro.device.AppCrashReport
 +import maestro.device.Platform
  import maestro.Point
++import maestro.TreeNode
  import maestro.ScreenRecording
  import maestro.UiElement
-@@ -52,6 +53,12 @@ import maestro.orchestra.debug.ArtifactsGenerator
+ import maestro.UiElement.Companion.toUiElementOrNull
+ import maestro.ViewHierarchy
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
++import java.util.concurrent.TimeUnit
+ import maestro.ai.cloud.Defect
+ import maestro.ai.CloudAIPredictionEngine
+ import maestro.ai.AIPredictionEngine
+@@ -52,6 +60,12 @@ import maestro.orchestra.debug.ArtifactsGenerator
  import maestro.orchestra.debug.BundleLayout
  import maestro.orchestra.debug.ArtifactCollector
  import maestro.orchestra.debug.CommandOutcome
@@ -22893,7 +23384,7 @@ index c388689..220a585 100644
  import maestro.orchestra.debug.FlowDebugOutput
  import maestro.orchestra.debug.OrchestraListener
  import maestro.orchestra.debug.startScreenRecordingInto
-@@ -83,6 +90,8 @@ import java.nio.file.Path
+@@ -83,6 +97,8 @@ import java.nio.file.Path
  import java.nio.file.Files
  import java.nio.file.Paths
  import java.util.logging.Filter
@@ -22902,7 +23393,21 @@ index c388689..220a585 100644
  import kotlin.coroutines.coroutineContext
  import java.time.LocalDateTime
  import java.time.format.DateTimeFormatter
-@@ -194,6 +203,19 @@ class Orchestra(
+@@ -174,6 +190,13 @@ class Orchestra(
+     private var copiedText: String? = null
+ 
+     private var timeMsOfLastInteraction = System.currentTimeMillis()
++    private data class AssertionSample(val hierarchy: ViewHierarchy, val readAt: Long)
++    private var assertionSample: AssertionSample? = null
++    private var harmonyDeviceFailure: HdcException? = null
++
++    private fun rememberHarmonyDeviceFailure(error: Throwable) {
++        if (error is HdcException && harmonyDeviceFailure !is HdcTimeoutException) harmonyDeviceFailure = error
++    }
+ 
+     private var screenRecording: ScreenRecording? = null
+ 
+@@ -194,6 +217,19 @@ class Orchestra(
      // equality, so two identical commands would collide as map keys.
      private val commandStartTimes = mutableMapOf<Int, Long>()
  
@@ -22922,7 +23427,7 @@ index c388689..220a585 100644
      data class FlowResult(
          val success: Boolean,
          val debugOutput: FlowDebugOutput,
-@@ -223,6 +245,23 @@ class Orchestra(
+@@ -223,8 +259,30 @@ class Orchestra(
      }
  
      suspend fun runFlow(commands: List<MaestroCommand>): FlowResult {
@@ -22945,8 +23450,15 @@ index c388689..220a585 100644
 +    private suspend fun runObservedFlow(commands: List<MaestroCommand>): FlowResult {
          val flowStartMs = System.currentTimeMillis()
          timeMsOfLastInteraction = System.currentTimeMillis()
++        assertionSample = null
++        harmonyDeviceFailure = null
++        artifactsGenerator.appUnderTest = null
++        artifactsGenerator.appCrashReport = null
++        artifactsGenerator.appFreezeReport = null
  
-@@ -233,9 +272,14 @@ class Orchestra(
+         val config = YamlCommandReader.getConfig(commands)
+ 
+@@ -233,9 +291,14 @@ class Orchestra(
  
          onFlowStart(commands)
          dispatch("onFlowStart") { it.onFlowStart() }
@@ -22961,7 +23473,7 @@ index c388689..220a585 100644
          try {
              executeDefineVariablesCommands(commands, config)
              // After the variables: `appId: ${APP_ID}` only evaluates once they are defined.
-@@ -248,6 +292,8 @@ class Orchestra(
+@@ -248,6 +311,8 @@ class Orchestra(
                      commands = it,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -22970,7 +23482,7 @@ index c388689..220a585 100644
                  )
              } ?: true
  
-@@ -256,38 +302,51 @@ class Orchestra(
+@@ -256,52 +321,95 @@ class Orchestra(
                      commands = filteredCommands,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -23048,7 +23560,39 @@ index c388689..220a585 100644
              }
  
              jsEngine.close()
-@@ -297,6 +356,8 @@ class Orchestra(
+ 
+-            val crash = findAppCrash(flowStartMs)
++            val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
++            val cause = exception ?: bodyFailure ?: completionFailure
++            val harmony = maestro.driver as? HarmonyOSDriver
++            artifactsGenerator.collectDriverCrashArtifacts = harmony == null
++            val crash = if (harmony == null) findAppCrash(flowStartMs) else {
++                val app = artifactsGenerator.appUnderTest
++                val endMs = System.currentTimeMillis()
++                val deviceFailure = harmonyDeviceFailure
++                val faults = if (app != null && endMs >= flowStartMs &&
++                    (flowFailed || deviceFailure != null || harmony.strictFaultDiagnostics) &&
++                    cause !is CancellationException && cause !is HdcTimeoutException &&
++                    deviceFailure !is HdcTimeoutException && currentCoroutineContext().isActive
++                ) {
++                    try {
++                        runInterruptible(Dispatchers.IO) { harmony.flowFaults(app, flowStartMs, endMs) }
++                    } catch (error: CancellationException) {
++                        exception = error
++                        null
++                    } catch (error: Exception) {
++                        logger.warn("Could not collect HarmonyOS fault diagnostics for $app", error)
++                        null
++                    }
++                } else null
++                artifactsGenerator.appFreezeReport = faults?.freeze?.let {
++                    AppCrashReport(it.message, "Event: ${it.event}\nTime: ${it.timeMs}\n${it.reason}")
++                }
++                faults?.crash?.let {
++                    AppCrashReport(it.message, "Event: ${it.event}\nTime: ${it.timeMs}\n${it.reason}")
++                }
++            }
+             artifactsGenerator.appCrashReport = crash // saved into the bundle with the other artifacts
  
              dispatch("onFlowEnd") { it.onFlowEnd() }
  
@@ -23056,8 +23600,15 @@ index c388689..220a585 100644
 +
              // A failed flow whose app crashed failed because of the crash. This is the one place the
              // crash is raised; the failing command's own error rides along.
-             val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
-@@ -314,10 +375,28 @@ class Orchestra(
+-            val flowFailed = exception != null || !(onCompleteSuccess && flowSuccess)
+-            if (crash != null && flowFailed) {
+-                throw MaestroException.AppCrash(crash.message).also { appCrash -> exception?.let(appCrash::addSuppressed) }
++            if (crash != null && (flowFailed || harmony?.strictFaultDiagnostics == true)) {
++                throw MaestroException.AppCrash(crash.message).also { appCrash -> cause?.let(appCrash::addSuppressed) }
+             }
+ 
+             exception?.let { throw it }
+@@ -314,10 +422,28 @@ class Orchestra(
          }
      }
  
@@ -23086,7 +23637,7 @@ index c388689..220a585 100644
      ): Boolean {
          if (shouldReinitJsEngine) {
              initJsEngine(config)
-@@ -333,11 +412,7 @@ class Orchestra(
+@@ -333,11 +459,7 @@ class Orchestra(
                  // Check for pause before executing each command
                  flowController.waitIfPaused()
  
@@ -23099,7 +23650,12 @@ index c388689..220a585 100644
  
                  jsEngine.onLogMessage { msg ->
                      val metadata = getMetadata(command)
-@@ -396,12 +471,16 @@ class Orchestra(
+@@ -392,16 +514,21 @@ class Orchestra(
+                 } catch (e: DeviceConnectionException) {
+                     throw e
+                 } catch (e: Throwable) {
++                    rememberHarmonyDeviceFailure(e)
+                     logger.error("[Command execution] CommandFailed: ${e.message}")
                      dispatchFinished(command, CommandOutcome.Failed(e), sequenceNumber)
                      val errorResolution = onCommandFailed(index, command, e)
                      when (errorResolution) {
@@ -23117,7 +23673,57 @@ index c388689..220a585 100644
              }
          return true
      }
-@@ -989,29 +1068,60 @@ class Orchestra(
+@@ -425,6 +552,7 @@ class Orchestra(
+      */
+     private suspend fun executeCommand(maestroCommand: MaestroCommand, config: MaestroConfig?): Boolean {
+         val command = maestroCommand.asCommand()
++        if (command !is AssertConditionCommand) assertionSample = null
+ 
+         flowController.waitIfPaused()
+ 
+@@ -553,6 +681,9 @@ class Orchestra(
+     }
+ 
+     private suspend fun assertConditionCommand(command: AssertConditionCommand): Boolean {
++        val previous = assertionSample
++        assertionSample = null
++        val condition = command.condition
+         val timeout = (command.timeoutMs() ?: lookupTimeoutMs)
+         val debugMessage = """
+             Assertion '${command.condition.description()}' failed. Check the UI hierarchy in debug artifacts to verify the element state and properties.
+@@ -562,7 +693,21 @@ class Orchestra(
+             - Element may be temporarily unavailable due to loading state
+             - This could be a real regression that needs to be addressed
+         """.trimIndent()
+-        if (!evaluateCondition(command.condition, timeoutMs = timeout, commandOptional = command.optional)) {
++        val shareHierarchy = maestro.driver is HarmonyOSDriver && condition.visible != null &&
++            condition.notVisible == null && condition.scriptCondition == null
++        if (!evaluateCondition(command.condition, timeoutMs = timeout, commandOptional = command.optional,
++                onVisibleAssertion = if (shareHierarchy) { selector, lookupTimeout ->
++                    val (_, filter) = buildFilter(selector)
++                    val cached = previous?.takeIf {
++                        System.nanoTime() - it.readAt <= TimeUnit.MILLISECONDS.toNanos(250) &&
++                            selector.childOf == null &&
++                            filter(it.hierarchy.aggregate()).firstOrNull()?.toUiElementOrNull() != null
++                    }
++                    assertionSample = cached ?: findElement(selector, command.optional, lookupTimeout).let {
++                        AssertionSample(it.hierarchy, System.nanoTime())
++                    }
++                } else null,
++            )) {
+             throw MaestroException.AssertionFailure(
+                 message = "Assertion is false: ${command.condition.description()}",
+                 hierarchyRoot = maestro.viewHierarchy().root,
+@@ -859,7 +1004,7 @@ class Orchestra(
+         do {
+             yield()
+             try {
+-                val element = findElement(command.selector, command.optional, 500).element
++                val element = findElement(command.selector, command.optional, 500, captureHierarchyOnFailure = false).element
+                 val visibility = element.getVisiblePercentage(deviceInfo.widthGrid, deviceInfo.heightGrid)
+ 
+                 logger.info("Scrolling try count: $retryCenterCount, DeviceWidth: ${deviceInfo.widthGrid}, DeviceWidth: ${deviceInfo.heightGrid}")
+@@ -989,29 +1134,60 @@ class Orchestra(
  
      private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
          val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
@@ -23194,7 +23800,7 @@ index c388689..220a585 100644
      }
  
      private fun updateMetadata(rawCommand: MaestroCommand, metadata: CommandMetadata) {
-@@ -1042,8 +1152,45 @@ class Orchestra(
+@@ -1042,8 +1218,45 @@ class Orchestra(
      ) {
          val finishedAt = System.currentTimeMillis()
          val startedAt = commandStartTimes.remove(sequenceNumber) ?: finishedAt
@@ -23242,7 +23848,30 @@ index c388689..220a585 100644
          }
      }
  
-@@ -1144,7 +1291,10 @@ class Orchestra(
+@@ -1073,6 +1286,7 @@ class Orchestra(
+         condition: Condition?,
+         commandOptional: Boolean,
+         timeoutMs: Long? = null,
++        onVisibleAssertion: (suspend (ElementSelector, Long) -> Unit)? = null,
+     ): Boolean {
+         if (condition == null) {
+             return true
+@@ -1110,11 +1324,9 @@ class Orchestra(
+ 
+         condition.visible?.let {
+             try {
+-                findElement(
+-                    selector = it,
+-                    timeoutMs = adjustedToLatestInteraction(timeoutMs ?: optionalLookupTimeoutMs),
+-                    optional = commandOptional,
+-                )
++                val lookupTimeout = adjustedToLatestInteraction(timeoutMs ?: optionalLookupTimeoutMs)
++                if (onVisibleAssertion != null) onVisibleAssertion(it, lookupTimeout)
++                else findElement(selector = it, timeoutMs = lookupTimeout, optional = commandOptional)
+             } catch (_: MaestroException.ElementNotFound) {
+                 return false
+             }
+@@ -1144,7 +1356,10 @@ class Orchestra(
          return true
      }
  
@@ -23254,7 +23883,7 @@ index c388689..220a585 100644
          jsEngine.enterScope()
          subflowDepth++
  
-@@ -1152,13 +1302,8 @@ class Orchestra(
+@@ -1152,13 +1367,8 @@ class Orchestra(
              commands
                  .mapIndexed { index, command ->
                      yield()
@@ -23270,7 +23899,15 @@ index c388689..220a585 100644
                          try {
                              // Script evaluation is part of running the command, so keep it inside the
                              // guarded block: a parse error (e.g. a bad numeric field) then reports a
-@@ -1205,6 +1350,7 @@ class Orchestra(
+@@ -1196,6 +1406,7 @@ class Orchestra(
+                     } catch (e: DeviceConnectionException) {
+                         throw e
+                     } catch (e: Throwable) {
++                        rememberHarmonyDeviceFailure(e)
+                         dispatchFinished(command, CommandOutcome.Failed(e), sequenceNumber)
+                         when (onCommandFailed(index, command, e)) {
+                             ErrorResolution.FAIL -> throw e
+@@ -1205,6 +1416,7 @@ class Orchestra(
                              }
                          }
                      }
@@ -23278,7 +23915,7 @@ index c388689..220a585 100644
                  }
                  .any { it }
          } finally {
-@@ -1229,7 +1375,7 @@ class Orchestra(
+@@ -1229,7 +1441,7 @@ class Orchestra(
              val onCompleteSuccess: Boolean
              try {
                  val onStartSuccess = subflowConfig?.onFlowStart?.commands?.let {
@@ -23287,7 +23924,7 @@ index c388689..220a585 100644
                  } ?: true
  
                  if (onStartSuccess) {
-@@ -1242,7 +1388,7 @@ class Orchestra(
+@@ -1242,7 +1454,7 @@ class Orchestra(
              } finally {
                  onCompleteSuccess = if (currentCoroutineContext().isActive) {
                      subflowConfig?.onFlowComplete?.commands?.let {
@@ -23296,7 +23933,7 @@ index c388689..220a585 100644
                      } ?: true
                  } else {
                      true
-@@ -1337,9 +1483,12 @@ class Orchestra(
+@@ -1337,9 +1549,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -23312,7 +23949,24 @@ index c388689..220a585 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1871,7 +2020,8 @@ class Orchestra(
+@@ -1482,6 +1697,7 @@ class Orchestra(
+         selector: ElementSelector,
+         optional: Boolean,
+         timeoutMs: Long? = null,
++        captureHierarchyOnFailure: Boolean = true,
+     ): FindElementResult {
+         val timeout =
+             timeoutMs ?: adjustedToLatestInteraction(
+@@ -1552,7 +1768,7 @@ class Orchestra(
+             filter = filterFunc
+         ) ?: throw MaestroException.ElementNotFound(
+             "Element not found: $description",
+-            maestro.viewHierarchy().root,
++            if (captureHierarchyOnFailure) maestro.viewHierarchy().root else TreeNode(),
+             debugMessage = exceptionDebugMessage
+         )
+     }
+@@ -1871,7 +2087,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
@@ -23335,10 +23989,19 @@ index d02ae86..7cca459 100644
      }
  }
 diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
-index 821f3b4..38ddd40 100644
+index 821f3b4..126ed97 100644
 --- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
 +++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ArtifactsGenerator.kt
-@@ -122,6 +122,18 @@ internal class ArtifactsGenerator(
+@@ -71,6 +71,8 @@ internal class ArtifactsGenerator(
+ 
+     /** The app's crash report, when [Orchestra] found one for this flow. Saved into the bundle at [onFlowEnd]. */
+     internal var appCrashReport: AppCrashReport? = null
++    internal var appFreezeReport: AppCrashReport? = null
++    internal var collectDriverCrashArtifacts: Boolean = true
+ 
+     /**
+      * Artifacts are emitted synchronously by the currently-executing leaf
+@@ -122,6 +124,18 @@ internal class ArtifactsGenerator(
          )
      }
  
@@ -23357,6 +24020,68 @@ index 821f3b4..38ddd40 100644
      /**
       * The running assertScreenshot's diff, named from the step like its screenshot and hierarchy, so
       * two failing assertions never share a file. Null when no bundle is produced.
+@@ -235,10 +249,11 @@ internal class ArtifactsGenerator(
+         if (artifactsDir != null && collector != null) {
+             // Device logs + crash/ANR land under logs/ and are adopted flow-level
+             // (no owning command) so they appear in the manifest like any artifact.
+-            capturer?.collect(appUnderTest, flowStartMs).orEmpty()
++            capturer?.collect(appUnderTest, flowStartMs, collectDriverCrashArtifacts).orEmpty()
+                 .forEach { collector.adoptDeviceArtifact(it) }
+             capturer = null
+             appCrashReport?.let { collector.saveCrashReport(it) }
++            appFreezeReport?.let { collector.saveCrashReport(it, ArtifactKind.ANR_REPORT, DeviceArtifactFiles.ANR_REPORT) }
+             artifactManifest = collector.manifest()
+             try {
+                 TestOutputWriter.saveManifest(artifactsDir, artifactManifest)
+@@ -262,11 +277,15 @@ internal class ArtifactsGenerator(
+         adopt(kind, "${BundleLayout.LOGS_DIR}/${captured.file.name}", ArtifactFormat.TXT, metadata)
+     }
+ 
+-    private fun ArtifactCollector.saveCrashReport(crash: AppCrashReport) {
++    private fun ArtifactCollector.saveCrashReport(
++        crash: AppCrashReport,
++        kind: ArtifactKind = ArtifactKind.CRASH_REPORT,
++        fileName: String = DeviceArtifactFiles.CRASH_REPORT,
++    ) {
+         try {
+-            val relativePath = "${BundleLayout.LOGS_DIR}/${DeviceArtifactFiles.CRASH_REPORT}"
++            val relativePath = "${BundleLayout.LOGS_DIR}/$fileName"
+             artifactsDir!!.resolve(relativePath).toFile().apply { parentFile.mkdirs() }.writeText(crash.content)
+-            adopt(ArtifactKind.CRASH_REPORT, relativePath, ArtifactFormat.TXT, mapOf("message" to crash.message))
++            adopt(kind, relativePath, ArtifactFormat.TXT, mapOf("message" to crash.message))
+         } catch (e: Exception) {
+             logger.warn("Failed to save the crash report under $artifactsDir", e)
+         }
+diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/DeviceArtifactCapturer.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/DeviceArtifactCapturer.kt
+index 8c1a975..ce140ed 100644
+--- a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/DeviceArtifactCapturer.kt
++++ b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/DeviceArtifactCapturer.kt
+@@ -22,7 +22,7 @@ internal class DeviceArtifactCapturer(
+         }
+     }
+ 
+-    fun collect(appId: String?, flowStartMs: Long): List<CapturedDeviceArtifact> {
++    fun collect(appId: String?, flowStartMs: Long, collectCrashReports: Boolean = true): List<CapturedDeviceArtifact> {
+         val dir = outputDir.toFile()
+         val out = mutableListOf<CapturedDeviceArtifact>()
+         try {
+@@ -30,10 +30,12 @@ internal class DeviceArtifactCapturer(
+         } catch (e: Exception) {
+             logger.warn("Failed to collect device logs", e)
+         }
+-        try {
+-            out += runBlocking { maestro.collectCrashArtifacts(appId, flowStartMs, dir) }
+-        } catch (e: Exception) {
+-            logger.warn("Failed to collect crash/ANR reports", e)
++        if (collectCrashReports) {
++            try {
++                out += runBlocking { maestro.collectCrashArtifacts(appId, flowStartMs, dir) }
++            } catch (e: Exception) {
++                logger.warn("Failed to collect crash/ANR reports", e)
++            }
+         }
+         return out
+     }
 diff --git a/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ExecutionTrace.kt b/maestro-orchestra/src/main/kotlin/maestro/orchestra/debug/ExecutionTrace.kt
 new file mode 100644
 index 0000000..592c911
@@ -23645,10 +24370,30 @@ index fa610d7..9aa9b59 100644
 \ No newline at end of file
 +}
 diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
-index 8d7ac96..bb6cbf8 100644
+index 8d7ac96..40bdc67 100644
 --- a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
 +++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
-@@ -65,6 +65,9 @@ class OrchestraListenerDispatchTest {
+@@ -5,6 +5,8 @@ import com.google.common.truth.Truth.assertThat
+ import io.mockk.coEvery
+ import io.mockk.every
+ import io.mockk.mockk
++import io.mockk.verify
++import io.mockk.coVerify
+ import kotlinx.coroutines.runBlocking
+ import maestro.DeviceInfo
+ import maestro.KeyCode
+@@ -13,6 +15,10 @@ import maestro.MaestroException
+ import maestro.TreeNode
+ import maestro.ViewHierarchy
+ import maestro.device.Platform
++import maestro.device.DeviceArtifactFiles
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSFlowFault
++import maestro.harmonyos.driver.HarmonyOSFlowFaults
+ import maestro.js.JsEngine
+ import maestro.orchestra.ApplyConfigurationCommand
+ import maestro.orchestra.AssertConditionCommand
+@@ -65,6 +71,9 @@ class OrchestraListenerDispatchTest {
              widthGrid = 100,
              heightGrid = 200,
          )
@@ -23658,6 +24403,48 @@ index 8d7ac96..bb6cbf8 100644
          pressKeyThrows?.let { coEvery { pressKey(any(), any()) } throws it }
          openLinkThrows?.let { coEvery { openLink(any(), any(), any(), any()) } throws it }
      }
+@@ -94,6 +103,41 @@ class OrchestraListenerDispatchTest {
+         }
+     }
+ 
++    @ParameterizedTest
++    @ValueSource(strings = ["passed", "failed", "strict"])
++    fun `HarmonyOS diagnostics share one query between failure and artifacts`(scenario: String) = runBlocking {
++        val driver = mockk<HarmonyOSDriver>()
++        val maestro = mockMaestro()
++        every { maestro.driver } returns driver
++        every { driver.strictFaultDiagnostics } returns (scenario == "strict")
++        every { driver.flowFaults("com.target", any(), any()) } answers {
++            val at = secondArg<Long>()
++            assertThat(thirdArg<Long>()).isAtLeast(at)
++            HarmonyOSFlowFaults(
++                HarmonyOSFlowFault("JS_ERROR", at, "matched crash"),
++                HarmonyOSFlowFault("APP_FREEZE", at, "matched freeze"),
++            )
++        }
++        val config = MaestroCommand(applyConfigurationCommand = ApplyConfigurationCommand(MaestroConfig(appId = "com.target")))
++        val assertion = MaestroCommand(assertConditionCommand = AssertConditionCommand(
++            Condition(scriptCondition = if (scenario == "failed") "false" else "true"),
++        ))
++        val orchestra = Orchestra(maestro = maestro, artifactsDir = tempDir)
++        if (scenario == "passed") {
++            assertThat(orchestra.runFlow(listOf(config, assertion)).success).isTrue()
++            verify(exactly = 0) { driver.flowFaults(any(), any(), any()) }
++        } else {
++            val failure = assertThrows<MaestroException.AppCrash> {
++                orchestra.runFlow(listOf(config, assertion))
++            }
++            assertThat(failure.message).contains("matched crash")
++            verify(exactly = 1) { driver.flowFaults(any(), any(), any()) }
++            assertThat(tempDir.resolve("logs/${DeviceArtifactFiles.CRASH_REPORT}").toFile().readText()).contains("matched crash")
++            assertThat(tempDir.resolve("logs/${DeviceArtifactFiles.ANR_REPORT}").toFile().readText()).contains("matched freeze")
++        }
++        coVerify(exactly = 0) { maestro.collectCrashArtifacts(any(), any(), any()) }
++    }
++
+     private class RecordingListener : OrchestraListener {
+         data class FinishedEvent(val cmd: MaestroCommand, val outcome: String)
+         data class Timing(val cmd: MaestroCommand, val startedAt: Long, val finishedAt: Long)
 diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/ScreenRecordingOutputTest.kt
 new file mode 100644
 index 0000000..75e7d2d

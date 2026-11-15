@@ -1,8 +1,19 @@
-# 在本机或自托管 Windows 环境运行
+# 通用 CI 流程
 
 `scripts/ci/run-device-suite.ps1` 是平台无关的单设备入口。它先固定本次源码、构建文件和应用参数，再调用 Maestro CLI，核对执行结果、设备释放和原生 JUnit 场景清单；启用视频策略后，还会完整解码本次索引中的原视频。
 
 本机假执行器验证之外，已在一台真机上运行成功、预期断言失败及超时强制停止，检查后续阻止和 v2 恢复核销，见[补充验证记录](progress/2026-10-30-followup.md)。单设备入口使用预装工具、已构建的 CLI 和已准备的应用。
+
+模拟器作业按以下顺序执行。CI 平台负责触发、提供 runner 和保存产物。选用同一个 Windows 执行账号，提前准备官方 API 22 镜像、独立模拟器实例、HDC、签名 HAP、JDK、Node.js 和固定版本的构建依赖。干净源码构建从新检出开始，可以复用已校验的依赖缓存。
+
+1. 从新目录检出固定版本源码，校验上游提交与补丁，构建 CLI，并记录实际产物哈希。构建过程见[构建复现](build-reproducibility.md)。
+2. 启动专用 API 22 模拟器，等待系统启动完成并通过 HDC 确认目标。安装哈希已校验的 HAP。
+3. 用本次构建的 CLI 调用 `run-device-suite.ps1` 运行固定的 Flow。
+4. 用 `collect-artifacts.mjs` 收集本次 JUnit、截图和作业结果。核对 `state=released` 与 `resolution.releaseConfirmed=true`，再关闭专用模拟器，确认实例、HDC 端口和目标均已退出。作业取消或超时时，按[平台联调检查](#移植到其他-ci-平台)核对持久设备状态。
+
+### 移植到其他 CI 平台
+
+复用 Windows runner 的脚本调用和证据校验。每次运行使用新的输出目录，同一个模拟器实例串行使用，设备状态目录留在工作区之外。平台将产物目录归档并解析 JUnit；成功条件同时包含 Flow 通过、证据齐全、会话确认释放和模拟器关闭。若平台强制取消导致脚本来不及收尾，先查持久状态、实例和 HDC 端口，确认本轮资源已释放后再调度下一轮。
 
 ## 在 GitHub Actions 上运行
 
@@ -31,13 +42,9 @@
 
 首次联调分别派发成功 Flow、预期失败的断言 Flow，以及一次已开始执行后的平台取消。逐次核对作业链接和可下载摘要。硬取消可能使平台跳过摘要上传；此时检查 runner 外部状态目录，使用下一次作业及恢复核验确认设备是否可以接管。已有本机记录可用于对照预期行为。
 
-## 从 Gitee 触发本机模拟器冒烟
+## Gitee 和 Jenkins 验证记录
 
-Gitee 的 Jenkins 插件可以接收指定分支的 WebHook，在 Jenkins 上调度 Windows 节点。设备步骤沿用 `run-device-suite.ps1`。本机 Windows 已用预装 API 22 镜像验证 HDC 连接、安装固定 HAP、运行短 Flow、生成 JUnit 和释放会话。Gitee 公开的云端构建插件文档列出了 Linux 环境。对托管 Linux，应先确认作业可以访问 `/dev/kvm` 和 `/dev/dri/renderD*`，再尝试下载官方模拟器工具和镜像。[Gitee Jenkins 插件](https://help.gitee.com/devops/connect/Jenkins-Plugin/) · [Gitee 云端编译插件](https://help.gitee.com/gitee-go/plugin/ci-build) · [华为模拟器命令行要求](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/ide-commandline-emulator/)
-
-首次接入可复用已启动的模拟器。将 Windows 节点运行在拥有模拟器和 HDC 的同一账户下，使用签名并固定哈希的 HAP、显式指定的模拟器 HDC 目标和 checkout 外的设备状态目录。配置 Gitee 分支过滤和 WebHook 密钥，Jenkins 控制端需有 Gitee 可达的 WebHook 地址。同一台模拟器串行运行。作业完成后归档 JUnit、截图和 `ci-result.json`，核对 `state=released` 和 `resolution.releaseConfirmed=true`。
-
-当前证据来自本机手动启动的模拟器。Gitee WebHook、远端产物下载和模拟器自动启停待联调。
+Jenkins 轮询 Gitee 的 `main`，在本机 Windows 节点执行同一流程。第 6 次作业从干净检出构建 CLI，并验证设备运行时使用了这次构建的四个核心 JAR。API 22 模拟器启动用时 30.5 秒，冒烟 Flow 用时 17.1 秒；归档了 JUnit 和截图，JUnit 1 项通过、0 项失败，会话、模拟器和 HDC 端口均已释放。
 
 ## 准备
 

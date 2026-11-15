@@ -8,6 +8,7 @@
     body { margin: 20px; font: 18px system-ui, sans-serif; }
     label, input, button, output { display: block; margin-block: 12px; }
     input, button { min-height: 44px; font: inherit; }
+    #scroll-end { margin-top: 165vh; padding-block: 12px; }
   </style>
 </head>
 <body>
@@ -18,6 +19,7 @@
     <button id="confirm" type="submit">确认样本</button>
     <output id="result" for="sample">等待确认</output>
   </form>
+  <div id="scroll-end">网页底部标记</div>
   <script>
     document.querySelector('form').addEventListener('submit', event => {
       event.preventDefault();

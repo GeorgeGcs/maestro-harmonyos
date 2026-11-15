@@ -35,15 +35,22 @@ sourceSets.test {
     resources.include("harmonyos/**")
 }
 
+sourceSets.main {
+    resources.srcDir("../.upstream/maestro/maestro-client/src/main/resources")
+    resources.include("maestro-web.js")
+}
+
 dependencies {
     implementation(libs.jackson.core.databind)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.square.okio.jvm)
+    implementation(libs.square.okhttp)
     implementation(libs.logging.sl4j)
     implementation(libs.log4j.core)
     testImplementation(libs.junit.jupiter.api)
     testImplementation(libs.junit.jupiter.params)
     testImplementation(libs.google.truth)
+    testImplementation(libs.square.mock.server)
     testRuntimeOnly(libs.junit.jupiter.engine)
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

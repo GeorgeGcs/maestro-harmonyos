@@ -1,0 +1,17 @@
+appId: ohos.samples.componentcollection
+name: component-collection-arkweb-scroll
+---
+- assertVisible: ArkUI 对照标题
+- assertVisible:
+    id: '^sample$'
+- assertNotVisible:
+    id: '^scroll-end$'
+- scrollUntilVisible:
+    element:
+      id: '^scroll-end$'
+    direction: DOWN
+    timeout: 65000
+- assertVisible:
+    id: '^scroll-end$'
+    text: 网页底部标记
+- takeScreenshot: component-collection-arkweb-scroll
