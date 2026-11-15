@@ -31,6 +31,14 @@
 
 首次联调分别派发成功 Flow、预期失败的断言 Flow，以及一次已开始执行后的平台取消。逐次核对作业链接和可下载摘要。硬取消可能使平台跳过摘要上传；此时检查 runner 外部状态目录，使用下一次作业及恢复核验确认设备是否可以接管。已有本机记录可用于对照预期行为。
 
+## 从 Gitee 触发本机模拟器冒烟
+
+Gitee 的 Jenkins 插件可以接收指定分支的 WebHook，在 Jenkins 上调度 Windows 节点。设备步骤沿用 `run-device-suite.ps1`。本机 Windows 已用预装 API 22 镜像验证 HDC 连接、安装固定 HAP、运行短 Flow、生成 JUnit 和释放会话。Gitee 公开的云端构建插件文档列出了 Linux 环境。对托管 Linux，应先确认作业可以访问 `/dev/kvm` 和 `/dev/dri/renderD*`，再尝试下载官方模拟器工具和镜像。[Gitee Jenkins 插件](https://help.gitee.com/devops/connect/Jenkins-Plugin/) · [Gitee 云端编译插件](https://help.gitee.com/gitee-go/plugin/ci-build) · [华为模拟器命令行要求](https://developer.huawei.com/consumer/cn/doc/HarmonyOS-Guides/ide-commandline-emulator/)
+
+首次接入可复用已启动的模拟器。将 Windows 节点运行在拥有模拟器和 HDC 的同一账户下，使用签名并固定哈希的 HAP、显式指定的模拟器 HDC 目标和 checkout 外的设备状态目录。配置 Gitee 分支过滤和 WebHook 密钥，Jenkins 控制端需有 Gitee 可达的 WebHook 地址。同一台模拟器串行运行。作业完成后归档 JUnit、截图和 `ci-result.json`，核对 `state=released` 和 `resolution.releaseConfirmed=true`。
+
+当前证据来自本机手动启动的模拟器。Gitee WebHook、远端产物下载和模拟器自动启停待联调。
+
 ## 准备
 
 - 按[使用说明](user-guide.md)构建 CLI，配置 JDK 17、HDC，以及已安装并授权的测试应用。

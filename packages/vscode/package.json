@@ -16,6 +16,7 @@
     "Testing"
   ],
   "main": "./dist/src/extension.js",
+  "activationEvents": ["onLanguage:yaml"],
   "files": ["dist/src/*.js", "media/*.js", "media/*.css", "snippets/*.json", "README.md", "LICENSE"],
   "extensionKind": [
     "workspace"
@@ -83,6 +84,11 @@
           "type": "string",
           "default": "",
           "description": "HDC native executable. Empty uses MAESTRO_HARMONYOS_HDC or PATH."
+        },
+        "harmonyosRecorder.checkSyntaxOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use Maestro to check saved local YAML files with an appId header and show errors in Problems. Requires a configured CLI."
         },
         "harmonyosRecorder.flowEnvironment": {
           "type": "array",

@@ -31,12 +31,13 @@ export async function createRunDirectory(root: string, kind: string): Promise<st
   return directory;
 }
 
-export async function checkFlowSyntax(root: string, settings: ToolSettings, file: string):
+export async function checkFlowSyntax(root: string, settings: ToolSettings, file: string, signal?: AbortSignal):
   Promise<{ valid: boolean; output: string }> {
   const launch = await javaLaunch(root, settings, ['check-syntax', '--', file]);
+  signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     execFile(launch.executable, launch.args, { cwd: launch.cwd, env: launch.env, windowsHide: true,
-      timeout: 30000, maxBuffer: 256 * 1024 }, (error, stdout, stderr) => {
+      timeout: 30000, maxBuffer: 256 * 1024, signal }, (error, stdout, stderr) => {
       if (error && (typeof error.code !== 'number' || error.killed)) { reject(error); return; }
       resolve({ valid: !error, output: [stdout, stderr].map(value => value.trim()).filter(Boolean).join('\n') });
     });

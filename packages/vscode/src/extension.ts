@@ -11,11 +11,14 @@ import { InteractiveRun, RunRequest } from './interactive-run';
 import { sourceSnapshot, StepSource } from './live-trace';
 import { importTouchRecording } from './touch-import';
 import { TouchRecording, verifyTouchIdle } from './touch-recording';
+import { previewSelectors } from './selector-preview';
+import { syntaxLocation } from './syntax-location';
+import { registerMaestroCompletion } from './yaml-completion';
 
 let recorder: Recorder | undefined;
 export function activate(context: vscode.ExtensionContext): { getStatus(): { panelOpen: boolean; connected: boolean; busy: boolean; steps: number } } {
   recorder = new Recorder(context);
-  context.subscriptions.push(recorder);
+  context.subscriptions.push(recorder, registerMaestroCompletion());
   context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.importTouch', () => recorder!.handle(() => recorder!.pickTouchRecording())));
   context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.checkSyntax', () => recorder!.handle(() => recorder!.checkSyntax())));
   for (const [name, action] of Object.entries({ open: () => recorder!.open(), connect: () => recorder!.connect(), save: () => recorder!.save(), replay: () => recorder!.replay(), runFile: () => recorder!.pickFlow(), rerun: () => recorder!.rerun(), stop: () => recorder!.stop() })) {
@@ -46,9 +49,21 @@ class Recorder implements vscode.Disposable {
     overviewRulerLane: vscode.OverviewRulerLane.Left,
   });
   private highlightRequest = '';
+  private readonly syntaxDiagnostics = vscode.languages.createDiagnosticCollection('maestro-syntax');
+  private readonly syntaxChecks = new Map<string, AbortController>();
   private readonly editorListeners = [
     vscode.window.onDidChangeVisibleTextEditors(() => this.decorate()),
     vscode.workspace.onDidChangeTextDocument(() => this.decorate()),
+    vscode.workspace.onDidChangeTextDocument(event => { if (event.contentChanges.length) this.clearSyntax(event.document); }),
+    vscode.workspace.onDidCloseTextDocument(document => this.clearSyntax(document)),
+    vscode.workspace.onDidSaveTextDocument(document => {
+      const root = vscode.workspace.getWorkspaceFolder(document.uri);
+      if (!vscode.workspace.isTrusted || !root || document.uri.scheme !== 'file' ||
+          !/\.ya?ml$/i.test(document.uri.fsPath) ||
+          !vscode.workspace.getConfiguration('harmonyosRecorder', document.uri).get('checkSyntaxOnSave', false) ||
+          !/^appId[ \t]*:/m.test(document.getText())) return;
+      void this.validateSyntax(document, root.uri.fsPath).catch(error => this.output.appendLine(errorMessage(error)));
+    }),
   ];
   private readonly output = vscode.window.createOutputChannel('HarmonyOS Recorder');
   private readonly session = new RecorderSession(() => this.render());
@@ -78,8 +93,8 @@ class Recorder implements vscode.Disposable {
       if (!this.run?.active) void this.stop().catch(error => this.output.appendLine(errorMessage(error)));
     });
   }
-  private settings(): ToolSettings {
-    const config = vscode.workspace.getConfiguration('harmonyosRecorder');
+  private settings(uri?: vscode.Uri): ToolSettings {
+    const config = vscode.workspace.getConfiguration('harmonyosRecorder', uri);
     return { cliDirectory: config.get<string>('cliDirectory', ''), javaPath: config.get<string>('javaPath', ''), hdcPath: config.get<string>('hdcPath', '') };
   }
   async startTouch(): Promise<void> {
@@ -224,12 +239,46 @@ class Recorder implements vscode.Disposable {
     if (vscode.workspace.textDocuments.some(doc => doc.uri.scheme === 'file' && doc.isDirty && this.matchesSource(doc.uri.fsPath, file))) {
       throw new Error('请先保存当前 YAML，再运行语法检查。');
     }
-    const result = await checkFlowSyntax(await this.workspaceRoot(), this.settings(), file);
-    this.output.appendLine(`语法检查 ${path.basename(file)}\n${result.output}`);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    const root = vscode.workspace.getWorkspaceFolder(document.uri)?.uri.fsPath ?? await this.workspaceRoot();
+    const result = await this.validateSyntax(document, root);
+    if (!result) return;
     if (result.valid) void vscode.window.showInformationMessage(`${path.basename(file)} 通过 Maestro 语法检查。`);
     else {
       this.output.show(true);
-      void vscode.window.showErrorMessage(`${path.basename(file)} 的语法检查未通过，请查看 HarmonyOS Recorder 输出。`);
+      void vscode.window.showErrorMessage(`${path.basename(file)} 的语法检查未通过，请查看编辑器标记或 HarmonyOS Recorder 输出。`);
+    }
+  }
+  private clearSyntax(document: vscode.TextDocument): void {
+    const key = document.uri.toString();
+    this.syntaxChecks.get(key)?.abort();
+    this.syntaxChecks.delete(key);
+    this.syntaxDiagnostics.delete(document.uri);
+  }
+  private async validateSyntax(document: vscode.TextDocument, root: string): Promise<{ valid: boolean } | undefined> {
+    if (this.disposed || document.isDirty || document.isClosed) return;
+    const key = document.uri.toString();
+    this.clearSyntax(document);
+    const job = new AbortController();
+    this.syntaxChecks.set(key, job);
+    try {
+      const result = await checkFlowSyntax(root, this.settings(document.uri), document.uri.fsPath, job.signal);
+      if (job.signal.aborted || this.disposed || document.isDirty || document.isClosed) return;
+      this.output.appendLine(`语法检查 ${path.basename(document.uri.fsPath)}\n${result.output}`);
+      const issue = result.valid ? undefined : syntaxLocation(result.output, document.uri.fsPath, root);
+      if (issue && issue.line < document.lineCount) {
+        const line = document.lineAt(issue.line);
+        const start = Math.min(issue.column, line.text.length);
+        const range = new vscode.Range(issue.line, start, issue.line, Math.min(start + 1, line.text.length));
+        const diagnostic = new vscode.Diagnostic(range, issue.message, vscode.DiagnosticSeverity.Error);
+        diagnostic.source = 'Maestro';
+        this.syntaxDiagnostics.set(document.uri, [diagnostic]);
+      }
+      return result;
+    } catch (error) {
+      if (!job.signal.aborted) throw error;
+    } finally {
+      if (this.syntaxChecks.get(key) === job) this.syntaxChecks.delete(key);
     }
   }
   private async workspaceRoot(): Promise<string> {
@@ -440,6 +489,9 @@ class Recorder implements vscode.Disposable {
     void this.stop().catch(() => undefined);
     this.activeLine.dispose();
     for (const listener of this.editorListeners) listener.dispose();
+    for (const job of this.syntaxChecks.values()) job.abort();
+    this.syntaxChecks.clear();
+    this.syntaxDiagnostics.dispose();
     this.output.dispose();
   }
   private matchesSource(file: string, source: string): boolean {
@@ -494,6 +546,24 @@ class Recorder implements vscode.Disposable {
       case 'disconnect': await this.session.disconnect(); return;
       case 'refresh': await this.session.refresh(); return;
       case 'action': await this.session.action(message.action); return;
+      case 'previewSelector':
+      case 'copySelector': {
+        const snapshot = this.session.state.snapshot;
+        if (this.busy || !snapshot || snapshot.snapshotId !== message.snapshotId) return;
+        const node = snapshot.nodes.find(item => item.nodeId === message.nodeId);
+        if (!node) return;
+        const candidates = previewSelectors(snapshot.nodes, node);
+        if (message.type === 'copySelector') {
+          const match = candidates.find(candidate => candidate.yaml === message.yaml && candidate.unique);
+          if (match) {
+            await vscode.env.clipboard.writeText(match.yaml);
+            void vscode.window.showInformationMessage('已复制 Maestro 选择器。');
+          }
+        } else {
+          await this.panel?.webview.postMessage({ type: 'selectorPreview', snapshotId: snapshot.snapshotId, nodeId: node.nodeId, candidates });
+        }
+        return;
+      }
       case 'startTouch': await this.startTouch(); return;
       case 'stopTouch': await this.stopTouch(); return;
       case 'replayTouch': await this.replayTouch(); return;
@@ -559,7 +629,9 @@ class Recorder implements vscode.Disposable {
 <pre id="evidenceSource" hidden></pre><img id="evidenceImage" alt="失败步骤截图" hidden><pre id="evidenceLog" aria-label="日志末尾摘要" hidden></pre><div class="row" id="evidenceLinks"></div></section>
 <p id="runPreviewStatus" hidden>等待执行过程中的截图。</p><img id="runFrame" alt="最近一次运行截图" hidden></section>
 <p id="status" role="status" aria-live="polite">连接手机后开始录制。</p><div class="workspace"><section class="device"><h2>设备画面 <span id="dimensions"></span></h2><p id="empty">连接设备后显示截图。每次操作后自动刷新。</p><div id="imageWrap"><img id="screen" alt="当前鸿蒙设备截图" hidden><div id="highlight" hidden></div><div id="point" hidden></div></div></section>
-<section class="controls"><h2>选择与操作</h2><p id="selection">尚未选择控件</p><div class="row"><button id="tap">点击控件</button><button id="assertNode">断言控件可见</button><button id="coordinate" class="secondary">按所选坐标点击</button></div>
+<section class="controls"><h2>选择与操作</h2><p id="selection">尚未选择控件</p>
+<div id="selectorPreview" hidden aria-label="当前控件树中的选择器匹配"><ul id="selectorCandidates"></ul><button id="copySelector" class="secondary" disabled>复制选择器</button></div>
+<div class="row"><button id="tap">点击控件</button><button id="assertNode">断言控件可见</button><button id="coordinate" class="secondary">按所选坐标点击</button></div>
 <label for="input">输入文字（先点击输入框）</label><textarea id="input" rows="2" maxlength="8192" placeholder="要输入的文字"></textarea><button id="inputAction">输入并记录</button>
 <label for="assertText">可见文字断言</label><input id="assertText" maxlength="8192" placeholder="预期页面文字"><button id="assertTextAction">检查并记录</button>
 <div class="row"><label for="direction">滑动方向</label><select id="direction"><option value="UP">向上</option><option value="DOWN">向下</option><option value="LEFT">向左</option><option value="RIGHT">向右</option></select><button id="swipe">滑动</button></div>

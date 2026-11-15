@@ -36,6 +36,10 @@ summary { cursor: pointer; padding: 6px 0; }
 #nodes { max-height: 240px; overflow: auto; }
 button.node { display: block; text-align: left; width: 100%; margin: 3px 0; overflow-wrap: anywhere; }
 button.node[aria-pressed="true"] { border-color: #ffbd45; }
+button.node.selector-match { box-shadow: inset 3px 0 var(--vscode-focusBorder); }
+#selectorCandidates { list-style: none; padding: 0; margin: 0 0 8px; }
+#selectorCandidates button { text-align: left; overflow-wrap: anywhere; max-width: 100%; margin-bottom: 4px; }
+#selectorCandidates button[aria-pressed="true"] { border-color: var(--vscode-focusBorder); }
 .flow { margin-top: 24px; }
 .flow h2 { margin: 0 auto 0 0; }
 #yaml { margin-top: 12px; font-family: var(--vscode-editor-font-family), monospace; line-height: 1.5; }

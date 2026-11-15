@@ -1,0 +1,14 @@
+appId: ohos.samples.componentcollection
+name: component-collection-arkweb-probe
+---
+- assertVisible: ArkUI 对照标题
+- assertVisible: ArkWeb 控件验证
+- tapOn:
+    text: 测试输入框
+    retryTapIfNoChange: false
+- inputText: maestro22
+- tapOn:
+    text: 确认样本
+    retryTapIfNoChange: false
+- assertVisible: 已确认 maestro22
+- takeScreenshot: component-collection-arkweb-probe

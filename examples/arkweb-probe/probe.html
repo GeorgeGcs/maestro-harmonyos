@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ArkWeb 控件验证</title>
+  <style>
+    body { margin: 20px; font: 18px system-ui, sans-serif; }
+    label, input, button, output { display: block; margin-block: 12px; }
+    input, button { min-height: 44px; font: inherit; }
+  </style>
+</head>
+<body>
+  <h1>ArkWeb 控件验证</h1>
+  <form>
+    <label for="sample">输入样本</label>
+    <input id="sample" type="text" aria-label="测试输入框" inputmode="none" autocomplete="off">
+    <button type="submit">确认样本</button>
+    <output id="result" for="sample">等待确认</output>
+  </form>
+  <script>
+    document.querySelector('form').addEventListener('submit', event => {
+      event.preventDefault();
+      const value = document.getElementById('sample').value;
+      document.getElementById('result').textContent = '已确认 ' + value;
+    });
+  </script>
+</body>
+</html>

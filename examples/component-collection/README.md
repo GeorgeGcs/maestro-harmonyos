@@ -6,6 +6,18 @@
 
 ## 执行前
 
+[ci-smoke.yaml](ci-smoke.yaml) 启动应用，切换到「全局方法」，确认切换后出现「弹窗」分类并保存截图。将这一个文件作为 CI 的唯一顶层 Flow，沿用[单设备 CI 入口](../../docs/ci.md)核对 JUnit 与会话释放。CI 需先固定可在目标模拟器上安装的 `entry` HAP、应用源码提交及 HAP SHA-256，确认 `MainAbility` 和初次启动状态，并将应用界面设为简体中文。
+
+2026 年 11 月 15 日，在 Windows 上手动启动的 HarmonyOS API 22 模拟器中安装已校验的 HAP，再从单设备 CI 入口执行用例。Flow 用时约 23 秒，JUnit 为 1 项通过、0 项失败，截图已保存，会话释放已确认。远端调度以及模拟器自动启停仍待验证。
+
+从仓库根目录生成单设备作业的模板，将 `HAP_SHA256` 换成事先登记的 64 位 SHA-256。输出文件应为新文件。生成过程会检查实际 HAP 与输入指纹是否一致。
+
+```powershell
+node scripts/ci/prepare-component-smoke.mjs D:/ci/component-collection.hap HAP_SHA256 D:/ci/component-smoke-suite.json
+```
+
+在独占的模拟器上确认 HDC 连接后，安装同一份 HAP，并核对安装结果和 `entry/MainAbility`。将模板作为 `scripts/ci/run-device-job.ps1` 的 `-SuiteTemplate`，按 CI 指南配置设备 ID、状态目录和产物目录。作业会记录实际 CLI 构建、复核 HAP 指纹并检查 JUnit 和设备释放。保存安装日志，以便把设备上的安装与固定输入对应起来。
+
 只验证页面内操作、需要依靠应用窗口常亮时，使用[保持前台的单页检查](foreground/README.md)。该组从已打开的目标页面开始，不调用下述停止和启动应用的初始化，也不使用系统录屏；每次只运行一个文件。
 
 - 按主仓库使用指南配置 CLI、Java 和 HDC，手机解锁并授权。
@@ -96,3 +108,9 @@ $env:MAESTRO_HARMONYOS_RECORDING_MAX_SECONDS = '300'
 & 'C:/tools/jdk/bin/java.exe' --class-path 'C:/build/maestro/lib/*' `
   scripts/tests/fixtures/InspectComponentFlows.java examples/component-collection C:/build/component-source-indices.json
 ```
+
+## ArkWeb 验证范围
+
+在 ComponentCollection 的调试副本中，用 [Index.ets](../arkweb-probe/Index.ets) 替换 `entry/src/main/ets/pages/Index.ets`，把 [probe.html](../arkweb-probe/probe.html) 放到 `entry/src/main/resources/rawfile/`。重新编译并安装调试 HAP 后，打开应用并等到原生标题和网页标题均显示，再运行 [ArkWeb 前台 Flow](../arkweb-probe/foreground.yaml)。这个页面使用本地资源。输入框设置了 `inputmode="none"`，便于在未配置系统输入法的模拟器上验证自动输入。[ArkWeb 加载本地网页](https://developer.huawei.com/consumer/cn/doc/harmonyos-references/arkts-basic-components-web/)
+
+2026 年 11 月 15 日在 HarmonyOS API 22 模拟器通过。UITest 控件树包含网页标题、输入框、按钮和结果状态。Maestro 用文本选择器完成输入、点击提交和结果断言，保存了截图，JUnit 记录 1 项通过，约 51 秒。这组交互可以沿用现有 UITest 适配。HTML `id`、CSS 选择器、跨页面场景和真机行为仍待验证。

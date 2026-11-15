@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import { composeFlow, parseDevices, parseSnapshot, validateAction } from '../src/protocol';
 import { snapshot } from './snapshot';
+import { previewSelectors } from '../src/selector-preview';
 const geometry = require('../../media/geometry.js') as { pointInImage: (...args: unknown[]) => unknown; nodesAtPoint: (nodes: unknown[], point: unknown) => { nodeId: string }[] };
 test('maps a scaled screenshot into physical pixels, retaining the system-bar offset', () => {
   assert.deepEqual(geometry.pointInImage(220, 310, { left: 10, top: 10, right: 430, bottom: 916.6666666666666 }, 1260, 2720), { x: 630, y: 900 });
@@ -34,4 +35,17 @@ test('keeps backend YAML literal and prevents application-header injection', () 
   const yaml = '- inputText: "熊猫 \\\"测试\\\""';
   assert.equal(composeFlow('org.example.test', [yaml]), `appId: "org.example.test"\n---\n${yaml}\n`);
   assert.throws(() => composeFlow('app\n---\n- back', []), /无效/);
+});
+
+test('selector preview counts qualified IDs and hint matches without offering ambiguous selectors for copying', () => {
+  const target = { ...snapshot.nodes[0], resourceId: 'entry.button', text: '打开', hintText: '唯一提示' };
+  const duplicate = { ...target, nodeId: '1', resourceId: 'sample:id/entry.button', text: '', hintText: '打开' };
+  const [id, text, hint] = previewSelectors([target, duplicate], target);
+  assert.equal(id.yaml, 'id: "entry\\\\.button"');
+  assert.deepEqual(id.matches, ['0', '1']);
+  assert.equal(id.unique, false);
+  assert.deepEqual(text.matches, ['0', '1']);
+  assert.equal(text.unique, false);
+  assert.equal(hint.count, 1);
+  assert.equal(hint.unique, true);
 });

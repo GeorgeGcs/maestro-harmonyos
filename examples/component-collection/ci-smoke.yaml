@@ -1,0 +1,11 @@
+appId: ohos.samples.componentcollection
+name: component-collection-ci-smoke
+---
+- launchApp
+- assertVisible:
+    id: tabBar0
+- tapOn:
+    id: tabBar3
+    retryTapIfNoChange: false
+- assertVisible: 弹窗
+- takeScreenshot: component-collection-ci-smoke

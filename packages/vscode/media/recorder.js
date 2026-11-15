@@ -6,9 +6,15 @@
   let selectedNode = null;
   let selectedPoint = null;
   let lastSnapshotId = null;
+  let selectorPreview = null;
   const send = (type, extra = {}) => vscode.postMessage({ type, ...extra });
   const action = data => { if (state.connected && !state.busy) send('action', { action: data }); };
-  const selectNode = node => { selectedNode = node; paintSelection(); buttons(); };
+  const selectNode = node => {
+    selectedNode = node;
+    selectorPreview = null;
+    paintSelection(); paintSelectorPreview(); buttons();
+    if (node && state.snapshot) send('previewSelector', { snapshotId: state.snapshot.snapshotId, nodeId: node.nodeId });
+  };
   function label(node) { return node.resourceId || node.text || node.hintText || node.className || node.nodeId; }
   function buttons() {
     const ready = state.connected && !state.busy;
@@ -17,6 +23,7 @@
     element('tap').disabled = !ready || !selectedNode || !state.snapshot;
     element('assertNode').disabled = !ready || !selectedNode || !state.snapshot;
     element('coordinate').disabled = !ready || !selectedPoint || !state.snapshot;
+    element('copySelector').disabled = !ready || !selectorPreview?.selected?.unique;
     for (const id of ['save', 'replay', 'clear']) element(id).disabled = state.busy || !state.steps.length;
     element('artifacts').disabled = !state.artifactsDir;
     element('replayFailure').hidden = !state.hasReplayFailure;
@@ -95,13 +102,45 @@
       marker.style.left = `${100 * selectedPoint.x / state.snapshot.width}%`;
       marker.style.top = `${100 * selectedPoint.y / state.snapshot.height}%`;
     }
-    for (const button of element('nodes').querySelectorAll('button')) button.setAttribute('aria-pressed', String(button.dataset.nodeId === selectedNode?.nodeId));
+    const matches = new Set(selectorPreview?.selected?.matches || []);
+    for (const button of element('nodes').querySelectorAll('button')) {
+      button.setAttribute('aria-pressed', String(button.dataset.nodeId === selectedNode?.nodeId));
+      button.classList.toggle('selector-match', matches.has(button.dataset.nodeId));
+    }
+  }
+  function paintSelectorPreview() {
+    element('selectorPreview').hidden = !selectorPreview || !selectedNode;
+    const list = element('selectorCandidates');
+    list.replaceChildren();
+    if (selectorPreview && !selectorPreview.candidates.length) {
+      const item = document.createElement('li');
+      item.textContent = '当前控件没有可用的 ID 或文本。';
+      list.append(item);
+    }
+    for (const candidate of selectorPreview?.candidates || []) {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'secondary';
+      button.textContent = `${candidate.yaml} · 控件树匹配 ${candidate.count} 项`;
+      button.setAttribute('aria-pressed', String(candidate === selectorPreview.selected));
+      button.addEventListener('click', () => {
+        selectorPreview.selected = candidate;
+        paintSelection(); paintSelectorPreview(); buttons();
+        list.querySelector('[aria-pressed="true"]')?.focus();
+      });
+      item.append(button); list.append(item);
+    }
   }
   element('screen').addEventListener('click', event => {
     if (!state.snapshot || state.busy) return;
     selectedPoint = HarmonyOSGeometry.pointInImage(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect(), state.snapshot.width, state.snapshot.height);
-    selectedNode = selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null;
-    paintSelection(); buttons();
+    selectNode(selectedPoint ? HarmonyOSGeometry.nodesAtPoint(state.snapshot.nodes, selectedPoint)[0] || null : null);
+  });
+  element('copySelector').addEventListener('click', () => {
+    if (selectedNode && selectorPreview?.selected?.unique) send('copySelector', {
+      snapshotId: state.snapshot?.snapshotId, nodeId: selectedNode.nodeId, yaml: selectorPreview.selected.yaml,
+    });
   });
   for (const id of ['connect', 'disconnect', 'refresh', 'save', 'replay', 'replayFailure', 'clear', 'stop', 'artifacts', 'runFile', 'rerun', 'startTouch', 'stopTouch', 'replayTouch', 'checkSyntax', 'checkTouchSyntax']) element(id).addEventListener('click', () => send(id));
   element('runPreview').addEventListener('change', event => send('runPreview', { enabled: event.currentTarget.checked }));
@@ -117,6 +156,14 @@
   element('swipe').addEventListener('click', () => action({ type: 'swipe', direction: element('direction').value, duration: 600 }));
   element('screenshot').addEventListener('click', () => action({ type: 'takeScreenshot', name: element('screenshotName').value }));
   window.addEventListener('message', event => {
+    if (event.data?.type === 'selectorPreview') {
+      const { snapshotId, nodeId, candidates } = event.data;
+      if (snapshotId === state.snapshot?.snapshotId && nodeId === selectedNode?.nodeId) {
+        selectorPreview = { candidates, selected: candidates.find(candidate => candidate.unique) || candidates[0] };
+        paintSelection(); paintSelectorPreview(); buttons();
+      }
+      return;
+    }
     if (event.data?.type === 'clearEvidence' || event.data?.type === 'stepEvidence') {
       const evidence = event.data;
       const panel = element('stepEvidence');
@@ -154,7 +201,8 @@
     element('empty').hidden = !!state.snapshot;
     element('dimensions').textContent = state.snapshot ? `${state.snapshot.width} × ${state.snapshot.height}` : '';
     if (lastSnapshotId !== state.snapshot?.snapshotId) {
-      selectedNode = null; selectedPoint = null;
+      selectedNode = null; selectedPoint = null; selectorPreview = null;
+      paintSelectorPreview();
       lastSnapshotId = state.snapshot?.snapshotId;
       element('nodes').replaceChildren();
       if (state.snapshot) {

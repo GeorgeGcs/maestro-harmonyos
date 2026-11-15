@@ -1,4 +1,5 @@
 import { composeFlow, object } from './protocol';
+import { literalSelector, matchesSelector, selectorCandidates as candidates, Selector } from './selector-preview';
 
 function coordinate(value: unknown): number | undefined {
   if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d{1,5}$/.test(value))) return;
@@ -6,22 +7,7 @@ function coordinate(value: unknown): number | undefined {
   if (Number.isInteger(number) && number >= 0 && number <= 32767) return number;
 }
 
-function literalSelector(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !value.trim() || value.length > 1024 || /[\u0000-\u001f\u007f]/.test(value)) return;
-  // Maestro matches id and text as regexes. Escaping the braces also keeps
-  // recorded text such as ${PRICE} from becoming a Maestro expression.
-  return JSON.stringify(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-}
-
-type Selector = { field: 'id' | 'text'; value: string };
 type LayoutNode = { attributes: Record<string, unknown>; parent?: LayoutNode };
-
-function candidates(id: unknown, text: unknown): Selector[] {
-  const result: Selector[] = [];
-  if (typeof id === 'string' && literalSelector(id) !== undefined) result.push({ field: 'id', value: id });
-  if (typeof text === 'string' && literalSelector(text) !== undefined) result.push({ field: 'text', value: text });
-  return result;
-}
 
 function layoutNodes(tree: unknown): LayoutNode[] {
   const nodes: LayoutNode[] = [];
@@ -36,13 +22,8 @@ function layoutNodes(tree: unknown): LayoutNode[] {
   return nodes;
 }
 
-function matches({ field, value }: Selector, { attributes: a }: LayoutNode): boolean {
-  if (field === 'id') {
-    const id = a.id || a.key;
-    return typeof id === 'string' && (id === value || id.split('/').at(-1) === value);
-  }
-  return [a.text, a.hint, a.accessibilityText, a.error].some(text =>
-    typeof text === 'string' && (text === value || text.replace(/\n/g, ' ') === value));
+function matches(selector: Selector, { attributes: a }: LayoutNode): boolean {
+  return matchesSelector(selector, a.id || a.key, a.text, a.hint, a.accessibilityText, a.error);
 }
 
 function inside(node: LayoutNode, ancestor: LayoutNode): boolean {
