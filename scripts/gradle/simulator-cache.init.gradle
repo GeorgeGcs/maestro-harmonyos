@@ -89,14 +89,27 @@ gradle.projectsEvaluated {
         doLast {
             preparedThisRun = false
             expectedFiles.clear()
-            def git = new ProcessBuilder('git', '-C', expectedUpstream.path, 'rev-parse', 'HEAD').redirectErrorStream(true).start()
-            try {
-                if (!git.waitFor(10, TimeUnit.SECONDS)) throw new GradleException('Git baseline check timed out.')
-                def head = new String(git.inputStream.readNBytes(4096), 'UTF-8').trim()
-                if (git.exitValue() != 0 || head != resources.upstreamCommit) throw new GradleException('Upstream HEAD does not match the pinned source commit.')
-            } finally {
-                if (git.isAlive()) git.destroyForcibly()
-                git.inputStream.close()
+            def forkCommit = System.getProperty('maestro.pinnedForkCommit')
+            if (forkCommit != null && !(forkCommit ==~ /[0-9a-f]{40}/)) {
+                throw new GradleException('The pinned fork commit must be a full Git SHA.')
+            }
+            def checkedGit = { List<String> arguments ->
+                def git = new ProcessBuilder(['git', '-C', expectedUpstream.path] + arguments).redirectErrorStream(true).start()
+                try {
+                    if (!git.waitFor(10, TimeUnit.SECONDS)) throw new GradleException('Git baseline check timed out.')
+                    def output = new String(git.inputStream.readNBytes(4096), 'UTF-8').trim()
+                    if (git.exitValue() != 0) throw new GradleException('Git baseline check failed.')
+                    output
+                } finally {
+                    if (git.isAlive()) git.destroyForcibly()
+                    git.inputStream.close()
+                }
+            }
+            if (checkedGit(['rev-parse', 'HEAD']) != (forkCommit ?: resources.upstreamCommit)) {
+                throw new GradleException('Checkout does not match the pinned upstream or fork commit.')
+            }
+            if (forkCommit != null && checkedGit(['merge-base', resources.upstreamCommit, forkCommit]) != resources.upstreamCommit) {
+                throw new GradleException('The fork does not descend from the simulator resource baseline.')
             }
             def checkFile = { reference ->
                 def file = new File(cacheDirectory, reference.name.toString())

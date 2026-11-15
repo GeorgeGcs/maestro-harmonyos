@@ -100,9 +100,11 @@ if ($LASTEXITCODE -ne 0) { throw 'CLI 构建未通过，请保留本次输出。
 
 `maestro.harmonyosRepository` 指向含两份锁文件的适配仓；`-p` 可以另指向独立的 Maestro 检出。init script 会核对该目标的真实 Git HEAD、版本目录和输出位置，因此不要求缓存与源码具有固定的父子目录关系。它只支持上面固定的 Maestro 基线及默认的 `maestro-cli/build/generated/simulator-server` 输出位置。
 
+在源码 fork 工程线上构建时，额外传入 `-Dmaestro.pinnedForkCommit=<完整提交 SHA>`。Gradle 会检查实际 HEAD 等于该提交，并检查它继承本仓固定的 Maestro 基线。升级基线时应一起核对上游锁和资源锁。
+
 每次构建会重新执行这些检查：
 
-1. 本仓上游锁与资源锁一致，目标检出的 HEAD 等于固定提交，`simulatorServer` 版本一致。
+1. 本仓上游锁与资源锁一致，目标 HEAD 等于固定基线或声明的 fork 提交，`simulatorServer` 版本一致。
 2. `SHA256SUMS` 的大小和 SHA-256 等于锁值，内容恰好覆盖三份指定归档。
 3. 三份归档的大小和 SHA-256 同时符合官方清单与本仓锁值。
 4. 解包视图中没有路径穿越或重复文件名，各平台包含预期的可执行文件。

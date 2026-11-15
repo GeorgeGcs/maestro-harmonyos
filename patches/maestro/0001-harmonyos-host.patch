@@ -396,7 +396,7 @@ index 15c5b42..b80acec 100644
  
      override fun call(): Int {
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
-index 064ff51dd020f13aef0805da2edb3b4f05767d5e..0ef15bad0033d8fe0aba4def859fa84dab4829b4 100644
+index 064ff51..0ef15ba 100644
 --- a/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/command/TestCommand.kt
 @@ -19,6 +19,7 @@
@@ -2431,7 +2431,7 @@ index 0000000..3ec5fe1
 +internal fun JsonNode.optionalText(name: String): String? = if (has(name)) requiredText(name) else null
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc93c1f56c90016ddd7fb03aab509e0805cbbadf
+index 0000000..cc93c1f
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsCliAgentReport.kt
 @@ -0,0 +1,427 @@
@@ -2864,7 +2864,7 @@ index 0000000000000000000000000000000000000000..cc93c1f56c90016ddd7fb03aab509e08
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..62a9d2392ac615a32a06b2cb94fb60c96727a893
+index 0000000..62a9d23
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsInteractiveRun.kt
 @@ -0,0 +1,51 @@
@@ -3767,7 +3767,7 @@ index ceab882..48cf6f9 100644
              }
          }
 diff --git a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
-index b79b1070ad2eb6f801c21b032737ae03b200d4a5..a2726e610afec99dd723a45085f5b7cdff3c473f 100644
+index b79b107..a2726e6 100644
 --- a/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/runner/TestSuiteInteractor.kt
 @@ -1,6 +1,7 @@
@@ -5767,10 +5767,10 @@ index 0000000..4baba89
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..9198dd3
+index 0000000..432fc7d
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,213 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -5855,6 +5855,11 @@ index 0000000..9198dd3
 +                    ?: throw CliError("MAESTRO_HARMONYOS_LAYOUT_RPC_PORT must be 1024..65535.")
 +            },
 +            layoutRpcDevice = environment["MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE"],
++            arkWebPort = environment["MAESTRO_HARMONYOS_ARKWEB_PORT"]?.let {
++                it.toIntOrNull()?.takeIf { port -> port in 1024..65535 }
++                    ?: throw CliError("MAESTRO_HARMONYOS_ARKWEB_PORT must be 1024..65535.")
++            },
++            arkWebBundle = environment["MAESTRO_HARMONYOS_ARKWEB_BUNDLE"],
 +            enableScreenRecording = when (val backend = environment["MAESTRO_HARMONYOS_RECORDING"]?.trim()) {
 +                null, "", "off" -> false
 +                "huawei-system" -> true
@@ -11472,7 +11477,7 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f61db44c7a85fc35a62450f253375c60b7967b8
+index 0000000..2ff9688
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 @@ -0,0 +1,434 @@
@@ -11519,7 +11524,7 @@ index 0000000000000000000000000000000000000000..4f61db44c7a85fc35a62450f253375c6
 +        config: HarmonyOSDriverConfig = HarmonyOSDriverConfig(),
 +    ) : this(HdcHarmonyOSDevice(deviceId, hdc, config.layoutRpcPort.also {
 +        require(it == null || deviceId == config.layoutRpcDevice) { "Layout RPC target differs from the selected device" }
-+    }), config)
++    }, config.arkWebPort, config.arkWebBundle), config)
 +
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
@@ -11978,10 +11983,10 @@ index 0000000..e5ed227
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..d74b873
+index 0000000..1f5d193
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,50 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -11999,10 +12004,15 @@ index 0000000..d74b873
 +    val recordingRetainMedia: Boolean = false,
 +    val layoutRpcPort: Int? = null,
 +    val layoutRpcDevice: String? = null,
++    val arkWebPort: Int? = null,
++    val arkWebBundle: String? = null,
 +) {
 +    init {
 +        require((layoutRpcPort == null) == (layoutRpcDevice == null)) { "Set both layout RPC port and target device" }
 +        layoutRpcPort?.let { require(it in 1024..65535) { "Layout RPC port must be 1024..65535" } }
++        require((arkWebPort == null) == (arkWebBundle == null)) { "Set both ArkWeb port and test bundle" }
++        arkWebPort?.let { require(it in 1024..65535) { "ArkWeb port must be 1024..65535" } }
++        arkWebBundle?.let { requireIdentifier(it, "ArkWeb bundle") }
 +        for (timeout in listOf(commandTimeout, settleTimeout, pollInterval)) {
 +            require(timeout >= Duration.ofMillis(1) && timeout <= Duration.ofMinutes(5)) {
 +                "HarmonyOS timeouts must be between 1 ms and 5 minutes"
@@ -12811,10 +12821,10 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf4c11f872
+index 0000000..1401fb5
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,293 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12826,6 +12836,7 @@ index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.layout.HierarchyReader
++import maestro.harmonyos.layout.ArkWebLoopback
 +import maestro.harmonyos.layout.LoopbackLayoutChannel
 +import maestro.harmonyos.layout.UitestLayoutException
 +import org.slf4j.LoggerFactory
@@ -12852,12 +12863,16 @@ index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf
 +    private val deviceId: String,
 +    private val hdc: HdcClient = HdcClient(),
 +    private val layoutPort: Int? = null,
++    private val arkWebPort: Int? = null,
++    private val arkWebBundle: String? = null,
 +) : HarmonyOSDevice {
 +    private var layoutChannel: LoopbackLayoutChannel? = null
++    private var reportedArkWebSource: String? = null
 +
 +    override fun disconnect() {
 +        layoutChannel?.close()
 +        layoutChannel = null
++        reportedArkWebSource = null
 +    }
 +    override fun connect() {
 +        hdc.selectDevice(deviceId)
@@ -12883,7 +12898,7 @@ index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf
 +            val rpcBudget = minOf(timeout.dividedBy(2), Duration.ofSeconds(2))
 +            if (rpcBudget >= Duration.ofMillis(1)) {
 +                try {
-+                    return channel.snapshot(rpcBudget)
++                    return enhanceArkWeb(channel.snapshot(rpcBudget), deadline, timeout)
 +                } catch (error: HdcException) {
 +                    disableLayoutRpc(channel, error)
 +                } catch (error: UitestLayoutException) {
@@ -12892,12 +12907,63 @@ index 0000000000000000000000000000000000000000..69dc0af49d6a5b85c31a85109578f1cf
 +            }
 +        }
 +        val budget = remainingBudget(deadline, timeout)
-+        return HierarchyReader(
++        val nativeTree = HierarchyReader(
 +            hdc, deviceId,
 +            commandTimeout = budget,
 +            cleanupTimeout = Duration.ofSeconds(2),
 +            totalTimeout = budget,
 +        ).read()
++        return enhanceArkWeb(nativeTree, deadline, timeout)
++    }
++
++    private fun enhanceArkWeb(nativeTree: TreeNode, deadline: Long, timeout: Duration): TreeNode {
++        val port = arkWebPort ?: return nativeTree
++        val bundle = arkWebBundle ?: return nativeTree
++        val webViews = mutableListOf<TreeNode>()
++        fun findWebViews(node: TreeNode, owner: String?) {
++            val actualOwner = node.attributes["bundleName"]?.takeIf { it.isNotBlank() } ?: owner
++            if (node.attributes["class"] == "Web" && actualOwner == bundle) webViews += node
++            node.children.forEach { findWebViews(it, actualOwner) }
++        }
++        findWebViews(nativeTree, null)
++        val webView = webViews.singleOrNull()
++        val bounds = webView?.attributes?.get("bounds")
++            ?.let { Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""").matchEntire(it) }
++            ?.groupValues?.drop(1)?.map(String::toInt)
++        if (webView == null || bounds == null) return arkWebFallback(nativeTree)
++
++        val dom = try {
++            val budget = minOf(remainingBudget(deadline, timeout), Duration.ofSeconds(3))
++            val webDeadline = System.nanoTime() + budget.toNanos()
++            val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, budget))
++            if (!pid.matches(Regex("[1-9][0-9]*")) ||
++                !hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, budget))) return arkWebFallback(nativeTree)
++            ArkWebLoopback(port).snapshot(bounds, remainingBudget(webDeadline, budget))
++        } catch (error: InterruptedException) {
++            Thread.currentThread().interrupt()
++            throw error
++        } catch (_: Exception) {
++            checkInterrupted()
++            null
++        } ?: return arkWebFallback(nativeTree)
++
++        reportArkWebSource("DOM")
++        fun merge(node: TreeNode): TreeNode = if (node === webView) {
++            node.copy(children = listOf(dom))
++        } else {
++            node.copy(children = node.children.map(::merge))
++        }
++        return merge(nativeTree)
++    }
++
++    private fun arkWebFallback(nativeTree: TreeNode): TreeNode {
++        reportArkWebSource("UITest")
++        return nativeTree
++    }
++
++    private fun reportArkWebSource(source: String) {
++        if (source != reportedArkWebSource) logger.info("ArkWeb hierarchy source: {}", source)
++        reportedArkWebSource = source
 +    }
 +
 +    private fun hasLayoutForward(port: Int, timeout: Duration): Boolean = try {
@@ -14886,7 +14952,7 @@ index 0000000..c460847
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..03e0f60cdb3c4296fa99aa890161b6c17fdc6511
+index 0000000..03e0f60
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 @@ -0,0 +1,151 @@
@@ -15043,10 +15109,10 @@ index 0000000000000000000000000000000000000000..03e0f60cdb3c4296fa99aa890161b6c1
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..8bffb1e41150fc04e8c4589ca8697283c0856949
+index 0000000..a7726c5
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,269 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -15118,6 +15184,13 @@ index 0000000000000000000000000000000000000000..8bffb1e41150fc04e8c4589ca8697283
 +        val result = execute(listOf("fport", "ls"), timeout, category = HdcCommandCategory.LAYOUT_FORWARD_LIST)
 +        if (result.stderr.isNotBlank()) throw HdcException("HDC forward listing returned diagnostics")
 +        return matchesUitestLayoutForward(result.stdout, deviceId, port)
++    }
++
++    internal fun hasArkWebForward(deviceId: String, port: Int, pid: String, timeout: Duration): Boolean {
++        validateDeviceId(deviceId)
++        val result = execute(listOf("fport", "ls"), timeout, category = HdcCommandCategory.LAYOUT_FORWARD_LIST)
++        if (result.stderr.isNotBlank()) throw HdcException("HDC forward listing returned diagnostics")
++        return matchesForward(result.stdout, deviceId, port, "localabstract:webview_devtools_remote_$pid")
 +    }
 +
 +    /**
@@ -15278,10 +15351,14 @@ index 0000000000000000000000000000000000000000..8bffb1e41150fc04e8c4589ca8697283
 +        private fun hasHdcFailure(output: String): Boolean = hdcFailurePattern.containsMatchIn(output)
 +
 +        internal fun matchesUitestLayoutForward(output: String, deviceId: String, port: Int): Boolean {
++            return matchesForward(output, deviceId, port, "localabstract:uitest_socket")
++        }
++
++        private fun matchesForward(output: String, deviceId: String, port: Int, remote: String): Boolean {
 +            val local = "tcp:$port"
 +            val matching = output.lineSequence().map { it.trim().split(Regex("\\s+")) }
 +                .filter { it.getOrNull(1) == local }.toList()
-+            return matching == listOf(listOf(deviceId, local, "localabstract:uitest_socket", "[Forward]"))
++            return matching == listOf(listOf(deviceId, local, remote, "[Forward]"))
 +        }
 +
 +        internal fun parseDeviceList(output: String): List<String> {
@@ -15650,6 +15727,99 @@ index 0000000..a733559
 +        }.getOrDefault(true)
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
+new file mode 100644
+index 0000000..c98aa93
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
+@@ -0,0 +1,87 @@
++package maestro.harmonyos.layout
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.TreeNode
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import okhttp3.Response
++import okhttp3.WebSocket
++import okhttp3.WebSocketListener
++import java.net.Proxy
++import java.net.URI
++import java.time.Duration
++import java.util.concurrent.CompletableFuture
++import java.util.concurrent.TimeUnit
++
++/** Reads a test WebView through an already configured, device-verified HDC forward. */
++internal class ArkWebLoopback(private val port: Int) {
++    private val endpoint = "127.0.0.1:$port"
++
++    fun snapshot(bounds: List<Int>, timeout: Duration): TreeNode? {
++        val started = System.nanoTime()
++        val budgetMs = timeout.toMillis().coerceAtLeast(1)
++        val request = Request.Builder().url("http://$endpoint/json/list").build()
++        val call = client.newCall(request)
++        call.timeout().timeout(budgetMs, TimeUnit.MILLISECONDS)
++        val path = call.execute().use { response ->
++            if (!response.isSuccessful) return null
++            val body = response.peekBody(MAX_JSON_BYTES + 1).string()
++            if (body.length > MAX_JSON_BYTES) return null
++            val targets = json.readTree(body)
++            if (!targets.isArray) return null
++            val page = targets.filter { it.path("type").asText() == "page" }.singleOrNull() ?: return null
++            val uri = URI(page.path("webSocketDebuggerUrl").asText())
++            uri.rawPath?.takeIf { uri.scheme == "ws" && uri.port == port &&
++                uri.host in setOf("localhost", "127.0.0.1") &&
++                it.matches(Regex("/devtools/page/[A-Za-z0-9_-]+")) } ?: return null
++        }
++
++        val (left, top, right, bottom) = bounds
++        val expression = "$script; maestro.viewportX = $left; maestro.viewportY = $top;" +
++            " maestro.viewportWidth = ${right - left}; maestro.viewportHeight = ${bottom - top};" +
++            " JSON.stringify(window.maestro.getContentDescription(), window.maestro.cycleSafeReplacer());"
++        val payload = json.writeValueAsString(mapOf("id" to 1, "method" to "Runtime.evaluate",
++            "params" to mapOf("expression" to expression, "returnByValue" to true)))
++        val result = CompletableFuture<String>()
++        val socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), object : WebSocketListener() {
++            override fun onOpen(webSocket: WebSocket, response: Response) {
++                if (!webSocket.send(payload)) result.completeExceptionally(IllegalStateException("Could not send ArkWeb snapshot request"))
++            }
++
++            override fun onMessage(webSocket: WebSocket, text: String) {
++                if (text.length > MAX_JSON_BYTES) {
++                    result.completeExceptionally(IllegalStateException("ArkWeb snapshot exceeds size limit"))
++                    return
++                }
++                try {
++                    val message = json.readTree(text)
++                    if (message.path("id").asInt() == 1) {
++                        result.complete(message.path("result").path("result").path("value").asText())
++                    }
++                } catch (error: Exception) {
++                    result.completeExceptionally(error)
++                }
++            }
++
++            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
++                result.completeExceptionally(t)
++            }
++        })
++        return try {
++            val remainingMs = (budgetMs - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)).coerceAtLeast(1)
++            val snapshot = result.get(remainingMs, TimeUnit.MILLISECONDS)
++            if (snapshot.isEmpty() || snapshot == "null") null else json.readValue(snapshot, TreeNode::class.java)
++        } finally {
++            socket.cancel()
++        }
++    }
++
++    private companion object {
++        const val MAX_JSON_BYTES = 4L * 1024 * 1024
++        val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).build()
++        val json = jacksonObjectMapper()
++        val script: String by lazy {
++            requireNotNull(ArkWebLoopback::class.java.getResourceAsStream("/maestro-web.js")).bufferedReader().use { it.readText() }
++        }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/HierarchyReader.kt
 new file mode 100644
 index 0000000..ec58193
@@ -15821,7 +15991,7 @@ index 0000000..ec58193
 +class HierarchyReadException(message: String, cause: Throwable? = null) : HdcException(message, cause)
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..45454ab9a7027ae6fa3b151ce94935d252268168
+index 0000000..45454ab
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/LoopbackLayoutChannel.kt
 @@ -0,0 +1,135 @@
@@ -22262,7 +22432,7 @@ index 0000000..503a66d
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
 new file mode 100644
-index 0000000000000000000000000000000000000000..189f57e2120a357904af64dfe360f41f9fb0e325
+index 0000000..189f57e
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
 @@ -0,0 +1,98 @@

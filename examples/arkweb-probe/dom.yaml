@@ -1,0 +1,17 @@
+appId: ohos.samples.componentcollection
+name: component-collection-arkweb-dom
+---
+- assertVisible: ArkUI 对照标题
+- assertVisible:
+    id: '^sample$'
+- tapOn:
+    id: '^sample$'
+    retryTapIfNoChange: false
+- inputText: maestro22
+- tapOn:
+    id: '^confirm$'
+    retryTapIfNoChange: false
+- assertVisible:
+    id: '^result$'
+    text: 已确认 maestro22
+- takeScreenshot: component-collection-arkweb-dom
