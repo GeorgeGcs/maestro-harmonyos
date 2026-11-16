@@ -168,15 +168,46 @@
       const evidence = event.data;
       const panel = element('stepEvidence');
       panel.hidden = evidence.type === 'clearEvidence';
+      element('evidenceHeading').textContent = evidence.stepLabel ? `步骤证据 · ${evidence.stepLabel}` : '步骤证据';
       element('evidenceReason').textContent = evidence.reason || (evidence.links?.length ? '' : '本步骤暂无可用产物。');
+      const timing = element('evidenceTiming');
+      timing.hidden = !Number.isSafeInteger(evidence.elapsedMs);
+      timing.textContent = timing.hidden ? '' : `步骤耗时 ${(evidence.elapsedMs / 1000).toFixed(2)} 秒`;
+      const waits = element('evidenceWaits');
+      waits.replaceChildren();
+      for (const wait of evidence.elementWaits || []) {
+        const item = document.createElement('li');
+        const condition = wait.condition === 'visible' ? '等待控件出现' : '等待控件消失';
+        const result = wait.satisfied ? '条件满足' : '条件未满足';
+        item.textContent = `${condition} · ${result} · 实际 ${wait.elapsedMs} ms / 查询预算 ${wait.budgetMs} ms`;
+        waits.append(item);
+      }
+      waits.hidden = !waits.childElementCount;
+      const faults = element('evidenceFaults');
+      faults.replaceChildren();
+      for (const fault of evidence.faultSummaries || []) {
+        const item = document.createElement('li');
+        item.textContent = fault;
+        faults.append(item);
+      }
+      faults.hidden = !faults.childElementCount;
       element('evidenceSource').textContent = evidence.source || '';
       element('evidenceSource').hidden = !evidence.source;
       element('evidenceLog').textContent = evidence.log || '';
       element('evidenceLog').hidden = !evidence.log;
-      const image = element('evidenceImage');
-      image.hidden = !evidence.image;
-      if (evidence.image) image.src = evidence.image;
-      else image.removeAttribute('src');
+      const gallery = element('evidenceImages');
+      gallery.replaceChildren();
+      for (const item of evidence.images || []) {
+        const frame = document.createElement('figure');
+        const image = document.createElement('img');
+        image.src = item.image;
+        image.alt = item.label;
+        const caption = document.createElement('figcaption');
+        caption.textContent = item.label;
+        frame.append(image, caption);
+        gallery.append(frame);
+      }
+      gallery.hidden = !gallery.childElementCount;
       const links = element('evidenceLinks');
       links.replaceChildren();
       for (const [index, label] of (evidence.links || []).entries()) {

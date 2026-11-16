@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="maestro-webview-id" content="probe-secondary">
+  <title>ArkWeb 第二个页面</title>
+</head>
+<body>
+  <button id="secondary-counter" type="button">计数：0</button>
+  <script>
+    const counter = document.querySelector('#secondary-counter');
+    let count = 0;
+    counter.addEventListener('click', () => {
+      count += 1;
+      counter.textContent = `计数：${count}`;
+    });
+  </script>
+</body>
+</html>

@@ -1,5 +1,7 @@
 # Maestro HarmonyOS
 
+[新版演示入口](docs/demo.md) · [v0.1.3 发行说明](docs/releases/0.1.3.md) · [GitCode 发行页](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
+
 **用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
 工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
@@ -69,7 +71,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 各阶段的显式截图均成功保存。最终构建的四轮均使用 RPC 取树和查询尺寸，ArkWeb 测试结束后恢复了原 HAP 并移除了转发。以上为源码构建的短用例数据，完整套件的稳定性记录见前文。
 
-RPC 需要使用包含该功能的源码构建，并在测试设备上准备 UITest 服务和转发。默认使用 HDC，转发缺失或 RPC 取树失败时回退到 HDC。[配置步骤](docs/setup.md#启用-rpc-取树)
+测试设备已有受支持的 UITest 服务时，CLI 能自动建立并回收本次 RPC 转发。也可以显式指定转发，连接或读取失败时由 HDC 继续取树。[配置步骤](docs/setup.md#rpc-取树)
 
 ## 背景与用途
 
@@ -184,10 +186,10 @@ node examples/agent-client/run.mjs `
 | --- | --- |
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和通用 Windows CI 入口。首次与重试后的最终结果分别记录。 |
-| VS Code 辅助编写 | 提供代码片段、截图与控件树选择、真机触摸录制和 UITest 记录导入。检查器可预览 ID 或文字候选在面板控件树中的匹配数量，并复制唯一匹配的选择器。生成的标准 Maestro YAML 可在插件内检查语法和回放。仅首个触摸事件有录制前的控件树，后续点击及离线导入的选择器需结合页面核对。 |
-| 视频与会话恢复 | 视频录屏默认关闭，Huawei 系统录屏仍为实验功能；完整场景三段原片均完整解码通过。长场景可使用[分段入口](examples/hmos-code-lab/flows/recorded-suite/README.md)。已确认锁屏拒绝、且未产生采集与媒体的旧资源可受控恢复；其他未知状态仍须逐案核查。 |
+| VS Code 辅助编写 | 支持截图与控件树点选、真机触摸录制和 UITest 记录导入。点击优先使用经同次录制控件树核对的唯一 ID 或文本，证据不足时生成坐标供核对。生成的标准 Maestro YAML 可在插件内校验和回放，运行面板可查看当前行、各次重试和对应的失败证据。 |
+| 视频与会话恢复 | 录屏默认关闭。启用主机录像时，VS Code 预览与录屏复用截图通道。Huawei 系统录屏仍支持[分段执行](examples/hmos-code-lab/flows/recorded-suite/README.md)，已有完整场景三段原片解码记录。会话异常后的设备释放仍按原会话和资源凭据核验。 |
 
-每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。目前本仓不提供 HAP 安装、权限修改、清除应用数据、Studio、内置 MCP 服务、多设备分片或云端运行；面向 Agent 的 MCP 服务由上述鸿测项目提供。
+每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。HAP 安装、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
 历史发行版 [v0.1.1](docs/releases/0.1.1.md)来自源码 `2d5bfaeb`；当前 [v0.1.2](docs/releases/0.1.2.md)来自 `75470f36`，在独立目录构建，复用声明的依赖缓存和已校验资源，没有复制旧编译产物。新包已完成主机核验、实际包单轮及同版 CLI 平板 20 轮验证。各批结果保留对应的源码、文件摘要和设备范围；后续文档提交不改变安装包的源码标识。
 

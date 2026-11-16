@@ -66,8 +66,8 @@ $maestroCli = Join-Path (Get-Location) '.upstream/maestro/maestro-cli/build/inst
 ```powershell
 # HDC 已在 PATH 时使用此值；也可设为本机 hdc.exe 的完整路径。
 $env:MAESTRO_HARMONYOS_HDC = 'hdc'
-# 按目标应用的 module.json5 设置，不会自动猜测启动 Ability。
-$env:MAESTRO_HARMONYOS_ABILITY = 'EntryAbility'
+# 若要显式选择启动 Ability，可按目标应用的 module.json5 设置：
+# $env:MAESTRO_HARMONYOS_ABILITY = 'EntryAbility'
 # 仅在启动需要指定模块时设置：
 # $env:MAESTRO_HARMONYOS_MODULE = 'entry'
 
@@ -77,7 +77,7 @@ $env:MAESTRO_HARMONYOS_ABILITY = 'EntryAbility'
 
 只有一台 HDC 设备时自动选择；多台设备时必须指定 `--device '<HDC target>'`，例如放在 `hierarchy` 或 `test` 前。同一设备已有 Maestro 会话时，新会话会报错。设备列表查询不操作页面；`hierarchy` 会读取布局和截图以确认设备可用。
 
-应用包名通过 YAML 的 `appId` 提供，与 `MAESTRO_HARMONYOS_ABILITY`、可选的 `MAESTRO_HARMONYOS_MODULE` 一起用于 `aa start`。默认 `launchApp` 会先停止应用，但不清除应用数据，也不自动修改已有权限。首次授权弹窗需在运行流程前处理好。
+CLI 从 YAML 的 `appId` 读取包名。省略启动 Ability 时，CLI 会在已安装应用的包信息中查找唯一入口模块的主 Ability；设置 `MAESTRO_HARMONYOS_MODULE` 可限定模块。包信息不足或入口不唯一时，请用 `MAESTRO_HARMONYOS_ABILITY` 或运行脚本的 `-AbilityName` 显式指定。默认 `launchApp` 会先停止应用，但不清除应用数据，也不自动修改已有权限。首次授权弹窗需在运行流程前处理好。
 
 运行前解锁手机。长时间测试可在自有测试应用的主窗口调用 `setWindowKeepScreenOn(true)`，退到后台时恢复为 `false`。常亮不代替解锁，也不会阻止手动按电源键锁屏。
 
@@ -121,7 +121,7 @@ Get-ChildItem ./artifacts -Recurse -Filter '*.log' |
 
 ## VSCode 操作录制
 
-插件 0.1.0 位于 `packages/vscode`。先构建包含本轮桥接补丁的 CLI，再在插件目录执行 `npm ci --ignore-scripts` 和 `npm run package`，得到 `dist/maestro-harmonyos-recorder-0.1.0.vsix`。在 VSCode 扩展视图选择“从 VSIX 安装”。安装包不包含 JDK、HDC 或 Maestro 分发包。
+插件位于 `packages/vscode`。先构建已应用鸿蒙补丁的 CLI，再在插件目录执行 `npm ci --ignore-scripts` 和 `npm run package`，得到 `dist/maestro-harmonyos-recorder-0.1.2.vsix`。在 VS Code 扩展视图选择“从 VSIX 安装”。JDK、HDC 和 Maestro 分发包需单独配置。
 
 在可信任的本地工作区配置 `harmonyosRecorder.cliDirectory`、`javaPath`、`hdcPath`，从命令面板执行“**HarmonyOS: 打开流程录制**”。扩展不会运行 `config.local.ps1`，已经打开的 VSCode 也不会自动取得后来在终端加载的环境变量；此时在插件设置中填写工具路径。
 
@@ -133,7 +133,22 @@ Get-ChildItem ./artifacts -Recurse -Filter '*.log' |
 
 ## 视频录屏
 
-[recording-smoke.yaml](../examples/flows/recording-smoke.yaml) 使用标准 `startRecording` 和 `stopRecording`。目前提供实验性的 Huawei 系统录屏后端，需要显式开启：
+[recording-smoke.yaml](../examples/flows/recording-smoke.yaml) 使用标准 `startRecording` 和 `stopRecording`。先按用途选择录屏后端。
+
+### 主机录屏
+
+将 `MAESTRO_HARMONYOS_RECORDING` 设为 `host-frames`，并将 `MAESTRO_HARMONYOS_FFMPEG` 设为可执行 FFmpeg 的绝对路径。VS Code 用户也可在本机用户设置填写 `harmonyosRecorder.hostRecordingFfmpeg`。
+
+```powershell
+$env:MAESTRO_HARMONYOS_RECORDING = 'host-frames'
+$env:MAESTRO_HARMONYOS_FFMPEG = 'C:/tools/ffmpeg/bin/ffmpeg.exe'
+```
+
+采集使用设备截图。打开 VS Code 预览时，预览与录像复用同一条采集通道，并优先复用 Flow 已取得的画面。预览至少间隔两秒，后台最多每 500 ms 尝试采一帧，设备操作优先。录制保留帧的实际时间间隔，以 H.264 编码生成无声 MP4。主机端在停止时编码并校验 MP4 结构。[FFmpeg 拼接与时间戳说明](https://ffmpeg.org/ffmpeg-formats.html#concat)
+
+主机录像沿用 180 秒录制时长和 512 MiB 上限，时长可用 `MAESTRO_HARMONYOS_RECORDING_MAX_SECONDS` 调整。采样间隔受设备截图速度影响，适合回归证据和故障回看。需要系统帧率或音轨时可以使用 Huawei 系统录屏。
+
+### Huawei 系统录屏
 
 ```powershell
 $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
@@ -181,16 +196,24 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 | 操作录制辅助 | VSCode 截图与控件树点选，执行动作后生成标准 YAML，保存并通过 CLI 回放；仅记录插件内操作 |
 | 逐台验证 | 显式设备列表、计划轮次、独立产物及 JSON/Markdown 汇总；已有单设备实测 |
 | 视频录屏 | 可选 Huawei 系统录屏后端；显式开启，按本次唯一文件导出和清理 |
-| 尚未支持 | HAP 安装、权限修改、`clearState`、`hideKeyboard`、深链接、媒体导入、位置/方向/代理等系统设置 |
+| 深链接 | `openLink` 由系统解析 URI。API 22 模拟器已验证自定义 URI 及查询参数。 |
+| 实验性 | `addMedia` 需要图库和 `mediatool`。`setOrientation` 需要提供旋转接口的 UITest RPC。`clearState` 和 `launchApp.clearState` 需要普通应用且包信息确认用户数据可清除。详见[命令支持范围](user-guide.md#当前支持范围)。 |
+| 尚未支持 | HAP 安装、权限修改、`hideKeyboard`、位置及代理设置 |
 | 尚未接入 | Studio、MCP、自动启动设备、多设备分片和云端运行 |
 
 `back` 是设备返回键，不能保证在所有应用中都等同于关闭键盘。UITest 的文本输入、布局可见范围和滑动行为可能因系统版本或控件而不同；滑动时长通过速度近似换算。主机模拟测试不能证明这些行为在手机上可用。
 
 按[测试计划与验证记录](acceptance.md)分别记录插件录制回放、视频录屏和设备兼容结果。早期插件 0.1.0 已在 VSCode 1.140 和 API 26 手机完成 8 步录制、保存及一键回放；此前 `728859cb` 交付版又通过真实 VSCode 的断言、截图两步保存与回放检查，插件的第二台设备验证仍待补。HMOS 完整套件已完成固定版本 20/20 轮首次通过；本批录屏关闭，历史视频尾部解码问题仍待定位。
 
-## 启用 RPC 取树
+## RPC 取树
 
-使用包含 RPC 取树及回退逻辑的源码构建。先在专用测试设备上准备支持 `captureLayout` 的 UITest 服务。已验证环境为 HarmonyOS 7 平板、UITest `7.0.0.1`，配套 agent 来自固定版本的 DevEco CLI。服务应由测试环境提供并保持在线。确认设备序列号，并选择一个空闲本机端口。下例中的 `$device`、`$port`、`$hdc` 和 `$cli` 分别是设备序列号、端口号、HDC 路径和 Maestro CLI 路径。
+CLI 和 VS Code 默认在所选设备上检查 UITest 的 `@uitest_socket` 监听。存在监听时，Maestro 登记并建立一个本机 HDC 转发，经 `captureLayout` 读取节点。服务未运行、转发不可用或 RPC 读取失败时，继续使用 HDC 取树。自动模式由设备会话负责核对和移除本次建立的转发。可设置 `MAESTRO_HARMONYOS_LAYOUT_RPC_AUTO=false` 跳过自动探测。
+
+### 显式指定转发
+
+使用包含 RPC 取树及回退逻辑的源码构建。先在专用测试设备上准备支持 `captureLayout` 的 UITest 服务。HarmonyOS 7 平板已验证固定版本 DevEco CLI 配套的 UITest `7.0.0.1`。`setOrientation` 另外要求 RPC 后端提供 `Driver.getDisplayRotation` 和 `Driver.setDisplayRotation`，并让支持旋转的应用页面保持前台。API 26 手机已用 DevEco Testing Hypium 6.1.0.210 配套的代理验证横屏及恢复。服务由测试环境提供并保持在线。[DevEco Testing Hypium](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/hypium-python-guidelines/) · [UITest 旋转接口](https://developer.huawei.com/consumer/en/doc/harmonyos-references/js-apis-uitest/)
+
+确认设备序列号，并选择一个空闲本机端口。下例中的 `$device`、`$port`、`$hdc` 和 `$cli` 分别是设备序列号、端口号、HDC 路径和 Maestro CLI 路径。
 
 ```powershell
 $local = "tcp:$port"

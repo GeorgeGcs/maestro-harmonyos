@@ -1,0 +1,15 @@
+appId: ohos.samples.componentcollection
+name: component-collection-arkweb-secondary
+---
+- assertVisible: ArkWeb 双页面
+- assertVisible:
+    id: '^secondary-counter$'
+    text: '计数：0'
+- assertNotVisible:
+    id: '^sample$'
+- tapOn:
+    id: '^secondary-counter$'
+    retryTapIfNoChange: false
+- assertVisible:
+    id: '^secondary-counter$'
+    text: '计数：1'

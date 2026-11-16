@@ -101,6 +101,9 @@
             },
             "error": {
               "$ref": "#/$defs/error"
+            },
+            "elementWaits": {
+              "$ref": "#/$defs/elementWaits"
             }
           }
         }
@@ -128,6 +131,9 @@
             },
             "error": {
               "$ref": "#/$defs/error"
+            },
+            "elementWaits": {
+              "$ref": "#/$defs/elementWaits"
             }
           }
         }
@@ -370,6 +376,22 @@
     }
   ],
   "$defs": {
+    "elementWaits": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["condition", "budgetMs", "elapsedMs", "satisfied"],
+        "properties": {
+          "condition": { "enum": ["visible", "notVisible"] },
+          "budgetMs": { "type": "integer", "minimum": 0 },
+          "elapsedMs": { "type": "integer", "minimum": 0 },
+          "satisfied": { "type": "boolean" }
+        }
+      }
+    },
     "retryFrame": {
       "type": "object",
       "additionalProperties": false,

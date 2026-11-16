@@ -10,6 +10,14 @@ DOM 用例直接按 HTML ID 操作输入框和按钮。CLI 会检查绑定是否
 
 HDC 转发由调用方建立和移除。运行后核对对应规则与监听端口，避免影响同一主机上其他应用的转发。
 
+## 两个 WebView
+
+用 `MultiIndex.ets` 替换调试副本的 `Index.ets`，同时复制两个 HTML 资源。两个 WebView 分别设置 `.id('probe-primary')` 和 `.id('probe-secondary')`，各自的 HTML 用 `<meta name="maestro-webview-id">` 声明对应的 ID。
+
+应用开启调试后，从 `http://127.0.0.1:<端口>/json/list` 读取目标页面的完整 `url`。将 `MAESTRO_HARMONYOS_ARKWEB_WEBVIEW_ID` 设为 `probe-secondary`，将 `MAESTRO_HARMONYOS_ARKWEB_PAGE_URL` 设为 `probe-secondary.html` 对应的完整 URL，再运行 `dom-secondary.yaml`。CLI 按应用、原生节点 ID 和页面 URL 定位，并核对页面对自身 WebView ID 的声明。页面可以通过这些显式配置切换。
+
+查不到唯一节点或页面、页面标记不匹配、设备转发失效时，CLI 使用 UITest 树。省略两个选择字段时仍可用单 WebView 自动选择。关闭应用的 ArkWeb 调试或省略 ArkWeb 转发配置即可使用原生路径。
+
 执行期间可在五秒内复用已经验证的页面连接。每次查询仍读取新的 DOM。应用启停、窗口切换、连接关闭或查询失败会断开连接。再次连接前会重新核对目标设备、应用进程及转发。
 
 2026 年 11 月 15 日，Windows 上的 HarmonyOS API 22 模拟器通过两条用例。开启调试时，按 HTML ID 完成输入、提交和断言，约 46 秒。重启应用后保持调试关闭，按 UITest 文本选择器通过同一交互，约 45 秒。两条用例各保存一张截图。测试结束后移除了本次转发并恢复原样例 HAP。

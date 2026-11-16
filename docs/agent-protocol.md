@@ -79,6 +79,8 @@ v1 的字段、枚举和语义保持固定。新增字段或枚举时更新 Sche
 
 `preflight` 针对明确设备及请求命令做只读检查，例如连接、目标应用、所需工具和当前会话占用。禁止为预检启动应用、点击、输入、解锁、修改权限或启动录屏。
 
+`openLink` 由系统分发 URI。`addMedia` 的只读预检查询 `mediatool`，图库写入和索引结果在执行时核对。`setOrientation` 需要读取设备的 UITest RPC 旋转状态。`clearState` 预检通过包信息确认目标是用户数据可清除的普通应用，实际清理仍由系统执行。命令限制见[使用指南](user-guide.md#当前支持范围)。
+
 | 检查状态 | 含义 |
 | --- | --- |
 | `passed` | 本次检查明确满足该条件 |
@@ -246,7 +248,7 @@ sequenceDiagram
 | --- | --- | --- |
 | `agent.describe` | `{schemaVersion?}` | `capabilities`；首条请求省略版本时选 v1，显式 `2` 协商 v2，之后不能切换 |
 | `agent.preflight` | `{deviceId,commands,appId?,abilityName?,moduleName?}` | `preflight`，`commands` 必须非空；按请求范围只读检查 |
-| `agent.connect` | `{deviceId,appId,abilityName,moduleName?,artifactsDir}` | `session`；使用与原录制器相同的设备锁，显式目标，不自动换设备 |
+| `agent.connect` | `{deviceId,appId,abilityName?,moduleName?,artifactsDir}` | `session`；与录制器共用设备锁。省略 Ability 时，启动动作根据所选设备的应用元数据解析主 Ability |
 | `agent.session` | `{sessionId}` | `session`，执行期间也能读取 |
 | `agent.snapshot` | `{sessionId}` | `snapshot`，包含 `sessionId` 及原录制快照的图片、尺寸、节点和 `snapshotId`；不生成动作尝试 |
 | `agent.action` | `{sessionId,runId,attemptId,attemptNo,action}` | `runResult`；登记后立即返回当前状态，不等待动作结束；`action` 使用原录制器七类动作及参数 |

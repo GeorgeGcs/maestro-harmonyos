@@ -161,6 +161,25 @@ pwsh -NoProfile -File scripts/ci/run-device-suite.ps1 `
 
 占用记录保存启动该作业的 PowerShell 进程身份。建议始终使用 `pwsh -File` 启动独立进程；在长期存活的交互 PowerShell 中直接 `&` 调用后，该主机进程仍存活，会阻止旧作业的自动核销。
 
+## 从设备清单选择
+
+照常使用 `-DeviceId` 即可指定设备。需要按设备条件选取时，在运行主机本地维护设备清单，并将清单路径通过 `-DeviceInventory` 传入。清单顺序决定优先级，可以用 `-DeviceKind`、`-DeviceSystem`、`-MinDeviceApi` 和 `-MaxDeviceApi` 筛选。
+
+```json
+{
+  "schemaVersion": 1,
+  "devices": [
+    {"id": "REPLACE_WITH_LOCAL_TARGET", "kind": "phone", "system": "harmonyos", "api": 26}
+  ]
+}
+```
+
+`kind` 可用 `phone`、`tablet`、`emulator`，`system` 可用 `harmonyos`、`openharmony`。选取时核对 HDC 连接、设备系统和 API、Maestro 会话锁及 CI 持久状态。设备上相关属性无法识别时，仍可显式指定已核对的设备。使用 `-DeviceWaitSeconds` 为等待留出预算，最多 120 秒。选中后，现有 CI 预留与执行核验照常生效。
+
+CI 和鸿测 Worker 在同一主机账号下运行时，指向同一个已创建的 `DeviceStateDirectory`。鸿测在本机配置中设置 `device_state_directory`，显式选设备也会读取这个目录。使用自动选取时，另配置 `device_pool` 并在任务能力查询传入 `target_id=pool`。设备选择后按该设备的指纹审批；CLI 在获得会话锁后再次核对有效占用。恢复仍按下文的两层状态处理。
+
+使用 `scripts/ci/run-device-job.ps1` 时，可以通过 `MAESTRO_CI_DEVICE_INVENTORY` 和对应的 `MAESTRO_CI_DEVICE_KIND`、`MAESTRO_CI_DEVICE_SYSTEM`、`MAESTRO_CI_MIN_DEVICE_API`、`MAESTRO_CI_MAX_DEVICE_API`、`MAESTRO_CI_DEVICE_WAIT_SECONDS` 设定同样的条件。
+
 ## 时间上限和硬终止
 
 通用入口要求 `-RunTimeoutSeconds`。可选参数：

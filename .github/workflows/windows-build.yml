@@ -2,7 +2,7 @@ name: Windows build and host tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'verify/**']
   pull_request:
     branches: [main]
   workflow_dispatch:

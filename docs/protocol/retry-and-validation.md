@@ -21,7 +21,11 @@
 
 步骤由 `stepStarted` 和 `stepFinished` / `stepInterrupted` 配对。`stepId` 沿用 agent v1 步骤身份，`executionSequence` 标识实际执行实例；重复调用同一子 Flow 或重试同一源码会产生不同实例。`commandIndex` 和 `sourceOffset` 是源码位置，不能当执行次数。生成步骤可没有源码，字段保留为 null。
 
+鸿蒙可见性断言的结束记录可带 `elementWaits`。每项记录可见或不可见条件、交给查询循环的 `budgetMs`、该检查实际经过的 `elapsedMs` 和条件是否满足。实际耗时包含设备查询及查询失败时读取布局的时间。计算剩余查询预算时，排除交互模式为步骤补拍截图的耗时。步骤总耗时可由开始和结束事件的单调时间计算，其中还包含同一步骤内的其他工作。
+
 `retryContext` 是从外到内的栈，每帧含 `retryInvocationId`、`retryCommandStepId`、`tryNo`。`parentExecutionSequence` 记录调用关系，`flowScopeOwner` 与 `phase` 区分 body、setup、onFlowStart、onFlowComplete。`commandOptional`、`selectorOptional` 和 `optionalAncestorSequences` 保留可选上下文。
+
+鸿蒙故障诊断结果可作为 Flow 附件 `harmonyos-faults.json` 出现在 agent v1 证据索引。附件协议为 `maestro.harmonyos.fault-report`，版本为 1，包含 run、attempt、Flow 身份、目标应用、查询状态（`complete`、`timedOut`、`unavailable`）和事件明细。CLI 与 VS Code 使用同一个附件。只有系统提供故障实际发生时刻，且校准后的时间范围完整落在唯一执行步骤内，才填写该事件的 `stepId`、`executionSequence` 和 `retryContext`。其余事件保留 Flow 归属。这是时间关联，步骤原始错误仍由对应的步骤结果记录。
 
 重试块包含 `retryBlockStarted`、每次 `retryTryStarted` / `retryTryFinished`、可能的 `retryScheduled`，最后以 `retryBlockFinished` 收尾。重试是同一 CLI attempt 内的活动，不新分配 `attemptId`。步骤结果保留 Maestro 的 Completed、Failed、Warned、Skipped；中断使用独立事件，`outcome=null`。这与 agent v1 把 Warned/Skipped 都映射为 skipped 的表示不同。
 

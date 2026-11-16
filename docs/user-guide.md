@@ -21,7 +21,7 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 
 ## 安装方式和前置条件
 
-首次使用可下载已发布的 **CLI、VSIX 或便携包**，按 [v0.1.1 安装说明](releases/0.1.1.md)校验文件并配置工具。便携包包含源码、脚本和 CLI，从包内 `source` 运行脚本时用 `-CliDir ../cli` 指定随包分发。
+首次使用可下载已发布的 **CLI、VSIX 或便携包**，按 [v0.1.2 安装说明](releases/0.1.2.md)校验文件并配置工具。便携包包含源码、脚本和 CLI，从包内 `source` 运行脚本时用 `-CliDir ../cli` 指定随包分发。
 
 需要开发或自行构建时，按下文获取固定 Maestro 上游版本、应用适配补丁，再构建 CLI 与 VSIX。下文构建步骤及默认 CLI 路径按源码工作区编写。仅安装普通 Maestro 分发包不能替代本项目的适配版本。
 
@@ -169,7 +169,7 @@ try {
 }
 ```
 
-在 VSCode 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist/maestro-harmonyos-recorder-0.1.1.vsix`；使用发布包时选择带源码提交号的对应 VSIX。随后打开本地工作区并信任该工作区。
+在 VS Code 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist/maestro-harmonyos-recorder-0.1.2.vsix`。使用发行包时选择带源码提交号的对应 VSIX。随后打开本地工作区并信任该工作区。
 
 ### 2. 配置工具和应用
 
@@ -299,12 +299,16 @@ CI 分别报告原生 `execution`、设备 `released` 和 `quality.status`。质
 | 单设备批量、逐台汇总 | 单设备批量、逐台工具单设备验证及第二台平板单页验证已有记录 | 多设备完整批次与多轮稳定性测试未完成；不支持多设备分片 |
 | retry 追踪、固定验证计划 | 独立 v2 trace 关联实际来源、步骤与尝试；已有开发场景验证 | 首次和最终通过分别统计，缺证据不算覆盖；不是正式稳定性结论 |
 | 通用 CI 入口 | v2 固定输入、真实静态解析及 JUnit 核对，已有本机真机冒烟 | 尚未接入实际 CI 平台；构建观察不证明源码与二进制对应 |
-| VSCode 操作录制 | 0.1.0；真实面板 8 步操作、保存与 CLI 回放已在单台通过 | 只记录插件发出的操作；按动作刷新截图，旋转后重连 |
+| VS Code 操作录制 | 支持面板点选和设备触摸录制。API 22 模拟器上生成三条 ID 定位，保存并回放通过。 | 根据动作对应的树校验选择器。缺少证据时使用坐标并提示核对，旋转后重新连接。 |
 | `startRecording`、`stopRecording` | 实验性 Huawei 系统录屏后端，默认关闭；有阶段诊断、原件留存和受控恢复 | 依赖特定系统服务；历史短片尾部解码错误的根因未确定 |
-| HAP 安装、`clearState`、权限修改、`hideKeyboard`、深链接、媒体导入、位置/方向/代理等设置 | 当前不支持 | 不支持的操作明确报错；由人工或独立准备步骤处理，不可当成功跳过 |
+| `openLink` | 已接入系统 URI 分发；API 22 模拟器验证自定义 URI 及查询参数 | `browser: true` 仅接受 HTTP(S)，由系统选择处理应用；`autoVerify` 不可用。 |
+| `addMedia` | 实验性；API 22 模拟器已验证 PNG 导入、回读 SHA-256 一致和同名拒绝 | 设备需提供 HDC 文件传输与 `mediatool`。允许 PNG、JPEG、GIF、WebP、HEIC、MP4、MOV，最多 32 个文件、合计 128 MiB。文件名使用 ASCII 字母、数字、点、下划线或连字符，并以字母或数字开头。已确认导入的文件会留在图库。 |
+| `setOrientation` | 实验性；API 26 手机用标准 YAML 完成竖屏 → 横屏 → 竖屏，截图尺寸随之变化 | 需已运行的 UITest RPC 后端和支持旋转的前台页面。Flow 可在结束前显式恢复原方向。 |
+| `clearState`、`launchApp.clearState` | 实验性；API 22 模拟器的普通 Stage 应用已验证清除文件和 Preferences | 仅执行包信息确认用户数据可清除的普通应用。原子化服务会被拒绝。请在测试应用重启后断言预期的初始状态。 |
+| HAP 安装、权限修改、`hideKeyboard`、位置及代理设置 | 当前不支持 | 不支持的操作会明确报错，可在独立准备步骤处理。 |
 | Studio、MCP、自动启动设备、云端运行 | 尚未接入 | 使用本文的本机 CLI 与 VSCode 入口 |
 
-视频录屏需要显式设置 `MAESTRO_HARMONYOS_RECORDING=huawei-system`，测试期间独占系统录屏。后端核对拉取前后远端大小与本地长度，保存原件和阶段记录；这些检查不能证明每帧可解码。启用方式见[环境配置](setup.md#视频录屏)，阶段收集、完整解码和恢复步骤见[录屏检查与恢复](recording-diagnostics.md)。解码工具不修改原片，设备已释放也不代表视频有效。
+视频录屏支持 `host-frames` 和 `huawei-system`。主机后端把设备截图编码为无声 MP4，并与运行预览复用采集通道。系统后端独占系统录屏服务，保存导出的原件与阶段记录。录屏启用方式和成片核验分别见[环境配置](setup.md#视频录屏)和[录屏检查与恢复](recording-diagnostics.md)。
 
 诊断选项 `MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA=true` 会保留手机媒体，即使正常停止也返回需要恢复的状态并阻止下一会话。应按原会话 ID 使用既有恢复入口，核对凭据和原件；移除环境开关不会解除旧占用。不要把此选项加入预期全部成功的常规批次。
 

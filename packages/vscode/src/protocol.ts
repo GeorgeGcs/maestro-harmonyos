@@ -9,7 +9,7 @@ export interface Snapshot {
   screenshot: { mimeType: 'image/png'; base64: string }; nodes: UiNode[];
 }
 export interface Connection {
-  deviceId: string; appId: string; abilityName: string; moduleName?: string; artifactsDir: string;
+  deviceId: string; appId: string; abilityName?: string; moduleName?: string; artifactsDir: string;
 }
 export type Action =
   | { type: 'launchApp' | 'back' }

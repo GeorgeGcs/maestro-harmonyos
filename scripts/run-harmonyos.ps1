@@ -2,13 +2,14 @@
 param(
     [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$FlowPath,
     [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$BundleId,
-    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$AbilityName,
+    [ValidateNotNullOrEmpty()][string]$AbilityName,
     [Alias('ModuleName')][string]$Module,
     [string]$DeviceId,
     [hashtable]$Env = @{},
     [Alias('ArtifactsRoot')][string]$Artifacts,
     [string]$AgentRoot,
     [string]$CliDir,
+    [string]$SharedDeviceState,
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$RunId = [guid]::NewGuid().ToString(),
     [ValidatePattern('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')][string]$AttemptId = [guid]::NewGuid().ToString(),
     [ValidateRange(1, 2147483647)][int]$AttemptNo = 1,
@@ -149,8 +150,11 @@ try {
     $localConfig = Join-Path $projectRoot 'config.local.ps1'
     if (Test-Path -LiteralPath $localConfig -PathType Leaf) { . $localConfig }
 
-    if ([string]::IsNullOrWhiteSpace($BundleId) -or [string]::IsNullOrWhiteSpace($AbilityName)) {
-        throw 'BundleId and AbilityName must not be blank.'
+    if ([string]::IsNullOrWhiteSpace($BundleId)) {
+        throw 'BundleId must not be blank.'
+    }
+    if ($PSBoundParameters.ContainsKey('AbilityName') -and [string]::IsNullOrWhiteSpace($AbilityName)) {
+        throw 'AbilityName must not be blank when supplied.'
     }
     if ($PSBoundParameters.ContainsKey('Module') -and [string]::IsNullOrWhiteSpace($Module)) {
         throw 'Module must not be blank when supplied.'
@@ -188,10 +192,15 @@ try {
         $javaExecutable = $javaCommand.Source
     }
 
-    $env:MAESTRO_HARMONYOS_ABILITY = $AbilityName
+    if ($PSBoundParameters.ContainsKey('AbilityName')) { $env:MAESTRO_HARMONYOS_ABILITY = $AbilityName }
     $env:MAESTRO_CLI_NO_ANALYTICS = '1'
     $env:MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED = 'true'
     if ($PSBoundParameters.ContainsKey('Module')) { $env:MAESTRO_HARMONYOS_MODULE = $Module }
+    if ($SharedDeviceState) {
+        $stateDirectory = (Get-Item -LiteralPath $SharedDeviceState -ErrorAction Stop).FullName
+        Assert-RunnerControlPath $stateDirectory
+        $env:MAESTRO_HARMONYOS_SHARED_DEVICE_STATE = $stateDirectory
+    }
     $runName = 'harmonyos-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N')
     $artifactDirectory = Join-Path $artifactsRoot $runName
     $artifactDirectory = [IO.Path]::GetFullPath($artifactDirectory)

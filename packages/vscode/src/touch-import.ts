@@ -8,6 +8,12 @@ function coordinate(value: unknown): number | undefined {
 }
 
 type LayoutNode = { attributes: Record<string, unknown>; parent?: LayoutNode };
+export interface TouchLayouts { initial?: unknown; after: Record<string, unknown> }
+const layoutPath = /^\/data\/local\/tmp\/(layout_\d{10,20}_\d{1,6}\.json)$/;
+
+export function touchLayoutName(path: unknown): string | undefined {
+  return typeof path === 'string' ? layoutPath.exec(path)?.[1] : undefined;
+}
 
 function layoutNodes(tree: unknown): LayoutNode[] {
   const nodes: LayoutNode[] = [];
@@ -31,17 +37,29 @@ function inside(node: LayoutNode, ancestor: LayoutNode): boolean {
   return false;
 }
 
+function readBounds(value: unknown): number[] | undefined {
+  const match = typeof value === 'string' && /^\[(\d+),(\d+)]\[(\d+),(\d+)]$/.exec(value);
+  if (match) return match.slice(1).map(Number);
+}
+
+function contains(area: number[], x: number, y: number): boolean {
+  return x >= area[0] && x < area[2] && y >= area[1] && y < area[3];
+}
+
 function clickCommand(finger: Record<string, unknown>, x: number, y: number, initialLayout: LayoutNode[]): string {
   const options = candidates(finger.W1_ID, finger.W1_Text);
   const point = `point: "${x},${y}"`;
   const selector = (target: Selector) => `${target.field}: ${literalSelector(target.value)}`;
   const command = (target: string, note?: string) =>
     `${note ? '# ' + note + '\n' : ''}- tapOn:\n    ${target}\n    retryTapIfNoChange: false`;
-  if (!options.length) return command(point);
-  if (!initialLayout.length) return command(selector(options[0]), '缺少点击前的控件树，请确认选择器只匹配一个控件。');
+  if (!initialLayout.length) return command(point, options.length ? `缺少点击前的控件树，使用坐标。候选 ${selector(options[0])}` : undefined);
 
-  const targets = initialLayout.filter(node => node.attributes.hierarchy === finger.W1_HIER &&
-    node.attributes.bounds === finger.W1_BOUNDS && options.some(option => matches(option, node)));
+  const hit = readBounds(finger.W1_BOUNDS);
+  const targets = hit && contains(hit, x, y) &&
+    typeof finger.W1_HIER === 'string' && finger.W1_HIER.length > 0 ? initialLayout.filter(node =>
+      node.attributes.hierarchy === finger.W1_HIER && node.attributes.bounds === finger.W1_BOUNDS &&
+      (typeof finger.W1_Type !== 'string' || !finger.W1_Type || node.attributes.type === finger.W1_Type) &&
+      options.every(option => matches(option, node))) : [];
   if (targets.length !== 1) return command(point, '点击目标无法和录制前的控件树对应，保留坐标。');
   const [target] = targets;
   for (const option of options) {
@@ -59,22 +77,39 @@ function clickCommand(finger: Record<string, unknown>, x: number, y: number, ini
       }
     }
   }
-  return command(point, '找到多个匹配控件，保留坐标。');
+  // The center of a selected container must still hit the recorded child.
+  for (let parent = target.parent; parent; parent = parent.parent) {
+    const area = readBounds(parent.attributes.bounds);
+    if (!area || !hit || !contains(hit, Math.floor((area[0] + area[2]) / 2), Math.floor((area[1] + area[3]) / 2))) continue;
+    for (const option of candidates(parent.attributes.id || parent.attributes.key, parent.attributes.text)) {
+      const matching = initialLayout.filter(node => matches(option, node));
+      if (matching.length === 1 && matching[0] === parent) return command(selector(option));
+    }
+  }
+  return command(point, options.length ? '找到多个匹配控件，保留坐标。' : '点击的控件没有可验证的选择器，保留坐标。');
 }
 
-export function importTouchRecording(appId: string, input: string, initialLayout?: unknown): { yaml: string; steps: number; skipped: number } {
+export function importTouchRecording(appId: string, input: string, layouts?: TouchLayouts): { yaml: string; steps: number; skipped: number } {
   const commands: string[] = [];
   let skipped = 0;
+  let before = layouts?.initial;
+  let previousLayout: string | undefined;
   let firstEvent = true;
   for (const [index, raw] of input.split(/\r?\n/).entries()) {
     if (!raw.trim()) continue;
     let event: unknown;
     try { event = JSON.parse(raw); }
     catch { throw new Error(`第 ${index + 1} 行不是 UITest JSON。请导入 uiRecord read 的输出。`); }
-    const layout = firstEvent ? layoutNodes(initialLayout) : [];
+    const name = object(event) ? touchLayoutName(event.FILEPAHT) : undefined;
+    const sameApp = object(event) && (event.BUNDLE === '' || event.BUNDLE === appId);
+    const consecutive = previousLayout && name && previousLayout.slice(0, previousLayout.lastIndexOf('_')) === name.slice(0, name.lastIndexOf('_')) &&
+      Number.parseInt(name.slice(name.lastIndexOf('_') + 1), 10) === Number.parseInt(previousLayout.slice(previousLayout.lastIndexOf('_') + 1), 10) + 1;
+    const layout = firstEvent || consecutive ? layoutNodes(before) : [];
+    before = sameApp && name && Object.hasOwn(layouts?.after ?? {}, name) ? layouts!.after[name] : undefined;
+    previousLayout = sameApp ? name : undefined;
     firstEvent = false;
     if (!object(event) || event.EVENT_TYPE !== 'pointer' ||
-        !(event.BUNDLE === '' || event.BUNDLE === appId) ||
+        !sameApp ||
         ![1, '1'].includes(event.fingerNumber as string | number) ||
         !Array.isArray(event.fingerList) || event.fingerList.length !== 1 || !object(event.fingerList[0])) {
       skipped++;

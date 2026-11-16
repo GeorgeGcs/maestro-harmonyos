@@ -17,7 +17,7 @@
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
 | `devices` | `{}` | `{devices:[{id:string}]}`，未连接时也可查询 |
-| `connect` | `{deviceId,appId,abilityName,moduleName?,artifactsDir}` | `{deviceId,appId}`；显式目标，已有会话须先断开；产物目录须为绝对路径 |
+| `connect` | `{deviceId,appId,abilityName?,moduleName?,artifactsDir}` | `{deviceId,appId}`；显式选择设备。省略 Ability 时由启动动作自动解析。已有会话须先断开，产物目录须为绝对路径 |
 | `snapshot` | `{}` | 下述截图和节点结构 |
 | `action` | 下述动作参数 | `{yaml:string,artifactsDir:string}`；只有执行成功才返回可追加的 YAML 步骤 |
 | `disconnect` | `{}` | `{disconnected:true}`；重复调用无副作用 |

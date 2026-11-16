@@ -1,7 +1,15 @@
 [CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Run')][string]$SuiteManifest,
-    [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$')][string]$DeviceId,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Reconcile')]
+    [Parameter(ParameterSetName = 'Run')]
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$')][string]$DeviceId,
+    [Parameter(ParameterSetName = 'Run')][string]$DeviceInventory,
+    [ValidateSet('phone','tablet','emulator')][string]$DeviceKind,
+    [ValidateSet('harmonyos','openharmony')][string]$DeviceSystem,
+    [ValidateRange(0, 999)][int]$MinDeviceApi,
+    [ValidateRange(0, 999)][int]$MaxDeviceApi,
+    [ValidateRange(0, 120)][int]$DeviceWaitSeconds,
     [Parameter(Mandatory = $true, ParameterSetName = 'Run')][string]$ArtifactsRoot,
     [Parameter(Mandatory = $true)][string]$DeviceStateDirectory,
     [string]$RecoveryRoot = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.maestro/harmonyos-sessions'),
@@ -108,6 +116,14 @@ try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'This CI entry point currently supports Windows only.' }
     $artifactRoot = if ($ArtifactsRoot) { [IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArtifactsRoot)) } else { $null }
     if ($artifactRoot) { Assert-NoLinks $artifactRoot }
+    if ($DeviceInventory -and $DeviceId) { throw 'Specify either DeviceId or DeviceInventory.' }
+    if ($DeviceInventory) {
+        $configuration = Join-Path $projectRoot 'config.local.ps1'
+        if (Test-Path -LiteralPath $configuration -PathType Leaf) { . $configuration }
+        $DeviceId = Select-RegisteredDevice $DeviceInventory $DeviceStateDirectory $projectRoot $DeviceKind $DeviceSystem $MinDeviceApi $MaxDeviceApi $DeviceWaitSeconds
+    } elseif (!$DeviceId -or $DeviceKind -or $DeviceSystem -or $MinDeviceApi -or $MaxDeviceApi -or $DeviceWaitSeconds) {
+        throw 'Supply DeviceId, or DeviceInventory with optional filters.'
+    }
     $reservation = Open-DeviceReservation -DeviceId $DeviceId -DeviceStateDirectory $DeviceStateDirectory -ProjectRoot $projectRoot -ArtifactsRoot $artifactRoot
     $stateDirectory = $reservation.Directory
     $statePath = $reservation.StatePath
@@ -177,7 +193,7 @@ try {
         if ($null -ne $state -and $state.state -ne 'released') {
             throw ('Device use is blocked by a retained CI launch (' + $state.launchId + '). Inspect it and reconcile with verified recovery evidence; a timeout does not release it.')
         }
-        if ($JobTimeoutSeconds -gt 0 -and $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds + (4 * $VerificationTimeoutSeconds) + 60 -ge $JobTimeoutSeconds) {
+        if ($JobTimeoutSeconds -gt 0 -and $DeviceWaitSeconds + $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds + (4 * $VerificationTimeoutSeconds) + 60 -ge $JobTimeoutSeconds) {
             throw 'The job budget must cover freeze, pre-dispatch check, release and quality verification separately, plus execution/termination/output drain and more than 60 seconds for startup and archival.'
         }
         $launchId = [guid]::NewGuid().ToString()
@@ -190,7 +206,7 @@ try {
         $frozen = Invoke-StateVerification @{ operation = 'freeze'; manifestPath = $manifestPath; projectRoot = $projectRoot;
             deviceId = $DeviceId; outputDirectory = $directory; powershellPath = $powershellPath } $directory -Helper 'suite.mjs' -MetadataOnly
         $videoBudgetSeconds = [int]$frozen.videoBudgetSeconds
-        if ($JobTimeoutSeconds -gt 0 -and $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds +
+        if ($JobTimeoutSeconds -gt 0 -and $DeviceWaitSeconds + $RunTimeoutSeconds + $TerminationWaitSeconds + $OutputDrainSeconds +
             (4 * $VerificationTimeoutSeconds) + $videoBudgetSeconds + 60 -ge $JobTimeoutSeconds) {
             throw 'The job budget must also reserve the frozen videoPolicy budget before dispatch.'
         }
@@ -225,7 +241,7 @@ try {
             FlowPath = $flow; BundleId = $profile.bundleId; AbilityName = $profile.abilityName; DeviceId = $DeviceId; Env = $variables
             Artifacts = $directory; AgentRoot = $state.agentRoot; RunId = $state.runId; AttemptId = $state.attemptId
             RunTimeoutSeconds = $RunTimeoutSeconds; TerminationWaitSeconds = $TerminationWaitSeconds; OutputDrainSeconds = $OutputDrainSeconds
-            ControlRecordPath = $state.controlRecordPath
+            ControlRecordPath = $state.controlRecordPath; SharedDeviceState = $stateDirectory
         }
         if ($profile.moduleName) { $arguments.Module = $profile.moduleName }
         $state.state = 'running'

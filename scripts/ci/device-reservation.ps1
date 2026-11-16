@@ -89,3 +89,32 @@ function Close-DeviceReservation {
     param([Parameter(Mandatory = $true)]$Reservation)
     if ($null -ne $Reservation.Lock) { $Reservation.Lock.Dispose(); $Reservation.Lock = $null }
 }
+
+function Select-RegisteredDevice {
+    param([string]$Inventory, [string]$DeviceStateDirectory, [string]$ProjectRoot,
+        [string]$Kind, [string]$System, [int]$MinApi, [int]$MaxApi, [int]$WaitSeconds)
+    $inventoryPath = (Get-Item -LiteralPath $Inventory -ErrorAction Stop).FullName
+    $state = (Get-Item -LiteralPath $DeviceStateDirectory -ErrorAction Stop).FullName
+    $lib = Join-Path $ProjectRoot '.upstream/maestro/maestro-cli/build/install/maestro/lib'
+    $java = if ($env:JAVA_HOME) { Join-Path $env:JAVA_HOME 'bin/java.exe' }
+        else { (Get-Command java -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source }
+    $option = @('--enable-native-access=ALL-UNNAMED', '-Dfile.encoding=UTF-8', '-classpath', (Join-Path $lib '*'),
+        'maestro.cli.AppKt', '--platform', 'harmonyos', 'harmonyos-device-pool', '--inventory', $inventoryPath,
+        '--state-directory', $state, '--wait-seconds', [string]$WaitSeconds)
+    if ($Kind) { $option += @('--kind', $Kind) }
+    if ($System) { $option += @('--system', $System) }
+    if ($MinApi -gt 0) { $option += @('--min-api', [string]$MinApi) }
+    if ($MaxApi -gt 0) { $option += @('--max-api', [string]$MaxApi) }
+    $analytics = $env:MAESTRO_CLI_NO_ANALYTICS
+    try {
+        $env:MAESTRO_CLI_NO_ANALYTICS = '1'
+        $response = & $java @option
+        $code = $LASTEXITCODE
+    } finally { $env:MAESTRO_CLI_NO_ANALYTICS = $analytics }
+    $decision = ($response -join "`n") | ConvertFrom-Json
+    if ($code -ne 0 -or $decision.protocol -ne 'maestro.harmonyos.device-pool' -or $decision.schemaVersion -ne 1 -or
+        $decision.status -ne 'selected' -or $decision.device.id -notmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$') {
+        throw ('Device allocation failed: ' + $decision.error.code)
+    }
+    return $decision.device.id
+}

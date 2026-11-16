@@ -24,7 +24,8 @@ Maestro HarmonyOS 让开发者在电脑上用 Maestro YAML 驱动鸿蒙应用，
 | 批量执行 | 复用上游 Flow 批量执行；矩阵脚本按指定设备逐台调用，不并发分片 |
 | 固定输入与统计 | CI 核对冻结输入和原生 JUnit；验证计划另行固定分母、必测步骤和首次/最终成功口径 |
 | 视频录屏 | Huawei 系统录屏实验后端，默认关闭；与操作生成 YAML 是独立功能 |
-| 未支持 | HAP 自动安装、清除应用数据、修改权限、Studio/MCP 鸿蒙会话、自动创建模拟器等 |
+| 实验性命令 | `clearState` 使用 `bm clean -d -n` 清理指定包的数据，以设备明确确认作为成功依据。当前为主机验证阶段。 |
+| 未支持 | HAP 自动安装、修改权限、Studio/MCP 鸿蒙会话、自动创建模拟器等 |
 
 上游有某条 YAML 命令，不代表鸿蒙驱动已经实现其设备行为。未支持的设备操作明确报错，不能用空操作返回成功。
 
@@ -76,14 +77,17 @@ JVM 适配代码保存在 [0001-harmonyos-host.patch](../patches/maestro/0001-ha
 
 ### RPC 取树
 
-默认通过 HDC 执行 UITest `dumpLayout`。如果测试环境已经为指定设备准备好 UITest 守护进程及本机转发，CLI 可通过两个环境变量启用常驻的只读 RPC，用于布局和物理屏幕尺寸查询：
+CLI 可通过常驻的只读 UITest RPC 查询布局和物理屏幕尺寸。没有合适的 RPC 服务时，布局由 HDC 执行 UITest `dumpLayout` 获取。可通过下面的变量控制取树方式：
 
 - `MAESTRO_HARMONYOS_LAYOUT_RPC_PORT`：本机 `127.0.0.1` 上的转发端口，范围 1024–65535。
 - `MAESTRO_HARMONYOS_LAYOUT_RPC_DEVICE`：转发所属设备的序列号，必须与 CLI 选中的设备一致。运行前核对 HDC 转发列表，确认该端口实际指向所选设备。
+- `MAESTRO_HARMONYOS_LAYOUT_RPC_AUTO`：默认为 `true`，省略显式端口时探测设备已有的 UITest 监听。设为 `false` 可关闭自动探测，显式转发仍可使用。
 
-两个变量都未设置时走默认路径。一次会话开始时，CLI 核对本机端口、选中设备和 UITest 端点是否唯一匹配。规则缺失、冲突或无法读取时使用 HDC。RPC 单次读取最多使用查询预算的一半，且上限为两秒。布局连接提前关闭时在原预算内重连一次。连接、协议或布局读取失败后关闭 RPC，使用剩余预算完成 HDC 取树，并在本次会话沿用 HDC。设备不支持 RPC 尺寸查询时，改用显示服务读取尺寸。取消信号继续向上层传播。
+自动模式在 HDC 建立转发前保存本次端口，收到创建回执后标记归属，再按目标设备、端口及 `localabstract:uitest_socket` 核对规则。驱动关闭 RPC 连接后，租约回收已确认属于本次的规则并重新查询。会话异常终止时，普通恢复入口按同一记录处理。创建回执缺失且仍存在同一规则时，会话保留待恢复状态，需要核对现场规则归属。显式配置的规则由调用方管理。
 
-CLI 关闭会话时关闭本机 RPC 连接。设备端服务和 HDC 转发由准备测试环境的一方管理。测试期间应保持转发归属稳定。点击、输入、截图和录屏继续使用原有接口。[配置步骤](setup.md#启用-rpc-取树)
+指定端口时，CLI 核对本机端口、选中设备和 UITest 端点是否唯一匹配。规则缺失、冲突或无法读取时使用 HDC。RPC 单次读取最多使用查询预算的一半，且上限为两秒。布局连接提前关闭时在原预算内重连一次。连接、协议或布局读取失败后关闭 RPC，使用剩余预算完成 HDC 取树，并在本次会话沿用 HDC。设备不支持 RPC 尺寸查询时，改用显示服务读取尺寸。取消信号继续向上层传播。
+
+设备端服务由准备测试环境的一方管理。点击、输入、截图和录屏继续使用原有接口。[配置步骤](setup.md#rpc-取树)
 
 2026 年 11 月 14 日，在同一台 HarmonyOS 7 平板（UITest `7.0.0.1`）使用同一份更新后的 CLI，各跑一轮 HMOS 代码工坊完整组件套件。录屏关闭，端到端耗时包含 CLI 启动、Flow 和会话清理。
 
@@ -137,7 +141,7 @@ CLI 显式使用 `--platform harmonyos`。平台分支接入设备列表、测�
 
 没有指定目标且只有一台设备时可以选中它；无设备、多设备未指定或指定目标不在线时给出错误。不根据列表顺序偷偷切换目标。HarmonyOS 不接收 Android/iOS 的远程驱动端口、Apple team、设备索引等参数；测试入口也拒绝多设备分片和 Web Flow。
 
-YAML 的 `appId` 对应 bundle 名称；启动 Ability 和可选 module 由 `MAESTRO_HARMONYOS_ABILITY`、`MAESTRO_HARMONYOS_MODULE` 提供。运行脚本把参数转为这些配置，录制器则用连接参数构造 `HarmonyOSDriverConfig`。
+YAML 的 `appId` 对应 bundle 名称。启动时优先采用 `MAESTRO_HARMONYOS_ABILITY` 和 `MAESTRO_HARMONYOS_MODULE`。省略 Ability 时，驱动用 `bm dump -n` 读取指定设备上的包信息，从显式指定的模块或唯一入口模块中解析主 Ability。预检共用解析逻辑。运行脚本传递显式参数，录制器用连接参数构造 `HarmonyOSDriverConfig`。
 
 `Orchestra.launchAppCommand` 对鸿蒙不再隐式执行其他平台的默认“全部授权”。应用使用当前已有权限；用户显式要求设置权限时，仍进入驱动并按支持情况报错。这样不会把“启动成功”误写成“权限已处理”。
 

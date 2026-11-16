@@ -3,6 +3,12 @@
 param(
     [string]$SuiteTemplate = $env:MAESTRO_CI_SUITE_TEMPLATE,
     [string]$DeviceId = $env:MAESTRO_CI_DEVICE_ID,
+    [string]$DeviceInventory = $env:MAESTRO_CI_DEVICE_INVENTORY,
+    [ValidateSet('phone','tablet','emulator')][string]$DeviceKind = $env:MAESTRO_CI_DEVICE_KIND,
+    [ValidateSet('harmonyos','openharmony')][string]$DeviceSystem = $env:MAESTRO_CI_DEVICE_SYSTEM,
+    [ValidateRange(0,999)][int]$MinDeviceApi = [int]$env:MAESTRO_CI_MIN_DEVICE_API,
+    [ValidateRange(0,999)][int]$MaxDeviceApi = [int]$env:MAESTRO_CI_MAX_DEVICE_API,
+    [ValidateRange(0,120)][int]$DeviceWaitSeconds = [int]$env:MAESTRO_CI_DEVICE_WAIT_SECONDS,
     [string]$DeviceStateDirectory = $env:MAESTRO_CI_DEVICE_STATE,
     [string]$RawArtifactsRoot = $env:MAESTRO_CI_RAW_ROOT,
     [string]$ReportDirectory = 'artifacts/ci-device-report',
@@ -21,8 +27,8 @@ try {
     if (!$IsWindows) { throw 'This device job requires a Windows runner.' }
     $report.commit = (& git -C $root rev-parse HEAD)
     if ($LASTEXITCODE -ne 0) { throw 'Could not read the source commit.' }
-    if (!$SuiteTemplate -or !$DeviceId -or !$DeviceStateDirectory -or !$RawArtifactsRoot -or !$env:MAESTRO_HARMONYOS_HDC) {
-        throw 'Configure the dedicated runner with suite, device, state, raw artifact and HDC settings.'
+    if (!$SuiteTemplate -or ([bool]$DeviceId -eq [bool]$DeviceInventory) -or !$DeviceStateDirectory -or !$RawArtifactsRoot -or !$env:MAESTRO_HARMONYOS_HDC) {
+        throw 'Configure the runner with suite, exactly one of device ID or inventory, state, raw artifact and HDC settings.'
     }
     if (!(Test-Path -LiteralPath $env:MAESTRO_HARMONYOS_HDC -PathType Leaf)) { throw 'The configured HDC executable is missing.' }
     foreach ($directory in @($DeviceStateDirectory, $RawArtifactsRoot)) {
@@ -65,7 +71,13 @@ try {
 
     $report.stage = 'device-suite'
     $pwsh = (Get-Process -Id $PID).Path
-    & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'run-device-suite.ps1') -SuiteManifest $manifest -DeviceId $DeviceId `
+    $targetOptions = if ($DeviceInventory) { @('-DeviceInventory', $DeviceInventory) } else { @('-DeviceId', $DeviceId) }
+    if ($DeviceKind) { $targetOptions += @('-DeviceKind', $DeviceKind) }
+    if ($DeviceSystem) { $targetOptions += @('-DeviceSystem', $DeviceSystem) }
+    if ($MinDeviceApi) { $targetOptions += @('-MinDeviceApi', $MinDeviceApi) }
+    if ($MaxDeviceApi) { $targetOptions += @('-MaxDeviceApi', $MaxDeviceApi) }
+    if ($DeviceWaitSeconds) { $targetOptions += @('-DeviceWaitSeconds', $DeviceWaitSeconds) }
+    & $pwsh -NoProfile -File (Join-Path $PSScriptRoot 'run-device-suite.ps1') -SuiteManifest $manifest @targetOptions `
         -ArtifactsRoot $privateRun -DeviceStateDirectory $stateRoot -RunTimeoutSeconds $RunTimeoutSeconds `
         -JobTimeoutSeconds $JobTimeoutSeconds *> (Join-Path $privateRun 'device-suite.log')
     $jobExit = $LASTEXITCODE
