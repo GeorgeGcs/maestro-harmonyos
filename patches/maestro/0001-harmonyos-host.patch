@@ -11991,10 +11991,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..029c078
+index 0000000..c847915
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,622 @@
+@@ -0,0 +1,652 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -12164,6 +12164,36 @@ index 0000000..029c078
 +            }
 +        }
 +        aa(arguments, "start ability successfully.")
++        val launchWait = minOf(config.commandTimeout, Duration.ofSeconds(12))
++        val firstWait = if (launchArguments.isEmpty()) launchWait.dividedBy(2) else launchWait
++        if (awaitAppFocus(appId, firstWait)) return
++        if (launchArguments.isEmpty()) {
++            // Activation can be acknowledged before the window manager finishes switching.
++            aa(arguments, "start ability successfully.")
++            if (awaitAppFocus(appId, launchWait.minus(firstWait))) return
++        }
++        throw HarmonyOSCommandException("Application $appId did not acquire window focus after aa start.", "", "")
++    }
++
++    private fun awaitAppFocus(appId: String, timeout: Duration): Boolean {
++        val deadline = System.nanoTime() + timeout.toNanos()
++        var previousSampleFocused = false
++        while (System.nanoTime() < deadline) {
++            val remaining = Duration.ofNanos(deadline - System.nanoTime())
++            if (remaining <= Duration.ZERO) return false
++            val focused = query {
++                try {
++                    device.hasAppFocus(appId, minOf(Duration.ofSeconds(2), remaining))
++                } catch (_: HdcException) {
++                    checkInterrupted()
++                    false
++                }
++            }
++            if (focused && previousSampleFocused) return true
++            previousSampleFocused = focused
++            if (!pause(deadline)) return false
++        }
++        return false
 +    }
 +
 +    override fun stopApp(appId: String) {
@@ -12661,10 +12691,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..3aef49f
+index 0000000..522d145
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12678,6 +12708,7 @@ index 0000000..3aef49f
 +    fun connect()
 +    fun disconnect() {}
 +    fun isAvailable(): Boolean
++    fun hasAppFocus(appId: String, timeout: Duration): Boolean = true
 +    fun displaySize(timeout: Duration): Pair<Int, Int>? = null
 +    fun setDisplayRotation(rotation: Int, timeout: Duration): Unit =
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support rotation control.")
@@ -13843,10 +13874,10 @@ index 0000000..91b14bb
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..c0ed582
+index 0000000..b03b236
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,493 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -13928,12 +13959,23 @@ index 0000000..c0ed582
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
 +
++    override fun hasAppFocus(appId: String, timeout: Duration): Boolean {
++        val deadline = System.nanoTime() + timeout.toNanos()
++        val windows = diagnostic(listOf("hidumper", "-s", "WindowManagerService", "-a", "-a"), timeout)
++        val window = FOCUSED_WINDOW.find(windows)?.groupValues?.get(1) ?: return false
++        val pid = windows.lineSequence().mapNotNull { WINDOW_ROW.matchEntire(it) }
++            .filter { it.groupValues[2] == window }.map { it.groupValues[1] }.singleOrNull() ?: return false
++        val processes = diagnostic(listOf("ps", "-A", "-o", "PID,NAME"), remainingBudget(deadline, timeout))
++        return processes.lineSequence().map { it.trim().split(Regex("\\s+"), limit = 2) }
++            .any { it.size == 2 && it[0] == pid && (it[1] == appId || it[1].startsWith("$appId:")) }
++    }
++
 +    override fun flowFaults(appId: String, startMs: Long, endMs: Long, timeout: Duration): HarmonyOSFlowFaults {
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        val before = System.currentTimeMillis()
 +        val clockStarted = System.nanoTime()
 +        val deviceTime = try {
-+            execute(listOf("date", "+%s%3N"), minOf(Duration.ofSeconds(1), timeout.dividedBy(3)))
++            diagnostic(listOf("date", "+%s%3N"), minOf(Duration.ofSeconds(1), timeout.dividedBy(3)))
 +                .trim().takeIf { it.matches(Regex("[0-9]{13}")) }?.toLongOrNull()
 +        } catch (_: HdcException) {
 +            checkInterrupted()
@@ -13947,7 +13989,7 @@ index 0000000..c0ed582
 +        // Broaden the device-side query for the offset interval. The parser admits only events provably in the Flow window.
 +        val deviceStart = startMs - (clock?.maximumOffsetMs ?: 0)
 +        val deviceEnd = endMs - (clock?.minimumOffsetMs ?: 0)
-+        val output = execute(
++        val output = diagnostic(
 +            listOf("hisysevent", "-l", "-s", deviceStart.toString(), "-e", deviceEnd.toString(), "-g", "FAULT", "-m", "256"),
 +            remainingBudget(deadline, timeout),
 +        )
@@ -14178,7 +14220,11 @@ index 0000000..c0ed582
 +        logger.warn("UITest RPC layout failed ({}); using HDC layout for the rest of this session", error.javaClass.simpleName)
 +    }
 +
-+    override fun execute(arguments: List<String>, timeout: Duration): String {
++    override fun execute(arguments: List<String>, timeout: Duration): String = executeWithReceipt(arguments, timeout, false)
++
++    private fun diagnostic(arguments: List<String>, timeout: Duration): String = executeWithReceipt(arguments, timeout, true)
++
++    private fun executeWithReceipt(arguments: List<String>, timeout: Duration, readOnly: Boolean): String {
 +        checkInterrupted()
 +        require(arguments.isNotEmpty()) { "A device command is required" }
 +        if (arguments.first() == "aa") {
@@ -14190,7 +14236,9 @@ index 0000000..c0ed582
 +            "; __maestro_status=\$?; printf '\\n${marker}%s\\n' \"\$__maestro_status\"; exit \"\$__maestro_status\""
 +        var transportFailure: HdcCommandException? = null
 +        val result = try {
-+            hdc.shellFinite(deviceId, listOf("sh", "-c", script), timeout, HdcClient.finiteCommand(arguments), HdcCommandCategory.shell(arguments))
++            val category = HdcCommandCategory.shell(arguments)
++            if (readOnly) hdc.shellDiagnostic(deviceId, script, timeout, category)
++            else hdc.shellFinite(deviceId, listOf("sh", "-c", script), timeout, HdcClient.finiteCommand(arguments), category)
 +        } catch (error: HdcCommandException) {
 +            // HDC's text heuristic can identify a remote tool's [FAIL] output as a
 +            // transport error. Only this invocation's final status proves it ran.
@@ -14316,6 +14364,9 @@ index 0000000..c0ed582
 +
 +    private companion object {
 +        val logger = LoggerFactory.getLogger(HdcHarmonyOSDevice::class.java)
++        val FOCUSED_WINDOW = Regex("(?m)^\\s*Focus window:\\s*(\\d+)\\s*$")
++        // The columns before the bounds are display, PID, window ID, type, mode, flag, Z and orientation.
++        val WINDOW_ROW = Regex("^\\s*.+?\\s+\\d+\\s+(\\d+)\\s+(\\d+)(?:\\s+-?\\d+){5}\\s+\\[.*$")
 +        const val MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 +        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
 +    }
@@ -16407,10 +16458,10 @@ index 0000000..0e230bd
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..7c2615c
+index 0000000..66f6dce
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,353 @@
+@@ -0,0 +1,362 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -16564,6 +16615,15 @@ index 0000000..7c2615c
 +    internal fun shellFinite(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean,
 +                             category: HdcCommandCategory = HdcCommandCategory.shell(arguments)): HdcCommandResult =
 +        shellTracked(deviceId, arguments, timeout, finite, category)
++
++    // The caller builds these commands from fixed read-only queries. Track the local
++    // HDC process, but do not create a device operation directory or await a remote receipt.
++    internal fun shellDiagnostic(deviceId: String, script: String, timeout: Duration,
++                                 category: HdcCommandCategory): HdcCommandResult {
++        validateDeviceId(deviceId)
++        check(!resourceRecovery) { "Diagnostic queries are for active sessions." }
++        return rawShell(deviceId, listOf("sh", "-c", script), timeout, true, category = category)
++    }
 +
 +    private fun shellTracked(deviceId: String, arguments: List<String>, timeout: Duration, finite: Boolean,
 +                             category: HdcCommandCategory = HdcCommandCategory.shell(arguments)): HdcCommandResult {
@@ -17834,10 +17894,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..da5e36b
+index 0000000..f0a6f01
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,718 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -17983,6 +18043,35 @@ index 0000000..da5e36b
 +            driver.launchApp("org.example.demo", emptyMap())
 +        }
 +        assertThat(error.stdout).contains("10106102")
++        assertThat(device.commands).hasSize(1)
++    }
++
++    @Test
++    fun `launch waits for stable focus and retries activation without force stop`() {
++        val device = Device()
++        device.focused = { device.commands.size == 2 }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(
++            abilityName = "TestAbility", commandTimeout = Duration.ofMillis(200), pollInterval = Duration.ofMillis(1),
++        ))
++        driver.open()
++        driver.launchApp("org.example.demo", emptyMap())
++        val start = listOf("aa", "start", "-b", "org.example.demo", "-a", "TestAbility")
++        assertThat(device.commands).containsExactly(start, start).inOrder()
++        assertThat(device.focusSamples).isAtLeast(3)
++    }
++
++    @Test
++    fun `failed foreground confirmation does not replay arguments`() {
++        val device = Device()
++        device.focused = { false }
++        val driver = HarmonyOSDriver(device, HarmonyOSDriverConfig(
++            abilityName = "TestAbility", commandTimeout = Duration.ofMillis(30), pollInterval = Duration.ofMillis(1),
++        ))
++        driver.open()
++        val failure = assertThrows(HarmonyOSCommandException::class.java) {
++            driver.launchApp("org.example.demo", mapOf("token" to "value"))
++        }
++        assertThat(failure).hasMessageThat().contains("did not acquire window focus")
 +        assertThat(device.commands).hasSize(1)
 +    }
 +
@@ -18473,6 +18562,12 @@ index 0000000..da5e36b
 +        val layoutBudgets = mutableListOf<Duration>()
 +        val screenshotBudgets = mutableListOf<Duration>()
 +        var beforeScreenshot: () -> Unit = {}
++        var focused: () -> Boolean = { true }
++        var focusSamples = 0
++        override fun hasAppFocus(appId: String, timeout: Duration): Boolean {
++            focusSamples++
++            return focused()
++        }
 +        override fun connect() { connections++ }
 +        override fun isAvailable(): Boolean = true
 +        override fun displaySize(timeout: Duration): Pair<Int, Int>? = size
@@ -20270,10 +20365,10 @@ index 0000000..15d036b
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
 new file mode 100644
-index 0000000..4be6f3a
+index 0000000..6bd1dea
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,299 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -20282,6 +20377,7 @@ index 0000000..4be6f3a
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
 +import maestro.harmonyos.hdc.HdcException
++import maestro.harmonyos.hdc.HdcTimeoutException
 +import maestro.harmonyos.hdc.HarmonyOSRecoveryJournal
 +import maestro.utils.TempFileHandler
 +import org.junit.jupiter.api.Assertions.assertThrows
@@ -20292,6 +20388,45 @@ index 0000000..4be6f3a
 +import java.util.UUID
 +
 +class HdcHarmonyOSDeviceTest {
++    @Test
++    fun `focus follows the window owner rather than the presence of the target process`() {
++        var focus = 13
++        val device = device { command, _ ->
++            val output = when {
++                "WindowManagerService" in command.last() -> """
++                    SCB Desktop 0 1623 13 2001 1 0 2 0 [ 0 0 1272 2756 ]
++                    componentcollection0 0 20165 68 1 1 0 102 0 [ 0 0 1272 2756 ]
++                    Focus window: $focus
++                """.trimIndent()
++                else -> "PID NAME\n1623 com.ohos.sceneboard\n20165 org.example.demo:ui"
++            }
++            HdcCommandResult(0, "$output\n${marker(command)}0\n", "")
++        }
++        assertThat(device.hasAppFocus("org.example.demo", TIMEOUT)).isFalse()
++        focus = 68
++        assertThat(device.hasAppFocus("org.example.demo", TIMEOUT)).isTrue()
++        assertThat(device.hasAppFocus("org.example", TIMEOUT)).isFalse()
++    }
++
++    @Test
++    fun `a timed out fault query leaves no pending device operation`() = TempFileHandler().use { files ->
++        val directory = files.createTempDirectory("read-only-diagnostics").toPath()
++        HarmonyOSRecoveryJournal.create(directory.resolve("journal.json"), "fixture-device", UUID.randomUUID().toString()).use { journal ->
++            val client = HdcClient("fake", HdcCommandRunner { command, timeout ->
++                assertThat(command.last()).doesNotContain("MAESTRO_RECOVERY")
++                if ("hisysevent" in command.last()) throw HdcTimeoutException(timeout)
++                HdcCommandResult(0, "1784272560000\n${marker(command)}0\n", "")
++            }).withRecoveryJournal(journal)
++            val device = HdcHarmonyOSDevice("fixture-device", client)
++            assertThrows(HdcTimeoutException::class.java) {
++                device.flowFaults("org.example.demo", 1, 2, TIMEOUT)
++            }
++            assertThat(journal.snapshot().pendingOperations).isEqualTo(0)
++            journal.seal()
++            assertThat(journal.snapshot().issues).isEmpty()
++        }
++    }
++
 +    @Test fun `a tracked remote proof does not hide a different host exit failure`() = TempFileHandler().use { files ->
 +        val directory = files.createTempDirectory("tracked-host-failure-test").toPath()
 +        HarmonyOSRecoveryJournal.create(directory.resolve("journal.json"), "fixture-device", UUID.randomUUID().toString()).use { journal ->

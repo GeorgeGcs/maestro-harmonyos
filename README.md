@@ -2,6 +2,8 @@
 
 [新版演示入口](docs/demo.md) · [v0.1.3 发行说明](docs/releases/0.1.3.md) · [GitCode 发行页](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
 
+v0.1.3 在应用获得窗口焦点后继续执行 Flow。故障查询超时会保留原失败原因。API 22 模拟器上，CLI 验证了故意失败后释放设备并重跑，已安装的 VS Code 插件连续两轮完成失败定位、停止、释放与重跑。
+
 **用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
 工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
@@ -191,7 +193,7 @@ node examples/agent-client/run.mjs `
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。HAP 安装、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
-历史发行版 [v0.1.1](docs/releases/0.1.1.md)来自源码 `2d5bfaeb`；当前 [v0.1.2](docs/releases/0.1.2.md)来自 `75470f36`，在独立目录构建，复用声明的依赖缓存和已校验资源，没有复制旧编译产物。新包已完成主机核验、实际包单轮及同版 CLI 平板 20 轮验证。各批结果保留对应的源码、文件摘要和设备范围；后续文档提交不改变安装包的源码标识。
+[v0.1.3 的构建和回归范围](docs/releases/0.1.3.md#验证范围)见发行说明。历史发行版 [v0.1.1](docs/releases/0.1.1.md)来自源码 `2d5bfaeb`；[v0.1.2](docs/releases/0.1.2.md)来自 `75470f36`，在独立目录构建，复用声明的依赖缓存和已校验资源，没有复制旧编译产物。新包已完成主机核验、实际包单轮及同版 CLI 平板 20 轮验证。各批结果保留对应的源码、文件摘要和设备范围；后续文档提交不改变安装包的源码标识。
 
 详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[最新手机记录](docs/progress/2026-11-03-phone.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
 

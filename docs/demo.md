@@ -6,6 +6,8 @@
 
 ## 新版现场演示
 
+API 22 模拟器上，CLI 已验证预期断言失败后释放设备并重跑。VS Code 连续两轮完成失败定位、停止、释放与重跑。
+
 准备一台已授权的鸿蒙设备。在设备安装并打开 ComponentCollection，解压 CLI 后将 `bin` 放入 `PATH`。单设备时可用下方命令，多设备时在 `test` 前加 `--device <设备标识>`。 [环境配置](setup.md) · [ComponentCollection 场景](../examples/component-collection/README.md)
 
 ```powershell
