@@ -4,6 +4,8 @@
 
 v0.1.3 在应用获得窗口焦点后继续执行 Flow。故障查询超时会保留原失败原因。API 22 模拟器上，CLI 验证了故意失败后释放设备并重跑，已安装的 VS Code 插件连续两轮完成失败定位、停止、释放与重跑。
 
+**源码更新（2026 年 11 月 19 日 17:19）：** 补充 `hideKeyboard`、缩小后台预览帧、窗口焦点解析和完整驱动/编排回归，Windows CI 已通过。源码 fork 与交付补丁已逐树核对。使用说明和验证边界见[本轮记录](docs/progress/2026-11-19-reliability-usability.md)。这些修改尚未包含在 v0.1.3 下载包中。
+
 **用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
 工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
@@ -195,13 +197,15 @@ node examples/agent-client/run.mjs `
 
 [v0.1.3 的构建和回归范围](docs/releases/0.1.3.md#验证范围)见发行说明。历史发行版 [v0.1.1](docs/releases/0.1.1.md)来自源码 `2d5bfaeb`；[v0.1.2](docs/releases/0.1.2.md)来自 `75470f36`，在独立目录构建，复用声明的依赖缓存和已校验资源，没有复制旧编译产物。新包已完成主机核验、实际包单轮及同版 CLI 平板 20 轮验证。各批结果保留对应的源码、文件摘要和设备范围；后续文档提交不改变安装包的源码标识。
 
-详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[最新手机记录](docs/progress/2026-11-03-phone.md)和[平板验证记录](docs/progress/2026-11-01-tablet.md)。
+详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[手机完整套件记录](docs/progress/2026-11-05-hdc-cleanup.md)和[平板完整套件记录](docs/progress/2026-11-06-tablet-v012.md)。
 
 ## 文档与贡献
 
 - 开始使用：[使用指南](docs/user-guide.md) · [环境与运行参数](docs/setup.md) · [HMOS 代码工坊](examples/hmos-code-lab/README.md) · [ComponentCollection 场景](examples/component-collection/README.md)
 - 编写与接入：[VSCode 插件](packages/vscode/README.md) · [鸿测 Agent 开源仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent) · [Agent 客户端](examples/agent-client/README.md) · [便携联调包](docs/agent-bundle.md)
 - 开发与维护：[开发设计](docs/development-design.md) · [贡献说明](CONTRIBUTING.md) · [主机测试](host-tests/README.md) · [第三方来源](THIRD_PARTY.md)
+
+也可直接检出[可构建源码 fork](https://github.com/GeorgeGcs/Maestro-fork/tree/harmonyos/stable)。固定提交在 [source-fork.lock.json](source-fork.lock.json)，源码与补丁的一致性由 [CI 校验](docs/ci.md#核心回归与源码-fork)维护。
 
 <details>
 <summary>运行、协议及历史验证参考</summary>

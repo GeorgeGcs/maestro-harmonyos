@@ -305,7 +305,7 @@ CI 分别报告原生 `execution`、设备 `released` 和 `quality.status`。质
 | `addMedia` | 实验性；API 22 模拟器已验证 PNG 导入、回读 SHA-256 一致和同名拒绝 | 设备需提供 HDC 文件传输与 `mediatool`。允许 PNG、JPEG、GIF、WebP、HEIC、MP4、MOV，最多 32 个文件、合计 128 MiB。文件名使用 ASCII 字母、数字、点、下划线或连字符，并以字母或数字开头。已确认导入的文件会留在图库。 |
 | `setOrientation` | 实验性；API 26 手机用标准 YAML 完成竖屏 → 横屏 → 竖屏，截图尺寸随之变化 | 需已运行的 UITest RPC 后端和支持旋转的前台页面。Flow 可在结束前显式恢复原方向。 |
 | `clearState`、`launchApp.clearState` | 实验性；API 22 模拟器的普通 Stage 应用已验证清除文件和 Preferences | 仅执行包信息确认用户数据可清除的普通应用。原子化服务会被拒绝。请在测试应用重启后断言预期的初始状态。 |
-| `hideKeyboard` | 分支已实现输入法窗口检测、单次返回与页面焦点复核 | 先启动目标应用；键盘已隐藏时直接返回，未知窗口格式明确报错 |
+| `hideKeyboard` | 11 月 19 日源码新增；API 22 模拟器已验证键盘收起、输入保留和重复调用 | 先启动目标应用；键盘已隐藏时直接返回，未知窗口格式明确报错。现有 v0.1.3 下载包不含此功能。 |
 | HAP 安装、权限修改、位置及代理设置 | 当前不支持 | 不支持的操作会明确报错，可在独立准备步骤处理。 |
 | Studio、MCP、云端运行 | Agent 接入见鸿测；本仓提供 CLI 与 VS Code | 模拟器自动启停由通用 CI 作业管理 |
 

@@ -17,7 +17,7 @@
 
 ### 核心回归与源码 fork
 
-Windows 构建会运行精简主机测试、完整鸿蒙驱动与传输测试，以及编排层的步骤事件、录屏输出和证据生成测试。JUnit 分模块归档，便于核对实际执行范围。
+Windows 构建会运行精简主机测试、完整鸿蒙驱动与传输测试，以及编排层的步骤事件、录屏输出和证据生成测试。JUnit 分模块归档，core-test-results.json 记录执行数和平台排除项。构建显式使用 Git Bash 执行清理 Shell 测试；缺少必测类、出现失败或非预期跳过时停止构建。
 
 源码 fork 固定在根目录 source-fork.lock.json。CI 获取该提交后，用独立 Git 索引将交付补丁应用于固定上游，比较完整源码树。两者不同就停止构建。手工核对也可执行：
 
@@ -26,6 +26,8 @@ node scripts/verify-source-fork.mjs --repository ./path/to/source-fork --output 
 ```
 
 本地源码仓需包含锁定的上游和 fork 提交。校验器保留调用方的工作文件和暂存区。升级 fork 时应先完成源码树核验，再共同更新补丁和锁定提交。
+
+2026 年 11 月 19 日，上述完整入口已在 [Windows CI](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/44493655610)通过。实现、测试范围和模拟器结果见[本轮记录](progress/2026-11-19-reliability-usability.md)。
 
 ## 在 GitHub Actions 上运行
 

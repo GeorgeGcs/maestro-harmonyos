@@ -198,7 +198,8 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 | 视频录屏 | 可选 Huawei 系统录屏后端；显式开启，按本次唯一文件导出和清理 |
 | 深链接 | `openLink` 由系统解析 URI。API 22 模拟器已验证自定义 URI 及查询参数。 |
 | 实验性 | `addMedia` 需要图库和 `mediatool`。`setOrientation` 需要提供旋转接口的 UITest RPC。`clearState` 和 `launchApp.clearState` 需要普通应用且包信息确认用户数据可清除。详见[命令支持范围](user-guide.md#当前支持范围)。 |
-| 尚未支持 | HAP 安装、权限修改、`hideKeyboard`、位置及代理设置 |
+| `hideKeyboard` | 11 月 19 日源码新增；先识别键盘窗口，单次返回后核对键盘隐藏且应用保留焦点；API 22 模拟器已验证。现有 v0.1.3 下载包不含此功能。 |
+| 尚未支持 | HAP 安装、权限修改、位置及代理设置 |
 | 尚未接入 | Studio、MCP、自动启动设备、多设备分片和云端运行 |
 
 `back` 是设备返回键，不能保证在所有应用中都等同于关闭键盘。UITest 的文本输入、布局可见范围和滑动行为可能因系统版本或控件而不同；滑动时长通过速度近似换算。主机模拟测试不能证明这些行为在手机上可用。

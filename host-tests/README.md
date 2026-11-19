@@ -69,6 +69,14 @@ $env:MAESTRO_TEST_POSIX_SHELL = 'D:\tools\Git\bin\bash.exe'
 
 这会执行上游 `:maestro-client:test` 中的 `maestro.harmonyos.*`，覆盖真实 Maestro 选择器、`HarmonyOSDriver` 和设备命令处理。驱动测试目录不在独立主机构建的范围内。
 
+同时运行编排层的步骤事件、录屏输出与证据生成测试：
+
+```powershell
+./scripts/test-host.ps1 -FullUpstream -Orchestration
+```
+
+Windows CI 先运行精简测试，再执行上述完整回归；JUnit 分模块归档，并由 `scripts/ci/verify-core-tests.ps1` 核对必测类和跳过项。CI 还会核对源码 fork 与补丁的完整源码树，入口见 [CI 说明](../docs/ci.md#核心回归与源码-fork)。
+
 YAML 集成和 CLI 会话测试使用完整上游构建，在仓库根目录执行：
 
 ```powershell
