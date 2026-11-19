@@ -4,7 +4,9 @@
 
 v0.1.3 在应用获得窗口焦点后继续执行 Flow。故障查询超时会保留原失败原因。API 22 模拟器上，CLI 验证了故意失败后释放设备并重跑，已安装的 VS Code 插件连续两轮完成失败定位、停止、释放与重跑。
 
-**v0.1.4 候选版**加入 `hideKeyboard`、缩小后台预览帧和窗口焦点解析。Windows CI 已执行标准 YAML 集成和 CLI 会话回归，源码 fork 与交付补丁通过完整源码树核对。 [v0.1.4 变更与验证](docs/releases/0.1.4.md)
+**v0.1.4 候选版**已完成回归和打包。新增 `hideKeyboard`、VS Code 命令补全和 Agent 预检支持，修复启动时的窗口焦点判断。后台预览和主机录像共用缩小帧，显式截图仍保存原尺寸。API 22 模拟器的静态页面短测中，单帧数据量减少约 **80.3%**。
+
+最终 Windows CI 已通过，本地累计通过 **1,269 项** TAP/JUnit 检查。API 22 模拟器的 ComponentCollection 五条 Flow **5/5 通过，用时 4 分 7 秒**。解压后的 CLI 通过了故意失败、截图留证、设备释放和重跑验证，实际安装的 VS Code 插件 0.1.3 通过了预览与录屏验证。候选版的独立 CLI、便携包、VSIX 和 SHA-256 校验值已准备好，等待发布。 [v0.1.4 发行说明](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/blob/dca2ee68b90f999f8508c82600d429ff011f74a9/docs/releases/0.1.4.md) · [Windows CI](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/44548088023)
 
 **用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
