@@ -121,7 +121,7 @@ Get-ChildItem ./artifacts -Recurse -Filter '*.log' |
 
 ## VSCode 操作录制
 
-插件位于 `packages/vscode`。先构建已应用鸿蒙补丁的 CLI，再在插件目录执行 `npm ci --ignore-scripts` 和 `npm run package`，得到 `dist/maestro-harmonyos-recorder-0.1.2.vsix`。在 VS Code 扩展视图选择“从 VSIX 安装”。JDK、HDC 和 Maestro 分发包需单独配置。
+插件位于 `packages/vscode`。先构建已应用鸿蒙补丁的 CLI，再在插件目录执行 `npm ci --ignore-scripts` 和 `npm run package`。生成的 VSIX 位于 `dist`，文件名包含插件版本。请在 VS Code 扩展视图选择“从 VSIX 安装”，并配置 JDK、HDC 和 Maestro CLI。
 
 在可信任的本地工作区配置 `harmonyosRecorder.cliDirectory`、`javaPath`、`hdcPath`，从命令面板执行“**HarmonyOS: 打开流程录制**”。扩展不会运行 `config.local.ps1`，已经打开的 VSCode 也不会自动取得后来在终端加载的环境变量；此时在插件设置中填写工具路径。
 

@@ -55,8 +55,9 @@ node scripts/ci/prepare-component-smoke.mjs D:/ci/component-collection.hap HAP_S
 | 02-dialogs | `globalMethods/dialogs/alertDialogSample/AlertDialogSample.ets` | 单按钮弹窗显示并关闭；双按钮弹窗显示警告及正文，取消后消失 |
 | 03-input | `components/textAndInput/textInputSample/TextInputSample.ets` | 初始计数 0/12；输入 12 个字符后文本及计数 12/12 同时可见 |
 | 04-scroll | `components/scrollAndSwipe/scrollSample/ScrollSample.ets` | 执行向上滑动后重新定位 `test_input`，输入内容可见 |
+| 05-hide-keyboard | `components/textAndInput/textInputSample/TextInputSample.ets` | 按 ID 定位输入框，收起键盘后仍在原页面，重复调用不会返回上一页 |
 
-滚动场景包含必执行的 `swipe`，但目标在滑动前是否位于屏幕外仍取决于设备尺寸。真机验证应查看前后截图及步骤记录；本场景不验证嵌套图片区域的滚动距离。输入场景可能弹出键盘，截图用于检查文本与计数是否仍可见；不依赖尚未支持的 `hideKeyboard`。
+滚动场景包含必执行的 `swipe`，但目标在滑动前是否位于屏幕外仍取决于设备尺寸。真机验证应查看前后截图及步骤记录。键盘场景需要支持 `hideKeyboard` 的 CLI，运行前请完成测试设备的输入法初始化。
 
 输入页使用 Stack 将计数文字叠在 TextInput 上，文字控件横跨输入框中部。直接点击输入框中心时，设备可能不把焦点交给输入框。因此输入用例先按提示文字定位，再使用标准 `point: "50%,15%"` 点击该控件内部上方，并断言 `focused: true` 后输入；最终仍须同时看到输入内容与 `12/12`。
 

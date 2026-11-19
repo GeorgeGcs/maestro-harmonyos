@@ -46,6 +46,9 @@ export async function run(): Promise<void> {
     assert.equal(problems().length, 0);
     let items = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', uri, new vscode.Position(2, 5));
     assert.ok(items?.items.some(item => item.label === 'tapOn'));
+    await replace('appId: org.example.app\n---\n- hide');
+    items = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', uri, new vscode.Position(2, 6));
+    assert.ok(items?.items.some(item => item.label === 'hideKeyboard' && item.insertText === 'hideKeyboard'));
     await replace('appId: org.example.app\n---\n- tapOn:\n    id: login\n    ');
     items = await vscode.commands.executeCommand<vscode.CompletionList>('vscode.executeCompletionItemProvider', uri, new vscode.Position(4, 4));
     assert.ok(items?.items.some(item => item.label === 'text'));
