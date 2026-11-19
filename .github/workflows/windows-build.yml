@@ -42,7 +42,9 @@ jobs:
             $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
             $message = "Stage $($report.stage): $($report.error)"
             $logName = switch ($report.stage) {
+              'source-fork' { 'source-fork' }
               'host-tests' { 'host-tests' }
+              'driver-orchestration-tests' { 'driver-orchestration-tests' }
               'extension' { ($report.error -split ' ', 2)[0] }
               'cli' { ($report.error -split ' ', 2)[0] }
             }

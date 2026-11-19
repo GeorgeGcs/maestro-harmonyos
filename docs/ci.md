@@ -15,6 +15,18 @@
 
 复用 Windows runner 的脚本调用和证据校验。每次运行使用新的输出目录，同一个模拟器实例串行使用，设备状态目录留在工作区之外。平台将产物目录归档并解析 JUnit；成功条件同时包含 Flow 通过、证据齐全、会话确认释放和模拟器关闭。若平台强制取消导致脚本来不及收尾，先查持久状态、实例和 HDC 端口，确认本轮资源已释放后再调度下一轮。
 
+### 核心回归与源码 fork
+
+Windows 构建会运行精简主机测试、完整鸿蒙驱动与传输测试，以及编排层的步骤事件、录屏输出和证据生成测试。JUnit 分模块归档，便于核对实际执行范围。
+
+源码 fork 固定在根目录 source-fork.lock.json。CI 获取该提交后，用独立 Git 索引将交付补丁应用于固定上游，比较完整源码树。两者不同就停止构建。手工核对也可执行：
+
+```powershell
+node scripts/verify-source-fork.mjs --repository ./path/to/source-fork --output ./artifacts/source-fork.json
+```
+
+本地源码仓需包含锁定的上游和 fork 提交。校验器保留调用方的工作文件和暂存区。升级 fork 时应先完成源码树核验，再共同更新补丁和锁定提交。
+
 ## 在 GitHub Actions 上运行
 
 [Windows 主机构建](../.github/workflows/windows-build.yml)已在 GitHub 托管 runner 上通过。作业执行 JVM 和插件测试，从固定 Maestro 上游构建 CLI 和 VSIX，并上传日志、JUnit 和校验值。该次作业的 CLI 与 VSIX 下载后已在本机平板通过冒烟，验证了失败 YAML 行、截图与控制台日志的跳转，以及设备释放。[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)
