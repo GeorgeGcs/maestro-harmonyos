@@ -35,10 +35,13 @@ try {
     $report.patchSha256 = (Get-FileHash -LiteralPath (Join-Path $root 'patches/maestro/0001-harmonyos-host.patch')).Hash.ToLowerInvariant()
     $env:MAESTRO_CLI_NO_ANALYTICS = '1'
     $env:MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED = 'true'
-    $gitRoot = Split-Path (Split-Path (Get-Command git.exe -CommandType Application).Source)
+    $gitCommand = Get-Command git.exe -CommandType Application | Select-Object -First 1
+    $gitRoot = Split-Path (Split-Path $gitCommand.Source)
     $bash = Join-Path $gitRoot 'bin/bash.exe'
     if (!(Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Git Bash is required for real-shell recovery tests.' }
     $env:MAESTRO_TEST_POSIX_SHELL = $bash
+    $report.bash = $bash
+    Write-Output ('Core test shell: ' + $bash)
 
     $report.stage = 'source'
     # Fail an upstream transfer that stops making progress instead of losing the job budget.

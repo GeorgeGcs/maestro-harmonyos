@@ -39,7 +39,16 @@ try {
     Push-Location -LiteralPath $checkoutPath
     try {
         & $wrapper @gradleArguments
-        if ($LASTEXITCODE -ne 0) { throw ('HarmonyOS host tests failed (Gradle exit code ' + $LASTEXITCODE + ').') }
+        if ($LASTEXITCODE -ne 0) {
+            $code = $LASTEXITCODE
+            $details = foreach ($file in (Get-ChildItem -LiteralPath (Join-Path $buildRoot 'build/test-results/test') -Filter 'TEST-*.xml' -File -ErrorAction SilentlyContinue)) {
+                try {
+                    [xml]$xml = Get-Content -LiteralPath $file.FullName -Raw
+                    foreach ($failure in $xml.SelectNodes('//testcase/failure')) { [string]$failure.message }
+                } catch { Write-Warning ('Cannot read test failure: ' + $file.Name) }
+            }
+            throw ('HarmonyOS host tests failed (Gradle exit code ' + $code + '). ' + (($details | Select-Object -First 4) -join ' | '))
+        }
     } finally {
         Pop-Location
     }
