@@ -175,7 +175,8 @@ for (const invalid of [false, true]) test(`PowerShell reconciliation ${invalid ?
     '-DeviceStateDirectory', stateRoot, '-RecoveryRoot', f.input.recoveryRoot, '-ReconcileOnly', '-RecoveryReportPath', f.input.responsePath];
   const run = execute('powershell.exe', args, { windowsHide: true, timeout: 45000,
     env: { ...process.env, PATH: path.dirname(process.execPath) + path.delimiter + process.env.PATH } });
-  if (invalid) await assert.rejects(run, /Maintenance response differs/); else await run;
+  if (invalid) await assert.rejects(run, error => /Maintenanceresponsediffers/.test(error.stderr?.replace(/\s/g, '') ?? ''));
+  else await run;
   const after = JSON.parse(await fs.readFile(statePath));
   assert.equal(after.state, invalid ? 'needs_inspection' : 'released'); assert.equal(after.execution, 'unknown');
   assert.deepEqual(JSON.parse(await fs.readFile(controlPath)), { protocol: 'maestro.harmonyos.runner-control', schemaVersion: 1, deviceId: f.input.deviceId, runId, attemptId, process: dead });
