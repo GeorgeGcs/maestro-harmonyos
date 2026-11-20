@@ -185,7 +185,9 @@ for (const mode of ['complete', 'large-complete']) for (const invalid of [false,
     '-DeviceId', f.input.deviceId, '-DeviceStateDirectory', stateRoot, '-RecoveryRoot', f.input.recoveryRoot,
     '-ReconcileOnly', '-RecoveryReportPath', f.input.responsePath], { windowsHide: true, timeout: 45000,
     env: { ...process.env, PATH: path.dirname(process.execPath) + path.delimiter + process.env.PATH } });
-  if (invalid) await assert.rejects(invocation, /Fence response differs/); else await invocation;
+  // Windows PowerShell can wrap a diagnostic in the middle of a word.
+  if (invalid) await assert.rejects(invocation, error => /Fenceresponsediffers/.test(error.stderr?.replace(/\s/g, '') ?? ''));
+  else await invocation;
   const after = JSON.parse(await fs.readFile(statePath));
   assert.equal(after.state, invalid ? 'needs_inspection' : 'released');
   assert.equal(after.execution, 'unknown');

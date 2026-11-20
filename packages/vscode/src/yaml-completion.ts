@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 const commands: Record<string, string> = {
   launchApp: '', tapOn: ':', assertVisible: ':', assertNotVisible: ':', inputText: ': ',
   swipe: ':', scrollUntilVisible: ':', takeScreenshot: ': ', runFlow: ': ', back: '',
-  waitForAnimationToEnd: '',
+  hideKeyboard: '', waitForAnimationToEnd: '',
 };
 const parameters: Record<string, readonly string[]> = {
   tapOn: ['id', 'text', 'point', 'index', 'optional'],

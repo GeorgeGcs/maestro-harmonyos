@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "branch": "harmonyos/stable",
+  "repository": "https://github.com/GeorgeGcs/Maestro-fork.git",
+  "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
+  "commit": "f5e3b0dc4f5e9552cd7b0575db99bd3685a9156a"
+}

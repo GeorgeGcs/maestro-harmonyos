@@ -137,7 +137,7 @@ export async function plans(config, output) {
       const names = ['test-cleanup-fence', 'test-maintenance-release', 'test-maintenance-tools', 'test-windows-boot', 'test-ci-collect-artifacts'];
       nodeTests(group, 'recovery', names.map(n => 'scripts/tests/' + n + '.mjs'));
     } else if (group === 'Scripts') {
-      const names = (await fs.readdir(path.join(p, 'scripts/tests'))).filter(n => n.endsWith('.mjs') && /^test-/.test(n) &&
+      const names = (await fs.readdir(path.join(p, 'scripts/tests'))).filter(n => (n.endsWith('.mjs') && /^test-/.test(n) || n.endsWith('.test.mjs')) &&
         !['test-cleanup-fence.mjs', 'test-maintenance-release.mjs', 'test-maintenance-tools.mjs', 'test-windows-boot.mjs', 'test-ci-collect-artifacts.mjs'].includes(n));
       nodeTests(group, 'scripts-node', names.sort().map(n => 'scripts/tests/' + n));
       for (const name of ['test-run-harmonyos', 'test-device-matrix', 'test-validation-plan', 'test-ci-junit', 'test-patch-scripts']) ps(group, name);
