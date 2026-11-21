@@ -10,7 +10,7 @@
 
 需要 VSCode 1.95 或以上版本、JDK 17，以及包含本项目补丁的 Maestro CLI。HDC 应能发现已授权的设备。可以使用本项目发布的 CLI 分发包，或按仓库 `docs/setup.md` 构建 `:maestro-cli:installDist`。
 
-在 VS Code 扩展视图中选择“从 VSIX 安装”，使用发行版随附的 `maestro-harmonyos-recorder-0.1.2-<提交号>.vsix`，或本地构建的 `dist/maestro-harmonyos-recorder-0.1.2.vsix`。Java、HDC 和 Maestro CLI 需单独配置。
+在 VS Code 扩展视图中选择“从 VSIX 安装”，使用发行版随附的 `maestro-harmonyos-recorder-<插件版本>-<提交号>.vsix`，或本地构建在 `dist` 中的 VSIX。Java、HDC 和 Maestro CLI 需单独配置。
 
 打开本地项目并信任工作区，在设置中配置：
 

@@ -65,6 +65,13 @@ try {
     Invoke-BuildStep core-test-results {
         & (Join-Path $root 'scripts/ci/verify-core-tests.ps1') -UpstreamDirectory $upstream -Output (Join-Path $output 'core-test-results.json')
     }
+    $report.stage = 'flow-cli-tests'
+    $env:GRADLE_USER_HOME = Join-Path $root '.gradle-user-home'
+    Invoke-BuildStep flow-cli-tests {
+        & (Join-Path $upstream 'gradlew.bat') -p $upstream --no-daemon --console=plain `
+            :maestro-test:test --tests 'maestro.harmonyos.*' `
+            :maestro-cli:test --tests 'maestro.cli.harmonyos.*' --tests 'maestro.cli.session.*'
+    }
     $report.stage = 'cli'
     $env:GRADLE_USER_HOME = Join-Path $root '.gradle-user-home'
     Invoke-BuildStep build-cli { & (Join-Path $upstream 'gradlew.bat') -p $upstream :maestro-cli:installDist --no-daemon --console=plain }
@@ -97,7 +104,8 @@ try {
 } finally {
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'host-job.json') -Encoding utf8NoBOM
-    foreach ($module in @('host-tests', '.upstream/maestro/maestro-client', '.upstream/maestro/maestro-orchestra')) {
+    foreach ($module in @('host-tests', '.upstream/maestro/maestro-client', '.upstream/maestro/maestro-orchestra',
+            '.upstream/maestro/maestro-test', '.upstream/maestro/maestro-cli')) {
         $testResults = Join-Path $root "$module/build/test-results/test"
         if (Test-Path -LiteralPath $testResults) {
             $moduleName = Split-Path -Leaf $module

@@ -1333,10 +1333,10 @@ new file mode 100644
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
 new file mode 100644
-index 0000000..b27a6d6
+index 0000000..41252b6
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,242 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1571,7 +1571,8 @@ index 0000000..b27a6d6
 +            Command("assertNotVisible", "supported"), Command("extendedWaitUntil", "supported"),
 +            Command("takeScreenshot", "supported", recorder = true, screen = false),
 +            Command("startRecording", "experimental", recording = true), Command("stopRecording", "experimental", recording = true),
-+            Command("clearState", "experimental", screen = false, application = true), Command("hideKeyboard", "unsupported"),
++            Command("clearState", "experimental", screen = false, application = true),
++            Command("hideKeyboard", "supported", application = true),
 +            Command("openLink", "supported"), Command("addMedia", "experimental", screen = false),
 +            Command("setLocation", "unsupported"), Command("setOrientation", "experimental"),
 +            Command("setPermissions", "unsupported"), Command("installApp", "unsupported"),
@@ -7089,10 +7090,10 @@ index 0000000..92726cd
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
 new file mode 100644
-index 0000000..8f1f49f
+index 0000000..5ed2ba4
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,145 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7168,6 +7169,17 @@ index 0000000..8f1f49f
 +        val screen = preflight(probe, """{"deviceId":"test-target","commands":["tapOn"]}""")
 +        assertEquals("unknown", screen["readiness"].asText())
 +        assertTrue(screen["checks"].any { it["name"].asText() == "screenUnlocked" && it["status"].asText() == "unknown" })
++    }
++
++    @Test fun `keyboard dismissal is advertised for flows without claiming device readiness`() {
++        val probe = Probe()
++        val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(HarmonyOsAgentCapabilities(probe).describe())
++        val command = result["commands"].single { it["name"].asText() == "hideKeyboard" }
++        assertEquals("supported", command["implementation"].asText())
++        val check = preflight(probe, """{"deviceId":"test-target","appId":"com.example.demo","commands":["hideKeyboard"]}""")
++        assertEquals("unknown", check["readiness"].asText())
++        assertFalse(check["checks"].any { it["status"].asText() == "failed" })
++        assertTrue(probe.shell.all { it.first() in setOf("which", "bm") })
 +    }
 +
 +    @Test fun `invalid requests are rejected before device discovery`() {
@@ -27710,10 +27722,10 @@ index 0000000..5037c3c
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..234a60f
+index 0000000..a808485
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,279 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -27751,6 +27763,7 @@ index 0000000..234a60f
 +    val remoteFiles = mutableMapOf<String, ByteArray>()
 +
 +    private var inputFocused = false
++    private var foregroundApp: String? = null
 +    private var enteredName = ""
 +    private var scrollPosition = 0
 +    private val mapper = ObjectMapper()
@@ -27790,9 +27803,22 @@ index 0000000..234a60f
 +    }
 +
 +    private fun execute(arguments: List<String>): HdcCommandResult = when {
++        arguments == listOf("hidumper", "-s", "DisplayManagerService", "-a", "-a") -> hostSuccess(
++            "[SCREEN SESSION]\nDisplayId: 0\nactiveModes<id, W, H, RS>: 0, $WIDTH, $HEIGHT, 60\nRotation: 0\n",
++        )
++        arguments == listOf("hidumper", "-s", "WindowManagerService", "-a", "-a") -> hostSuccess(
++            "WindowName DisplayId Pid WinId Type ZOrd [ x y w h ]\n" + if (foregroundApp != null) {
++                "Fixture 0 123 12 1 102 [ 0 0 $WIDTH $HEIGHT ]\nFocus window: 12\n"
++            } else "Focus window: -1\n",
++        )
++        arguments == listOf("ps", "-A", "-o", "PID,NAME") ->
++            hostSuccess("PID NAME\n" + (foregroundApp?.let { "123 $it\n" } ?: ""))
++        arguments == listOf("date", "+%s%3N") -> hostSuccess(System.currentTimeMillis().toString())
++        arguments.take(2) == listOf("hisysevent", "-l") -> hostSuccess()
 +        arguments.take(2) == listOf("aa", "force-stop") -> {
 +            check(arguments.size == 3)
 +            stoppedApps += arguments[2]
++            if (foregroundApp == arguments[2]) foregroundApp = null
 +            state = State.HOME
 +            inputFocused = false
 +            enteredName = ""
@@ -27803,6 +27829,7 @@ index 0000000..234a60f
 +            check(arguments.size == 6 && arguments[2] == "-b" && arguments[4] == "-a")
 +            check(arguments[5] == "EntryAbility")
 +            launchedApps += arguments[3]
++            foregroundApp = arguments[3]
 +            state = State.HOME
 +            inputFocused = false
 +            enteredName = ""

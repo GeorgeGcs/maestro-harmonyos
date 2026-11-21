@@ -45,6 +45,7 @@ jobs:
               'source-fork' { 'source-fork' }
               'host-tests' { 'host-tests' }
               'driver-orchestration-tests' { 'driver-orchestration-tests' }
+              'flow-cli-tests' { 'flow-cli-tests' }
               'extension' { ($report.error -split ' ', 2)[0] }
               'cli' { ($report.error -split ' ', 2)[0] }
             }

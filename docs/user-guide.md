@@ -21,7 +21,7 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 
 ## 安装方式和前置条件
 
-首次使用可下载已发布的 **CLI、VSIX 或便携包**，按 [v0.1.2 安装说明](releases/0.1.2.md)校验文件并配置工具。便携包包含源码、脚本和 CLI，从包内 `source` 运行脚本时用 `-CliDir ../cli` 指定随包分发。
+首次使用可下载已发布的 **CLI、VSIX 或便携包**，按对应版本的安装说明校验文件并配置工具。便携包包含源码、脚本和 CLI，从包内 `source` 运行脚本时用 `-CliDir ../cli` 指定随包分发。 [发行页](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
 
 需要开发或自行构建时，按下文获取固定 Maestro 上游版本、应用适配补丁，再构建 CLI 与 VSIX。下文构建步骤及默认 CLI 路径按源码工作区编写。仅安装普通 Maestro 分发包不能替代本项目的适配版本。
 
@@ -169,7 +169,7 @@ try {
 }
 ```
 
-在 VS Code 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist/maestro-harmonyos-recorder-0.1.2.vsix`。使用发行包时选择带源码提交号的对应 VSIX。随后打开本地工作区并信任该工作区。
+在 VS Code 扩展视图中选择“从 VSIX 安装”，打开 `packages/vscode/dist` 中对应版本的 VSIX。使用发行包时选择带源码提交号的对应附件。随后打开本地工作区并信任该工作区。
 
 ### 2. 配置工具和应用
 

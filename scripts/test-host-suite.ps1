@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'This host suite currently supports Windows only.' }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$node = (Get-Command $NodePath -CommandType Application -ErrorAction Stop).Source
+$node = (Get-Command $NodePath -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 $shell = (Get-Process -Id $PID).Path
 $arguments = @((Join-Path $PSScriptRoot 'host-suite/main.mjs'), '--project', $repository, '--powershell', $shell)
 foreach ($name in $Group) { $arguments += @('--group', $name) }

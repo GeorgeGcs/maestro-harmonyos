@@ -36,7 +36,7 @@ class MaintenanceProducer {
     }
 
     static HdcClient client(HdcCommandRunner runner) {
-        return new HdcClient("never-executed-fixture", runner, Duration.ofSeconds(3), null, false);
+        return new HdcClient("never-executed-fixture", runner, Duration.ofSeconds(3), null, false, line -> Unit.INSTANCE);
     }
 
     JsonNode observe(Path output) {
@@ -87,7 +87,7 @@ class MaintenanceProducer {
                 throw new AssertionError("Missing proof was accepted");
             } catch (HdcException expected) { }
             if (retainedImages) {
-                var adapter = new HdcHarmonyOSDevice(DEVICE, lost);
+                    var adapter = new HdcHarmonyOSDevice(DEVICE, lost, null, null, null, null, false);
                 try { adapter.hierarchy(Duration.ofSeconds(2)); throw new AssertionError("Missing layout proof accepted"); }
                 catch (RuntimeException expected) { }
                 try { adapter.screenshot(Duration.ofSeconds(2)); throw new AssertionError("Missing screenshot proof accepted"); }
