@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Offline,
-    [switch]$FullUpstream
+    [switch]$FullUpstream,
+    [switch]$Orchestration
 )
 
 $ErrorActionPreference = 'Stop'
@@ -16,6 +17,8 @@ $checkoutPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $upstreamSpec.che
 $wrapper = Join-Path $checkoutPath 'gradlew.bat'
 if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) { throw 'The pinned upstream Gradle wrapper is missing.' }
 
+if ($Orchestration -and -not $FullUpstream) { throw 'Orchestration tests require -FullUpstream.' }
+
 $buildRoot = Join-Path $projectRoot 'host-tests'
 $testTask = 'test'
 if ($FullUpstream) {
@@ -28,11 +31,24 @@ $savedGradleUserHome = $env:GRADLE_USER_HOME
 try {
     $env:GRADLE_USER_HOME = Join-Path $projectRoot '.gradle-user-home'
     $gradleArguments = @('-p', $buildRoot, $testTask, '--tests', 'maestro.harmonyos.*', '--no-daemon', '--console=plain')
+    if ($Orchestration) {
+        $gradleArguments += @(':maestro-orchestra:test', '--tests', 'maestro.orchestra.debug.OrchestraListenerDispatchTest',
+            '--tests', 'maestro.orchestra.debug.ScreenRecordingOutputTest', '--tests', 'maestro.orchestra.debug.ArtifactsGeneratorTest')
+    }
     if ($Offline) { $gradleArguments += '--offline' }
     Push-Location -LiteralPath $checkoutPath
     try {
         & $wrapper @gradleArguments
-        if ($LASTEXITCODE -ne 0) { throw ('HarmonyOS host tests failed (Gradle exit code ' + $LASTEXITCODE + ').') }
+        if ($LASTEXITCODE -ne 0) {
+            $code = $LASTEXITCODE
+            $details = foreach ($file in (Get-ChildItem -LiteralPath (Join-Path $buildRoot 'build/test-results/test') -Filter 'TEST-*.xml' -File -ErrorAction SilentlyContinue)) {
+                try {
+                    [xml]$xml = Get-Content -LiteralPath $file.FullName -Raw
+                    foreach ($failure in $xml.SelectNodes('//testcase/failure')) { [string]$failure.message }
+                } catch { Write-Warning ('Cannot read test failure: ' + $file.Name) }
+            }
+            throw ('HarmonyOS host tests failed (Gradle exit code ' + $code + '). ' + (($details | Select-Object -First 4) -join ' | '))
+        }
     } finally {
         Pop-Location
     }

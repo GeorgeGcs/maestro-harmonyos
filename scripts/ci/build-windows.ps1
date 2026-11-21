@@ -35,14 +35,43 @@ try {
     $report.patchSha256 = (Get-FileHash -LiteralPath (Join-Path $root 'patches/maestro/0001-harmonyos-host.patch')).Hash.ToLowerInvariant()
     $env:MAESTRO_CLI_NO_ANALYTICS = '1'
     $env:MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED = 'true'
+    $gitCommand = Get-Command git.exe -CommandType Application | Select-Object -First 1
+    $gitRoot = Split-Path (Split-Path $gitCommand.Source)
+    $bash = Join-Path $gitRoot 'bin/bash.exe'
+    if (!(Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Git Bash is required for real-shell recovery tests.' }
+    $env:MAESTRO_TEST_POSIX_SHELL = $bash
+    $report.bash = $bash
+    Write-Output ('Core test shell: ' + $bash)
 
     $report.stage = 'source'
     # Fail an upstream transfer that stops making progress instead of losing the job budget.
     if (!$env:GIT_HTTP_LOW_SPEED_LIMIT) { $env:GIT_HTTP_LOW_SPEED_LIMIT = '1' }
     if (!$env:GIT_HTTP_LOW_SPEED_TIME) { $env:GIT_HTTP_LOW_SPEED_TIME = '60' }
     Invoke-BuildStep prepare { & (Join-Path $root 'scripts/prepare-upstream.ps1') }
+    $report.stage = 'source-fork'
+    $fork = Get-Content -LiteralPath (Join-Path $root 'source-fork.lock.json') -Raw | ConvertFrom-Json
+    Invoke-BuildStep source-fork-tests {
+        & node --test (Join-Path $root 'scripts/tests/source-fork.test.mjs') (Join-Path $root 'scripts/tests/test-core-results.mjs')
+    }
+    Invoke-BuildStep source-fork {
+        & git -C $upstream fetch --no-tags --depth 1 $fork.repository $fork.commit
+        if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the pinned source fork.' }
+        & node (Join-Path $root 'scripts/verify-source-fork.mjs') --repository $upstream --output (Join-Path $output 'source-fork.json')
+    }
     $report.stage = 'host-tests'
     Invoke-BuildStep host-tests { & (Join-Path $root 'scripts/test-host.ps1') }
+    $report.stage = 'driver-orchestration-tests'
+    Invoke-BuildStep driver-orchestration-tests { & (Join-Path $root 'scripts/test-host.ps1') -FullUpstream -Orchestration }
+    Invoke-BuildStep core-test-results {
+        & (Join-Path $root 'scripts/ci/verify-core-tests.ps1') -UpstreamDirectory $upstream -Output (Join-Path $output 'core-test-results.json')
+    }
+    $report.stage = 'flow-cli-tests'
+    $env:GRADLE_USER_HOME = Join-Path $root '.gradle-user-home'
+    Invoke-BuildStep flow-cli-tests {
+        & (Join-Path $upstream 'gradlew.bat') -p $upstream --no-daemon --console=plain `
+            :maestro-test:test --tests 'maestro.harmonyos.*' `
+            :maestro-cli:test --tests 'maestro.cli.harmonyos.*' --tests 'maestro.cli.session.*'
+    }
     $report.stage = 'cli'
     $env:GRADLE_USER_HOME = Join-Path $root '.gradle-user-home'
     Invoke-BuildStep build-cli { & (Join-Path $upstream 'gradlew.bat') -p $upstream :maestro-cli:installDist --no-daemon --console=plain }
@@ -75,9 +104,13 @@ try {
 } finally {
     $report.finishedAt = [DateTime]::UtcNow.ToString('o')
     $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $output 'host-job.json') -Encoding utf8NoBOM
-    $testResults = Join-Path $root 'host-tests/build/test-results/test'
-    if (Test-Path -LiteralPath $testResults) {
-        $junit = New-Item -ItemType Directory -Path (Join-Path $output 'junit')
-        Get-ChildItem -LiteralPath $testResults -Filter 'TEST-*.xml' -File | Copy-Item -Destination $junit.FullName
+    foreach ($module in @('host-tests', '.upstream/maestro/maestro-client', '.upstream/maestro/maestro-orchestra',
+            '.upstream/maestro/maestro-test', '.upstream/maestro/maestro-cli')) {
+        $testResults = Join-Path $root "$module/build/test-results/test"
+        if (Test-Path -LiteralPath $testResults) {
+            $moduleName = Split-Path -Leaf $module
+            $junit = New-Item -ItemType Directory -Force -Path (Join-Path $output "junit/$moduleName")
+            Get-ChildItem -LiteralPath $testResults -Filter 'TEST-*.xml' -File | Copy-Item -Destination $junit.FullName
+        }
     }
 }

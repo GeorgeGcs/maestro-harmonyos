@@ -877,10 +877,9 @@ index f2f7bae..a13e0e6 100644
  
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
 new file mode 100644
-index 0000000..391f285
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentAttemptStore.kt
-@@ -0,0 +1,423 @@
+@@ -0,0 +1,451 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1127,14 +1126,35 @@ index 0000000..391f285
 +    }
 +
 +    @Synchronized fun recordFile(stepId: String?, kind: String, path: Path, phase: String, capturedAt: Instant = Instant.now()) {
-+        val relative = relative(path)
++        var relative = relative(path)
 +        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
 +            recordUnavailable(stepId, kind, "missing", phase)
 +            return
 +        }
-+        val hash = try { sha256(path.toFile().readBytes()) } catch (error: java.io.IOException) {
++        val bytes = try { path.toFile().readBytes() } catch (error: java.io.IOException) {
 +            recordUnavailable(stepId, kind, "capture_failed", phase, HarmonyOsAgentProtocol.error(error))
 +            return
++        }
++        val hash = sha256(bytes)
++        if (hasFileReference(stepId, relative, kind, phase, hash)) return
++        val alreadyReferenced = entries.any { entry ->
++            (entry["evidence"] as List<*>).filterIsInstance<Map<*, *>>().any { it["path"] == relative }
++        }
++        if (alreadyReferenced) {
++            // A v1 path has one owner. Keep other step/phase associations as immutable,
++            // content-identical files instead of registering that path a second time.
++            val identity = sha256(listOf(stepId, relative, kind, phase, hash).joinToString("\u0000").toByteArray())
++            val extension = path.fileName.toString().substringAfterLast('.', "").takeIf { it.matches(Regex("[A-Za-z0-9]{1,12}")) }
++            val reference = directory.resolve("evidence-ref-$identity" + (extension?.let { ".$it" } ?: ""))
++            if (Files.exists(reference, LinkOption.NOFOLLOW_LINKS)) {
++                require(Files.isRegularFile(reference, LinkOption.NOFOLLOW_LINKS))
++                relative(reference)
++                require(sha256(Files.readAllBytes(reference)) == hash) { "Evidence reference bytes changed." }
++            } else {
++                Files.write(reference, bytes, StandardOpenOption.CREATE_NEW)
++            }
++            relative = relative(reference)
++            if (hasFileReference(stepId, relative, kind, phase, hash)) return
 +        }
 +        appendEvidence(stepId, mapOf("kind" to kind, "state" to "available", "path" to relative,
 +            "sha256" to hash, "capturedAt" to capturedAt.toString(), "phase" to phase, "error" to null))
@@ -1259,6 +1279,13 @@ index 0000000..391f285
 +
 +    @Suppress("UNCHECKED_CAST") private fun artifacts() = data["artifacts"] as MutableMap<String, Any?>
 +
++    private fun hasFileReference(stepId: String?, path: String, kind: String, phase: String, hash: String): Boolean {
++        val entry = entries.firstOrNull { it["stepId"] == stepId } ?: return false
++        return (entry["evidence"] as List<*>).filterIsInstance<Map<*, *>>().any {
++            it["path"] == path && it["kind"] == kind && it["phase"] == phase && it["sha256"] == hash
++        }
++    }
++
 +    private fun appendEvidence(stepId: String?, evidence: Map<String, Any?>) {
 +        val entry = entries.firstOrNull { it["stepId"] == stepId } ?: linkedMapOf<String, Any?>(
 +            "stepId" to stepId, "source" to null, "status" to if (isTerminal) status else "unknown",
@@ -1306,10 +1333,10 @@ index 0000000..391f285
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
 new file mode 100644
-index 0000000..b27a6d6
+index 0000000..41252b6
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,242 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1544,7 +1571,8 @@ index 0000000..b27a6d6
 +            Command("assertNotVisible", "supported"), Command("extendedWaitUntil", "supported"),
 +            Command("takeScreenshot", "supported", recorder = true, screen = false),
 +            Command("startRecording", "experimental", recording = true), Command("stopRecording", "experimental", recording = true),
-+            Command("clearState", "experimental", screen = false, application = true), Command("hideKeyboard", "unsupported"),
++            Command("clearState", "experimental", screen = false, application = true),
++            Command("hideKeyboard", "supported", application = true),
 +            Command("openLink", "supported"), Command("addMedia", "experimental", screen = false),
 +            Command("setLocation", "unsupported"), Command("setOrientation", "experimental"),
 +            Command("setPermissions", "unsupported"), Command("installApp", "unsupported"),
@@ -4046,7 +4074,7 @@ index 0000000..8147e69
 +    val supportedJournalClasses = setOf(
 +        "c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac",
 +        // 2026-11-05: original frozen CLI exercised with the layout-export wrapper and shell races.
-+        "f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9",
++        "f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9", "c671426296337ffa05e557969e6ae1900bc6f503ae0a4d972d1450ab22ff7f10",
 +    )
 +    val checkpointFields = setOf("schemaVersion", "recoveryId", "deviceId", "ownerId", "createdAt", "scope",
 +        "originalGate", "originalJournal", "originalReceipt", "origin", "tools")
@@ -6463,10 +6491,9 @@ index cc05d69..7bc804a 100644
              )
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
 new file mode 100644
-index 0000000..ba73922
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentAttemptStoreTest.kt
-@@ -0,0 +1,346 @@
+@@ -0,0 +1,386 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -6673,6 +6700,46 @@ index 0000000..ba73922
 +        assertThat(Files.readString(source)).isEqualTo("appId: fixture\n---\n- back\n")
 +        assertThat(attempt.requestCancel()).isFalse()
 +        assertThat(json(attempt.result())["data"]["status"].asText()).isEqualTo("passed")
++    }
++
++    @Test fun `shared failure logs have unique immutable paths and retain every owner`() {
++        val attempt = register()
++        val first = attempt.startStep("flow.yaml", 0, "First", false)
++        val second = attempt.startStep("flow.yaml", 1, "Second", false)
++        val log = attempt.directory.resolve("maestro.log")
++        Files.writeString(log, "original failure diagnostics")
++        attempt.recordFile(null, "log", log, "after")
++        for (step in listOf(first, second)) {
++            attempt.recordFile(step, "log", log, "failure")
++            attempt.recordFile(step, "log", log, "failure")
++        }
++        val entries = json(attempt.evidence())["data"]["entries"].toList()
++        val evidence = entries.flatMap { it["evidence"].toList() }
++        assertThat(evidence).hasSize(3)
++        assertThat(evidence.map { it["path"].asText() }.toSet()).hasSize(3)
++        assertThat(entries.mapNotNull { it["stepId"].takeUnless { id -> id.isNull }?.asText() })
++            .containsExactly(first, second)
++        for (item in evidence) {
++            assertThat(Files.readString(attempt.directory.resolve(item["path"].asText())))
++                .isEqualTo("original failure diagnostics")
++            assertThat(item["sha256"].asText()).isEqualTo(evidence[0]["sha256"].asText())
++        }
++        assertThat(Files.readString(log)).isEqualTo("original failure diagnostics")
++    }
++
++    @Test fun `a tampered shared reference is refused without overwriting bytes`() {
++        val attempt = register()
++        val step = attempt.startStep("flow.yaml", 0, "First", false)
++        val log = attempt.directory.resolve("maestro.log")
++        Files.writeString(log, "original")
++        attempt.recordFile(null, "log", log, "after")
++        attempt.recordFile(step, "log", log, "failure")
++        val entry = json(attempt.evidence())["data"]["entries"].single { it["stepId"].asText() == step }
++        val alias = attempt.directory.resolve(entry["evidence"][0]["path"].asText())
++        Files.writeString(alias, "tampered")
++        assertThrows<IllegalArgumentException> { attempt.recordFile(step, "log", log, "failure") }
++        assertThat(Files.readString(alias)).isEqualTo("tampered")
++        assertThat(Files.readString(log)).isEqualTo("original")
 +    }
 +
 +    @Test fun `successful retry clears failure summary while preserving each step occurrence`() {
@@ -7023,10 +7090,10 @@ index 0000000..92726cd
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
 new file mode 100644
-index 0000000..8f1f49f
+index 0000000..5ed2ba4
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,145 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7102,6 +7169,17 @@ index 0000000..8f1f49f
 +        val screen = preflight(probe, """{"deviceId":"test-target","commands":["tapOn"]}""")
 +        assertEquals("unknown", screen["readiness"].asText())
 +        assertTrue(screen["checks"].any { it["name"].asText() == "screenUnlocked" && it["status"].asText() == "unknown" })
++    }
++
++    @Test fun `keyboard dismissal is advertised for flows without claiming device readiness`() {
++        val probe = Probe()
++        val result = mapper.valueToTree<com.fasterxml.jackson.databind.JsonNode>(HarmonyOsAgentCapabilities(probe).describe())
++        val command = result["commands"].single { it["name"].asText() == "hideKeyboard" }
++        assertEquals("supported", command["implementation"].asText())
++        val check = preflight(probe, """{"deviceId":"test-target","appId":"com.example.demo","commands":["hideKeyboard"]}""")
++        assertEquals("unknown", check["readiness"].asText())
++        assertFalse(check["checks"].any { it["status"].asText() == "failed" })
++        assertTrue(probe.shell.all { it.first() in setOf("which", "bm") })
 +    }
 +
 +    @Test fun `invalid requests are rejected before device discovery`() {
@@ -11991,10 +12069,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..c847915
+index 0000000..640a473
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,675 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -12130,6 +12208,8 @@ index 0000000..c847915
 +        return DeviceInfo(Platform.HARMONYOS, width, height, width, height).also { lastDeviceInfo = it }
 +    }
 +
++    private var activeAppId: String? = null
++
 +    override fun launchApp(appId: String, launchArguments: Map<String, Any>) {
 +        requireOpen()
 +        requireIdentifier(appId, "Bundle name")
@@ -12166,11 +12246,11 @@ index 0000000..c847915
 +        aa(arguments, "start ability successfully.")
 +        val launchWait = minOf(config.commandTimeout, Duration.ofSeconds(12))
 +        val firstWait = if (launchArguments.isEmpty()) launchWait.dividedBy(2) else launchWait
-+        if (awaitAppFocus(appId, firstWait)) return
++        if (awaitAppFocus(appId, firstWait)) { activeAppId = appId; return }
 +        if (launchArguments.isEmpty()) {
 +            // Activation can be acknowledged before the window manager finishes switching.
 +            aa(arguments, "start ability successfully.")
-+            if (awaitAppFocus(appId, launchWait.minus(firstWait))) return
++            if (awaitAppFocus(appId, launchWait.minus(firstWait))) { activeAppId = appId; return }
 +        }
 +        throw HarmonyOSCommandException("Application $appId did not acquire window focus after aa start.", "", "")
 +    }
@@ -12184,6 +12264,8 @@ index 0000000..c847915
 +            val focused = query {
 +                try {
 +                    device.hasAppFocus(appId, minOf(Duration.ofSeconds(2), remaining))
++                } catch (error: maestro.harmonyos.driver.HarmonyOSWindowFormatException) {
++                    throw error
 +                } catch (_: HdcException) {
 +                    checkInterrupted()
 +                    false
@@ -12200,6 +12282,7 @@ index 0000000..c847915
 +        requireOpen()
 +        requireIdentifier(appId, "Bundle name")
 +        aa(listOf("aa", "force-stop", appId), "force stop process successfully.")
++        if (activeAppId == appId) activeAppId = null
 +    }
 +
 +    override fun killApp(appId: String) = stopApp(appId)
@@ -12373,8 +12456,26 @@ index 0000000..c847915
 +        }
 +    }
 +    override fun clearKeychain(): Unit = unsupported("clearKeychain")
-+    override fun isKeyboardVisible(): Boolean = unsupported("keyboard visibility detection")
-+    override fun hideKeyboard(): Unit = unsupported("hideKeyboard; use an app control to dismiss the keyboard")
++    override fun isKeyboardVisible(): Boolean {
++        requireOpen()
++        return query { device.keyboardVisible(config.commandTimeout) }
++    }
++    override fun hideKeyboard() {
++        requireOpen()
++        if (!isKeyboardVisible()) return
++        val appId = activeAppId ?: throw IllegalStateException("Launch the target app before dismissing its keyboard.")
++        if (!query { device.hasAppFocus(appId, config.commandTimeout) }) {
++            throw HarmonyOSCommandException("Cannot dismiss a keyboard outside the target application $appId.", "", "")
++        }
++        input("keyEvent", "Back")
++        val end = System.nanoTime() + config.commandTimeout.toNanos()
++        while (isKeyboardVisible()) {
++            if (!pause(end)) throw HarmonyOSCommandException("The keyboard remained visible after Back.", "", "")
++        }
++        if (!query { device.hasAppFocus(appId, config.commandTimeout) }) {
++            throw HarmonyOSCommandException("The keyboard closed but $appId did not retain window focus.", "", "")
++        }
++    }
 +    override fun openLink(link: String, appId: String?, autoVerify: Boolean, browser: Boolean) {
 +        requireOpen()
 +        if (autoVerify) unsupported("openLink autoVerify")
@@ -12467,13 +12568,13 @@ index 0000000..c847915
 +        val viewer = preview?.takeIf { it.wantsFrame() }
 +        val recorder = hostRecording?.takeIf { it.wantsFrame() }
 +        if (viewer == null && recorder == null) return
-+        val saved = pendingFrame.getAndSet(null)?.takeIf { System.nanoTime() - it.capturedAt <= 500_000_000 }
++        val saved = pendingFrame.getAndSet(null)?.takeIf { System.nanoTime() - it.capturedAt <= 2_000_000_000 }
 +        val frame = saved ?: try {
 +            if (!transport.tryLock(0, TimeUnit.NANOSECONDS)) return
 +            try {
 +                if (!opened || queryFailure != null || System.nanoTime() - lastForegroundIo < 350_000_000) return
 +                val bytes = try {
-+                    device.screenshot(minOf(config.commandTimeout, Duration.ofSeconds(3)))
++                    device.previewFrame(minOf(config.commandTimeout, Duration.ofSeconds(3)))
 +                } catch (error: HdcTimeoutException) {
 +                    // Like an explicit screenshot, a timed-out command may still be running remotely.
 +                    queryFailure = error
@@ -12691,10 +12792,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..522d145
+index 0000000..22ccee8
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,29 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12709,6 +12810,9 @@ index 0000000..522d145
 +    fun disconnect() {}
 +    fun isAvailable(): Boolean
 +    fun hasAppFocus(appId: String, timeout: Duration): Boolean = true
++    fun keyboardVisible(timeout: Duration): Boolean =
++        throw UnsupportedOperationException("Keyboard visibility is not available for this backend.")
++    fun previewFrame(timeout: Duration): ByteArray = screenshot(timeout)
 +    fun displaySize(timeout: Duration): Pair<Int, Int>? = null
 +    fun setDisplayRotation(rotation: Int, timeout: Duration): Unit =
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support rotation control.")
@@ -13872,12 +13976,57 @@ index 0000000..91b14bb
 +        val leases = ConcurrentHashMap.newKeySet<String>()
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSWindowState.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSWindowState.kt
+new file mode 100644
+index 0000000..35a28d5
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSWindowState.kt
+@@ -0,0 +1,39 @@
++package maestro.harmonyos.driver
++
++import maestro.harmonyos.hdc.HdcException
++
++internal class HarmonyOSWindowFormatException(message: String) : HdcException(message)
++
++/** Parse columns by their names, retaining window ownership across rotated and multi-window layouts. */
++internal class HarmonyOSWindowState(private val text: String) {
++    private val columns = text.lineSequence().map { it.substringBefore('[').trim().split(Regex("\\s+")) }
++        .firstOrNull { it.contains("Pid") && (it.contains("WinId") || it.contains("WindowId")) }
++        ?: throw HarmonyOSWindowFormatException("WindowManagerService did not provide a recognized window table.")
++    private val rows = text.lineSequence().filter { '[' in it && it.trimStart().firstOrNull()?.isLetter() == true }
++        .mapNotNull { line ->
++            val values = line.substringBefore('[').trim().split(Regex("\\s+"))
++            if (values.size < columns.size || values.first() == "WindowName") null
++            else columns.drop(1).zip(values.takeLast(columns.size - 1)).toMap()
++        }.toList()
++
++    fun focusedPid(): String? {
++        val focus = Regex("(?m)^\\s*Focus window:\\s*(-?\\d+)\\s*$").findAll(text).map { it.groupValues[1] }.toList()
++        if (focus.size != 1) throw HarmonyOSWindowFormatException("WindowManagerService returned no unique focused window.")
++        if (focus.single() == "-1") return null
++        val idColumn = if ("WinId" in columns) "WinId" else "WindowId"
++        val owners = rows.filter { it[idColumn] == focus.single() }.mapNotNull { it["Pid"] }.distinct()
++        // Focus and window rows can change between samples while an Ability starts.
++        if (owners.isEmpty()) return null
++        return owners.singleOrNull()?.takeIf { it.toLongOrNull() != null }
++            ?: throw HarmonyOSWindowFormatException("The focused window has no unique process owner.")
++    }
++
++    // OpenHarmony WindowType.WINDOW_TYPE_INPUT_METHOD_FLOAT is 2105.
++    // Negative Z-order is an inactive window retained by the scene board.
++    fun keyboardVisible(): Boolean {
++        if ("Type" !in columns || "ZOrd" !in columns) {
++            throw HarmonyOSWindowFormatException("The window table has no keyboard visibility columns.")
++        }
++        return rows.any { it["Type"] == "2105" && (it["ZOrd"]?.toIntOrNull() ?: -1) >= 0 }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..b03b236
+index 0000000..53e90f8
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,516 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -13962,13 +14111,14 @@ index 0000000..b03b236
 +    override fun hasAppFocus(appId: String, timeout: Duration): Boolean {
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        val windows = diagnostic(listOf("hidumper", "-s", "WindowManagerService", "-a", "-a"), timeout)
-+        val window = FOCUSED_WINDOW.find(windows)?.groupValues?.get(1) ?: return false
-+        val pid = windows.lineSequence().mapNotNull { WINDOW_ROW.matchEntire(it) }
-+            .filter { it.groupValues[2] == window }.map { it.groupValues[1] }.singleOrNull() ?: return false
++        val pid = HarmonyOSWindowState(windows).focusedPid() ?: return false
 +        val processes = diagnostic(listOf("ps", "-A", "-o", "PID,NAME"), remainingBudget(deadline, timeout))
 +        return processes.lineSequence().map { it.trim().split(Regex("\\s+"), limit = 2) }
 +            .any { it.size == 2 && it[0] == pid && (it[1] == appId || it[1].startsWith("$appId:")) }
 +    }
++
++    override fun keyboardVisible(timeout: Duration): Boolean =
++        HarmonyOSWindowState(diagnostic(listOf("hidumper", "-s", "WindowManagerService", "-a", "-a"), timeout)).keyboardVisible()
 +
 +    override fun flowFaults(appId: String, startMs: Long, endMs: Long, timeout: Duration): HarmonyOSFlowFaults {
 +        val deadline = System.nanoTime() + timeout.toNanos()
@@ -14276,7 +14426,29 @@ index 0000000..b03b236
 +        return lastLine.takeIf { it.startsWith(marker) }?.removePrefix(marker)?.toIntOrNull()
 +    }
 +
-+    override fun screenshot(timeout: Duration): ByteArray {
++    private var scaledFramesAvailable = true
++
++    override fun previewFrame(timeout: Duration): ByteArray {
++        if (!scaledFramesAvailable) return screenshot(timeout)
++        val started = System.nanoTime()
++        val size = displaySize(minOf(timeout.dividedBy(3), Duration.ofSeconds(1))) ?: return screenshot(timeout)
++        val scale = minOf(1.0, 960.0 / maxOf(size.first, size.second))
++        val width = maxOf(2, (size.first * scale).toInt() / 2 * 2)
++        val height = maxOf(2, (size.second * scale).toInt() / 2 * 2)
++        return try {
++            captureScreen(remainingBudget(started + timeout.toNanos(), timeout), width to height)
++        } catch (error: HarmonyOSCommandException) {
++            checkInterrupted()
++            // Only a confirmed remote rejection permits the legacy capture backend.
++            scaledFramesAvailable = false
++            logger.info("Scaled frame capture unavailable; using the original screenshot backend.")
++            screenshot(remainingBudget(started + timeout.toNanos(), timeout))
++        }
++    }
++
++    override fun screenshot(timeout: Duration): ByteArray = captureScreen(timeout, null)
++
++    private fun captureScreen(timeout: Duration, dimensions: Pair<Int, Int>?): ByteArray {
 +        checkInterrupted()
 +        require(!timeout.isZero && !timeout.isNegative) { "Screenshot timeout must be positive" }
 +        val deadline = System.nanoTime() + timeout.toNanos()
@@ -14290,7 +14462,10 @@ index 0000000..b03b236
 +            localDirectory = files.createTempDirectory("maestro-harmonyos-screen-").toPath()
 +            localPath = localDirectory.resolve("screen.png")
 +            captureAttempted = true
-+            execute(listOf("uitest", "screenCap", "-p", remotePath), remainingBudget(deadline, timeout))
++            val command = if (dimensions == null) listOf("uitest", "screenCap", "-p", remotePath)
++                else listOf("snapshot_display", "-f", remotePath, "-w", dimensions.first.toString(),
++                    "-h", dimensions.second.toString(), "-t", "png")
++            execute(command, remainingBudget(deadline, timeout))
 +            hdc.receiveFile(deviceId, remotePath, localPath, remainingBudget(deadline, timeout))
 +            checkInterrupted()
 +            if (!Files.isRegularFile(localPath, LinkOption.NOFOLLOW_LINKS)) {
@@ -14364,9 +14539,6 @@ index 0000000..b03b236
 +
 +    private companion object {
 +        val logger = LoggerFactory.getLogger(HdcHarmonyOSDevice::class.java)
-+        val FOCUSED_WINDOW = Regex("(?m)^\\s*Focus window:\\s*(\\d+)\\s*$")
-+        // The columns before the bounds are display, PID, window ID, type, mode, flag, Z and orientation.
-+        val WINDOW_ROW = Regex("^\\s*.+?\\s+\\d+\\s+(\\d+)\\s+(\\d+)(?:\\s+-?\\d+){5}\\s+\\[.*$")
 +        const val MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024
 +        val DEVICE_FAILURE = Regex("(?im)^\\s*(?:ScreenCap failed:|DumpLayout failed:|\\[\\s*(?:fail|error)\\s*]|error:|failed:)")
 +    }
@@ -15591,10 +15763,9 @@ index 0000000..c67676f
 +    RuntimeException("Recording resource $recordingId requires recovery; original execution error is retained.")
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
 new file mode 100644
-index 0000000..2d65c2d
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSRecoveryJournal.kt
-@@ -0,0 +1,643 @@
+@@ -0,0 +1,644 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -15981,7 +16152,8 @@ index 0000000..2d65c2d
 +        }
 +        try {
 +            for (operation in state.operations.filterNot { it.completed }) {
-+                if (!operation.recoverable) {
++                // Legacy diagnostic recovery is explicitly scoped and still requires the exact device completion proof.
++                if (!operation.recoverable && !HarmonyOSDiagnosticCompletionRecovery.accepts(state.deviceId, state.ownerId, operation.id, operation.sha256, state.hostCalls.filter { it.stopped }.map { it.id })) {
 +                    problems += RecoveryIssue("UNSUPPORTED_RECOVERY_SCOPE", "The interrupted command has no declared finite recovery scope.")
 +                    continue
 +                }
@@ -16300,10 +16472,10 @@ index 0000000..c460847
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 new file mode 100644
-index 0000000..0e230bd
+index 0000000..e0f1924
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,153 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -16337,6 +16509,7 @@ index 0000000..0e230bd
 +                else -> SHELL_OTHER
 +            }
 +            "rm" -> REMOVE_FILE
++            "snapshot_display" -> SCREEN_CAPTURE
 +            "aa" -> when (arguments.getOrNull(1)) { "start" -> APP_START; "force-stop" -> APP_STOP; else -> SHELL_OTHER }
 +            "ps" -> PROCESS_QUERY
 +            "hidumper" -> SERVICE_QUERY
@@ -16458,10 +16631,10 @@ index 0000000..0e230bd
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..66f6dce
+index 0000000..6e7599c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,367 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -16761,6 +16934,11 @@ index 0000000..66f6dce
 +
 +    companion object {
 +        internal fun finiteCommand(arguments: List<String>): Boolean =
++            (arguments.size == 9 && arguments[0] == "snapshot_display" &&
++                arguments[1] == "-f" && arguments[2].matches(Regex("/data/local/tmp/maestro-(?:session-[a-f0-9-]{36}/files/)?screen-[a-f0-9-]{36}\\.png")) &&
++                arguments[3] == "-w" && arguments[4].toIntOrNull() in 2..960 &&
++                arguments[5] == "-h" && arguments[6].toIntOrNull() in 2..960 &&
++                arguments[7] == "-t" && arguments[8] == "png") ||
 +            (arguments.firstOrNull() == "uitest" && arguments.getOrNull(1) in setOf("dumpLayout", "screenCap", "uiInput")) ||
 +                (arguments.firstOrNull() == "aa" && arguments.getOrNull(1) in setOf("start", "force-stop")) ||
 +                (arguments.take(2) == listOf("rm", "-f") && arguments.size == 3) ||
@@ -17894,10 +18072,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..f0a6f01
+index 0000000..8844d7d
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,747 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -18132,7 +18310,7 @@ index 0000000..f0a6f01
 +        driver.open()
 +        driver.setPermissions("org.example.demo", emptyMap())
 +        assertThrows(UnsupportedOperationException::class.java) { driver.setPermissions("org.example.demo", mapOf("all" to "allow")) }
-+        assertThrows(UnsupportedOperationException::class.java) { driver.hideKeyboard() }
++        driver.hideKeyboard()
 +        assertThrows(UnsupportedOperationException::class.java) { driver.startScreenRecording(Buffer()) }
 +        assertThrows(UnsupportedOperationException::class.java) { driver.contentDescriptor(true) }
 +        assertThat(driver.capabilities()).isEmpty()
@@ -18537,6 +18715,33 @@ index 0000000..f0a6f01
 +        }
 +    }
 +
++    @Test
++    fun `keyboard dismissal sends Back once and confirms app focus`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        driver.launchApp("org.example.demo", emptyMap())
++        var reads = 0
++        device.keyboard = { reads++ == 0 }
++        driver.hideKeyboard()
++        assertThat(device.commands.count { it == listOf("uitest", "uiInput", "keyEvent", "Back") }).isEqualTo(1)
++        assertThat(device.focusSamples).isAtLeast(3)
++        driver.hideKeyboard()
++        assertThat(device.commands.count { it == listOf("uitest", "uiInput", "keyEvent", "Back") }).isEqualTo(1)
++    }
++
++    @Test
++    fun `keyboard disappearance must not hide loss of target focus`() {
++        val device = Device()
++        val driver = driver(device)
++        driver.open()
++        driver.launchApp("org.example.demo", emptyMap())
++        device.focused = { false }
++        var calls = 0
++        device.keyboard = { calls++ == 0 }
++        assertThrows(HarmonyOSCommandException::class.java) { driver.hideKeyboard() }
++    }
++
 +    private fun driver(device: Device) = HarmonyOSDriver(
 +        device,
 +        HarmonyOSDriverConfig(abilityName = "TestAbility", moduleName = "entry", pollInterval = Duration.ofMillis(1)),
@@ -18564,6 +18769,8 @@ index 0000000..f0a6f01
 +        var beforeScreenshot: () -> Unit = {}
 +        var focused: () -> Boolean = { true }
 +        var focusSamples = 0
++        var keyboard: () -> Boolean = { false }
++        override fun keyboardVisible(timeout: Duration): Boolean = keyboard()
 +        override fun hasAppFocus(appId: String, timeout: Duration): Boolean {
 +            focusSamples++
 +            return focused()
@@ -20363,12 +20570,57 @@ index 0000000..15d036b
 +        fun finishExternally() { finished = true; capturePids = emptySet() }
 +    }
 +}
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSWindowStateTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSWindowStateTest.kt
+new file mode 100644
+index 0000000..ba4499a
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSWindowStateTest.kt
+@@ -0,0 +1,39 @@
++package maestro.harmonyos.driver
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++
++class HarmonyOSWindowStateTest {
++    private val header = "WindowName DisplayId Pid WinId Type Mode Flag ZOrd Orientation [ x y w h ]"
++    private val app = "App With Spaces 0 785 12 1 1 0 102 0 [ 0 0 2800 1840 ]"
++
++    @Test fun `column reordering preserves window ownership`() {
++        val reordered = "WindowName WinId Pid DisplayId Type Mode Flag Orientation ZOrd [ x y w h ]\n" +
++            "Rotated App 12 785 0 1 1 0 1 102 [ 0 0 1840 2800 ]\nFocus window: 12"
++        assertThat(HarmonyOSWindowState(reordered).focusedPid()).isEqualTo("785")
++        assertThat(HarmonyOSWindowState("$header\n$app\nFocus window: 12").focusedPid()).isEqualTo("785")
++    }
++
++    @Test fun `a retained hidden keyboard is not visible`() {
++        val keyboard = "Keyboard 0 1300 22 2105 1 0 -1 0 [ 0 0 2800 1840 ]"
++        assertThat(HarmonyOSWindowState("$header\n$app\n$keyboard\nFocus window: 12").keyboardVisible()).isFalse()
++        assertThat(HarmonyOSWindowState("$header\n$app\n" + keyboard.replace(" -1 ", " 1900 ") +
++            "\nFocus window: 12").keyboardVisible()).isTrue()
++    }
++
++    @Test fun `unknown columns and ambiguous focus are explicit format failures`() {
++        assertThrows(HarmonyOSWindowFormatException::class.java) { HarmonyOSWindowState("permission denied") }
++        assertThrows(HarmonyOSWindowFormatException::class.java) {
++            HarmonyOSWindowState("$header\n$app\nFocus window: 12\nFocus window: 20").focusedPid()
++        }
++        assertThrows(HarmonyOSWindowFormatException::class.java) {
++            HarmonyOSWindowState("$header\n$app\nOther 0 999 12 1 1 0 104 0 [ 0 0 2800 1840 ]\nFocus window: 12").focusedPid()
++        }
++    }
++
++    @Test fun `a transitional focus without a window row is not ready yet`() {
++        assertThat(HarmonyOSWindowState("$header\n$app\nFocus window: 999").focusedPid()).isNull()
++        assertThat(HarmonyOSWindowState("$header\n$app\nFocus window: -1").focusedPid()).isNull()
++    }
++}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
 new file mode 100644
-index 0000000..6bd1dea
+index 0000000..e4947ec
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,329 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -20389,11 +20641,41 @@ index 0000000..6bd1dea
 +
 +class HdcHarmonyOSDeviceTest {
 +    @Test
++    fun `preview requests bounded pixels and explicit screenshots keep the original backend`() {
++        val commands = mutableListOf<String>()
++        val png = java.io.ByteArrayOutputStream().also {
++            javax.imageio.ImageIO.write(java.awt.image.BufferedImage(960, 630, 1), "png", it)
++        }.toByteArray()
++        val device = device { command, _ ->
++            commands += command.last()
++            if (command.getOrNull(3) == "file") {
++                Files.write(Path.of(command.last()), png)
++                HdcCommandResult(0, "FileTransfer finish", "")
++            } else {
++                val output = if ("hidumper" in command.last()) """
++                    [SCREEN SESSION]
++                    DisplayId: 0
++                    activeModes<id, W, H, RS>: 512, 2800, 1840, 60
++                    Rotation: 0
++                """.trimIndent() else ""
++                HdcCommandResult(0, "$output\n${marker(command)}0\n", "")
++            }
++        }
++        assertThat(device.previewFrame(TIMEOUT)).isEqualTo(png)
++        assertThat(commands.any { "snapshot_display" in it && "'960'" in it && "'630'" in it }).isTrue()
++        commands.clear()
++        device.screenshot(TIMEOUT)
++        assertThat(commands.any { "screenCap" in it }).isTrue()
++        assertThat(commands.any { "snapshot_display" in it }).isFalse()
++    }
++
++    @Test
 +    fun `focus follows the window owner rather than the presence of the target process`() {
 +        var focus = 13
 +        val device = device { command, _ ->
 +            val output = when {
 +                "WindowManagerService" in command.last() -> """
++                    WindowName DisplayId Pid WinId Type Mode Flag ZOrd Orientation [ x y w h ]
 +                    SCB Desktop 0 1623 13 2001 1 0 2 0 [ 0 0 1272 2756 ]
 +                    componentcollection0 0 20165 68 1 1 0 102 0 [ 0 0 1272 2756 ]
 +                    Focus window: $focus
@@ -22622,10 +22904,9 @@ index 0000000..d2de8a9
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
 new file mode 100644
-index 0000000..d0efc66
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/HarmonyOSRecoveryJournalTest.kt
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,583 @@
 +package maestro.harmonyos.hdc
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -23101,6 +23382,76 @@ index 0000000..d0efc66
 +        } finally {
 +            child.destroyForcibly().waitFor()
 +        }
++    }
++
++    @Test fun `reviewed legacy fault query requires exact proof and never redispatches`() {
++        create().use { journal ->
++            val remote = FakeRemote(file()).apply { loseResponse = true; proofAvailable = false }
++            val hdc = HdcClient("fake", remote).withRecoveryJournal(journal)
++            hdc.allocateTemporaryFile("layout", "json")
++            assertThrows(InterruptedException::class.java) { hdc.shell("fixture-target", listOf("sh", "-c", "hisysevent -l")) }
++            journal.seal()
++            assertThat(journal.recover(hdc).issues.map { it.code }).contains("UNSUPPORTED_RECOVERY_SCOPE")
++            val state = mapper.readTree(file().toFile()); val op = state["operations"].first()
++            val trace = directory.resolve("reviewed.log")
++            val line = mapOf("schemaVersion" to 1, "operationId" to op["id"].asText(), "callId" to UUID.randomUUID().toString(),
++                "hostCallId" to state["hostCalls"].last()["id"].asText(), "category" to "FAULT_QUERY")
++            Files.writeString(trace, "MAESTRO_HDC_CALL " + mapper.writeValueAsString(line + ("hostCallId" to null)) + "\nMAESTRO_HDC_CALL " + mapper.writeValueAsString(line))
++            val hash = java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(trace)).joinToString("") { "%02x".format(it) }
++            fun recover(commandHash: String = op["sha256"].asText()): RecoveryReport =
++                HarmonyOSDiagnosticCompletionRecovery.withReviewedFaultQuery("fixture-target", journal.ownerId, op["id"].asText(), commandHash,
++                    trace, hash, java.util.function.Supplier { journal.recover(hdc) })
++            assertThat(recover().state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            remote.proofAvailable = true; remote.foreignProof = true
++            assertThat(recover().state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            remote.foreignProof = false
++            assertThat(recover("0".repeat(64)).state).isEqualTo("unknown")
++            assertThat(remote.cleanup).isEmpty()
++            assertThat(recover().state).isEqualTo("complete")
++            assertThat(remote.dispatched).isEqualTo(1)
++            val final = mapper.readTree(file().toFile())["operations"].first()
++            assertThat(final["recoverable"].asBoolean()).isFalse()
++            assertThat(final["completed"].asBoolean()).isTrue()
++            assertThat(remote.cleanup).hasSize(1)
++        }
++    }
++
++    @Test fun `reviewed fault scope rejects changed traces shell categories and mismatched owners`() {
++        val owner = UUID.randomUUID().toString(); val operation = UUID.randomUUID().toString()
++        val trace = directory.resolve("trace.log")
++        val event = mutableMapOf<String, Any>("schemaVersion" to 1, "operationId" to operation, "callId" to UUID.randomUUID().toString(),
++            "hostCallId" to UUID.randomUUID().toString(), "category" to "SHELL_SCRIPT")
++        fun write() { Files.writeString(trace, "MAESTRO_HDC_CALL " + mapper.writeValueAsString(event)) }
++        fun hash() = java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(trace)).joinToString("") { "%02x".format(it) }
++        write()
++        assertThrows(IllegalArgumentException::class.java) {
++            HarmonyOSDiagnosticCompletionRecovery.withReviewedFaultQuery("fixture-target", owner, operation, "1".repeat(64), trace, hash(),
++                java.util.function.Supplier { error("No cleanup allowed") })
++        }
++        event["category"] = "FAULT_QUERY"; write(); val expected = hash(); Files.writeString(trace, "changed")
++        assertThrows(IllegalArgumentException::class.java) {
++            HarmonyOSDiagnosticCompletionRecovery.withReviewedFaultQuery("fixture-target", owner, operation, "1".repeat(64), trace, expected,
++                java.util.function.Supplier { error("No cleanup allowed") })
++        }
++        write()
++        assertThrows(IllegalStateException::class.java) {
++            HarmonyOSDiagnosticCompletionRecovery.withReviewedFaultQuery("fixture-target", owner, operation, "1".repeat(64), trace, hash(),
++                java.util.function.Supplier {
++                    val hosts = listOf(event["hostCallId"] as String)
++                    assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", owner, operation, "1".repeat(64), hosts)).isTrue()
++                    assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("other-target", owner, operation, "1".repeat(64), hosts)).isFalse()
++                    assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", UUID.randomUUID().toString(), operation, "1".repeat(64), hosts)).isFalse()
++                    assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", owner, UUID.randomUUID().toString(), "1".repeat(64), hosts)).isFalse()
++                    assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", owner, operation, "1".repeat(64), listOf(UUID.randomUUID().toString()))).isFalse()
++                    assertThat(java.util.concurrent.CompletableFuture.supplyAsync {
++                        HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", owner, operation, "1".repeat(64), hosts)
++                    }.get()).isFalse()
++                    error("Scope must be cleared after exceptions")
++                })
++        }
++        assertThat(HarmonyOSDiagnosticCompletionRecovery.accepts("fixture-target", owner, operation, "1".repeat(64), listOf(event["hostCallId"] as String))).isFalse()
 +    }
 +
 +    private class FakeRemote(private val journal: Path) : HdcCommandRunner {
@@ -27371,10 +27722,10 @@ index 0000000..5037c3c
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..234a60f
+index 0000000..a808485
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,279 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -27412,6 +27763,7 @@ index 0000000..234a60f
 +    val remoteFiles = mutableMapOf<String, ByteArray>()
 +
 +    private var inputFocused = false
++    private var foregroundApp: String? = null
 +    private var enteredName = ""
 +    private var scrollPosition = 0
 +    private val mapper = ObjectMapper()
@@ -27451,9 +27803,22 @@ index 0000000..234a60f
 +    }
 +
 +    private fun execute(arguments: List<String>): HdcCommandResult = when {
++        arguments == listOf("hidumper", "-s", "DisplayManagerService", "-a", "-a") -> hostSuccess(
++            "[SCREEN SESSION]\nDisplayId: 0\nactiveModes<id, W, H, RS>: 0, $WIDTH, $HEIGHT, 60\nRotation: 0\n",
++        )
++        arguments == listOf("hidumper", "-s", "WindowManagerService", "-a", "-a") -> hostSuccess(
++            "WindowName DisplayId Pid WinId Type ZOrd [ x y w h ]\n" + if (foregroundApp != null) {
++                "Fixture 0 123 12 1 102 [ 0 0 $WIDTH $HEIGHT ]\nFocus window: 12\n"
++            } else "Focus window: -1\n",
++        )
++        arguments == listOf("ps", "-A", "-o", "PID,NAME") ->
++            hostSuccess("PID NAME\n" + (foregroundApp?.let { "123 $it\n" } ?: ""))
++        arguments == listOf("date", "+%s%3N") -> hostSuccess(System.currentTimeMillis().toString())
++        arguments.take(2) == listOf("hisysevent", "-l") -> hostSuccess()
 +        arguments.take(2) == listOf("aa", "force-stop") -> {
 +            check(arguments.size == 3)
 +            stoppedApps += arguments[2]
++            if (foregroundApp == arguments[2]) foregroundApp = null
 +            state = State.HOME
 +            inputFocused = false
 +            enteredName = ""
@@ -27464,6 +27829,7 @@ index 0000000..234a60f
 +            check(arguments.size == 6 && arguments[2] == "-b" && arguments[4] == "-a")
 +            check(arguments[5] == "EntryAbility")
 +            launchedApps += arguments[3]
++            foregroundApp = arguments[3]
 +            state = State.HOME
 +            inputFocused = false
 +            enteredName = ""
@@ -28071,3 +28437,56 @@ index 0000000..60d3752
 +- startRecording: unsupported-recording
 +- tapOn:
 +    id: open-form
+
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
+new file mode 100644
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
+@@ -0,0 +1,47 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.security.MessageDigest
++import java.util.UUID
++import java.util.function.Supplier
++
++/** Explicit recovery of a reviewed legacy read-only diagnostic, never a normal Flow permission. */
++object HarmonyOSDiagnosticCompletionRecovery {
++    private data class Scope(val device: String, val owner: String, val operation: String, val hash: String, val host: String)
++    private val active = ThreadLocal<Scope>()
++
++    @JvmStatic fun <T> withReviewedFaultQuery(device: String, owner: String, operation: String, commandHash: String,
++        trace: Path, traceHash: String, action: Supplier<T>): T {
++        require(device.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")))
++        require(UUID.fromString(owner).toString() == owner && UUID.fromString(operation).toString() == operation)
++        require(commandHash.matches(Regex("[0-9a-f]{64}")) && traceHash.matches(Regex("[0-9a-f]{64}")))
++        val file = trace.toAbsolutePath().normalize()
++        require(file.parent.toRealPath() == file.parent && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
++        require(Files.size(file) <= 16 * 1024 * 1024)
++        val bytes = Files.readAllBytes(file)
++        val observedHash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++        require(observedHash == traceHash) { "The reviewed diagnostic trace changed." }
++        val mapper = jacksonObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++        val events = bytes.toString(Charsets.UTF_8).lineSequence().filter { "MAESTRO_HDC_CALL " in it }
++            .map { mapper.readTree(it.substringAfter("MAESTRO_HDC_CALL ")) }
++            .filter { it["operationId"]?.asText() == operation }.toList()
++        require(events.isNotEmpty() && events.all { it["schemaVersion"]?.asInt() == 1 && it["category"]?.asText() == "FAULT_QUERY" }) {
++            "Only an archived legacy FAULT_QUERY diagnostic is supported."
++        }
++        val calls = events.map { it["callId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
++        val hosts = events.mapNotNull { it["hostCallId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
++        require(calls.size == 1 && calls.single() != null && UUID.fromString(calls.single()).toString() == calls.single())
++        require(hosts.size == 1 && UUID.fromString(hosts.single()).toString() == hosts.single())
++        require(events.all { it["hostCallId"] == null || it["hostCallId"].isNull || it["hostCallId"].isTextual })
++        check(active.get() == null) { "A reviewed recovery scope is already active." }
++        active.set(Scope(device, owner, operation, commandHash, hosts.single()))
++        return try { action.get() } finally { active.remove() }
++    }
++
++    internal fun accepts(device: String, owner: String, operation: String, hash: String, stoppedHosts: List<String> = emptyList()): Boolean =
++        active.get()?.let { it.device == device && it.owner == owner && it.operation == operation && it.hash == hash && it.host in stoppedHosts } == true
++}

@@ -12,6 +12,7 @@
 | --- | --- | --- |
 | 适配源码 | 本仓提交及 `patches/maestro/0001-harmonyos-host.patch` | 记录本仓提交和补丁 SHA-256；未提交改动不能只用提交号表示 |
 | Maestro 源码 | [upstream.lock.json](../upstream.lock.json) 固定 `3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c` | 获取源码后核对实际 HEAD，再应用完整补丁 |
+| 可构建源码 fork | [source-fork.lock.json](../source-fork.lock.json) 固定完整提交 | CI 将完整源码树与固定上游加补丁的结果比较；分支名用于浏览，构建输入以提交号为准。检查命令见 [CI 文档](ci.md#核心回归与源码-fork)。 |
 | Gradle 程序 | 上游 wrapper 指定 Gradle 8.13 | wrapper 首次下载和 Gradle 依赖下载是两件事；`--offline` 不阻止 wrapper 下载 |
 | Java | 完整 JDK 17 | 记录实际发行版和补丁版本，构建使用 `javac` 等工具 |
 | JVM 依赖 | 上游 Gradle 配置、版本目录和插件仓库 | 固定版本配置不等于所有远端字节都已经锁定；独立缓存用于发现隐藏的本机依赖 |

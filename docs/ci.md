@@ -11,9 +11,25 @@
 3. 用本次构建的 CLI 调用 `run-device-suite.ps1` 运行固定的 Flow。
 4. 用 `collect-artifacts.mjs` 收集本次 JUnit、截图和作业结果。核对 `state=released` 与 `resolution.releaseConfirmed=true`，再关闭专用模拟器，确认实例、HDC 端口和目标均已退出。作业取消或超时时，按[平台联调检查](#移植到其他-ci-平台)核对持久设备状态。
 
+需要把一次失败交给其他人排查时，对已结束的 `runs/<runId>/<attemptId>` 执行 [离线证据导出](user-guide.md#离线查看运行证据)。HTML 或 ZIP 可作为同一 CI 作业的附加产物。原生退出码、JUnit 和设备释放核验仍由设备作业记录。
+
 ### 移植到其他 CI 平台
 
 复用 Windows runner 的脚本调用和证据校验。每次运行使用新的输出目录，同一个模拟器实例串行使用，设备状态目录留在工作区之外。平台将产物目录归档并解析 JUnit；成功条件同时包含 Flow 通过、证据齐全、会话确认释放和模拟器关闭。若平台强制取消导致脚本来不及收尾，先查持久状态、实例和 HDC 端口，确认本轮资源已释放后再调度下一轮。
+
+### 核心回归与源码 fork
+
+Windows 构建会运行精简主机测试、完整鸿蒙驱动与传输测试，以及编排层的步骤事件、录屏输出和证据生成测试。构建也会执行标准 YAML 集成测试和 CLI 协议、设备会话测试。JUnit 按模块归档，`core-test-results.json` 另行记录驱动和编排的执行数及平台排除项。清理测试使用 Git Bash，核心必测类缺失或异常跳过时停止构建。
+
+源码 fork 固定在根目录 source-fork.lock.json。CI 获取该提交后，用独立 Git 索引将交付补丁应用于固定上游，比较完整源码树。两者不同就停止构建。手工核对也可执行：
+
+```powershell
+node scripts/verify-source-fork.mjs --repository ./path/to/source-fork --output ./artifacts/source-fork.json
+```
+
+本地源码仓需包含锁定的上游和 fork 提交。校验器保留调用方的工作文件和暂存区。升级 fork 时应先完成源码树核验，再共同更新补丁和锁定提交。
+
+2026 年 11 月 19 日，上述完整入口已在 [Windows CI](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/44493655610)通过。实现、测试范围和模拟器结果见[本轮记录](progress/2026-11-19-reliability-usability.md)。
 
 ## 在 GitHub Actions 上运行
 

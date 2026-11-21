@@ -1,0 +1,22 @@
+appId: ohos.samples.componentcollection
+name: component-collection-hide-keyboard
+---
+- runFlow: common/home.yaml
+- runFlow:
+    file: common/open-component.yaml
+    env:
+      CATEGORY: 文本与输入
+      PAGE: TextInput 文本输入
+- tapOn:
+    id: test_input
+    retryTapIfNoChange: false
+- inputText: keyboard123
+- takeScreenshot: component-collection-keyboard-visible
+- hideKeyboard
+- assertVisible: keyboard123
+- assertVisible: TextInput 文本输入
+# Already hidden: this must leave the current page untouched.
+- hideKeyboard
+- assertVisible: keyboard123
+- takeScreenshot: component-collection-keyboard-dismissed
+

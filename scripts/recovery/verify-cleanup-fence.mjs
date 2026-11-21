@@ -10,7 +10,7 @@ const same = (a, b) => typeof a === 'string' && typeof b === 'string' && path.re
 const phases = ['prepared', 'claimed', 'cleaned', 'complete'];
 const gateFields = 'schemaVersion deviceId ownerSessionId state journalPath updatedAt closeFailure reportPath reportSha256 requiresRecovery uncertainReason unresolvedRecording cleanupFence retainedFences';
 const supportedClasses = new Set(['c1de9567295e53022f9a2422593c5b7516b30bef4a66de956ff8d510fc20b0ac',
-  'f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9']);
+  'f68fd1582450c8ee4276899d44c655554b602c2190d40bf0d5b002ebe6bcd3f9', 'c671426296337ffa05e557969e6ae1900bc6f503ae0a4d972d1450ab22ff7f10']);
 
 function reader() {
   const records = new Map(), deadline = Date.now() + 30000;

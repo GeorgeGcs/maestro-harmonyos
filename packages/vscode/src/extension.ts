@@ -21,6 +21,7 @@ export function activate(context: vscode.ExtensionContext): { getStatus(): { pan
   context.subscriptions.push(recorder, registerMaestroCompletion());
   context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.importTouch', () => recorder!.handle(() => recorder!.pickTouchRecording())));
   context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.checkSyntax', () => recorder!.handle(() => recorder!.checkSyntax())));
+  context.subscriptions.push(vscode.commands.registerCommand('harmonyosRecorder.checkReadiness', () => recorder!.handle(() => recorder!.checkReadiness())));
   for (const [name, action] of Object.entries({ open: () => recorder!.open(), connect: () => recorder!.connect(), save: () => recorder!.save(), replay: () => recorder!.replay(), runFile: () => recorder!.pickFlow(), rerun: () => recorder!.rerun(), stop: () => recorder!.stop() })) {
     context.subscriptions.push(vscode.commands.registerCommand(`harmonyosRecorder.${name}`, () => recorder!.handle(action)));
   }
@@ -309,6 +310,38 @@ class Recorder implements vscode.Disposable {
     this.root = chosen.uri.fsPath;
     return this.root;
   }
+  async checkReadiness(): Promise<void> {
+    if (this.busy || this.session.state.connected) throw new Error('请结束当前设备操作后再检查运行环境。');
+    const root = await this.workspaceRoot();
+    const settings = this.settings();
+    const launch = await javaLaunch(root, settings, ['harmonyos-bridge']);
+    const bridge = new BridgeClient(launch, text => this.output.append(text), 20_000);
+    try {
+      await bridge.request('agent.describe');
+      const devices = parseDevices(await bridge.request('devices'));
+      if (!devices.length) throw new Error('HDC 没有发现设备。请核对 USB 连接、调试开关及设备端授权。');
+      const selected = await vscode.window.showQuickPick(devices.map(device => device.id), { placeHolder: '选择要检查的设备' });
+      if (!selected) return;
+      const config = vscode.workspace.getConfiguration('harmonyosRecorder');
+      const app = await vscode.window.showInputBox({ title: '测试应用 bundle 名称', value: config.get<string>('appId', ''),
+        validateInput: value => /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value) ? null : '请输入有效的应用 bundle 名称' });
+      if (!app || this.busy || this.session.state.connected) return;
+      const reply = await bridge.request('agent.preflight', {
+        deviceId: selected, appId: app, commands: ['launchApp', 'tapOn', 'assertVisible'],
+        abilityName: config.get<string>('abilityName', '').trim() || undefined,
+        moduleName: config.get<string>('moduleName', '').trim() || undefined,
+      });
+      if (!object(reply) || reply.protocol !== 'maestro.harmonyos.agent' || reply.schemaVersion !== 1 ||
+          reply.kind !== 'preflight' || !object(reply.data) || !Array.isArray(reply.data.checks) ||
+          !['ready', 'unknown', 'blocked'].includes(String(reply.data.readiness))) throw new Error('CLI 未返回有效的只读预检结果。');
+      this.output.appendLine(`运行预检 · ${reply.data.readiness}`);
+      for (const check of reply.data.checks) {
+        if (object(check)) this.output.appendLine(`[${check.status}] ${check.name} (${check.code}) ${check.message}`);
+      }
+      this.output.show(true);
+    } finally { await bridge.dispose(); }
+  }
+
   async connect(): Promise<void> {
     this.open();
     if (this.busy) throw new Error('请等待当前操作完成。');

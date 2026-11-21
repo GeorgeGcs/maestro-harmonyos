@@ -10,7 +10,7 @@
 
 需要 VSCode 1.95 或以上版本、JDK 17，以及包含本项目补丁的 Maestro CLI。HDC 应能发现已授权的设备。可以使用本项目发布的 CLI 分发包，或按仓库 `docs/setup.md` 构建 `:maestro-cli:installDist`。
 
-在 VS Code 扩展视图中选择“从 VSIX 安装”，使用发行版随附的 `maestro-harmonyos-recorder-0.1.2-<提交号>.vsix`，或本地构建的 `dist/maestro-harmonyos-recorder-0.1.2.vsix`。Java、HDC 和 Maestro CLI 需单独配置。
+在 VS Code 扩展视图中选择“从 VSIX 安装”，使用发行版随附的 `maestro-harmonyos-recorder-<插件版本>-<提交号>.vsix`，或本地构建在 `dist` 中的 VSIX。Java、HDC 和 Maestro CLI 需单独配置。
 
 打开本地项目并信任工作区，在设置中配置：
 
@@ -25,6 +25,8 @@
 | `harmonyosRecorder.flowEnvironment` | 运行文件或套件时传给 Maestro 的 `NAME=VALUE` 数组，参数可能出现在本地产物里 |
 
 扩展不会执行 `config.local.ps1`。在终端加载的临时环境不会自动传入已经启动的 VSCode；这时直接填写 Java 和 HDC 路径即可。多文件夹工作区首次使用时选择一个项目作为产物目录。
+
+首次接设备，或更换 CLI 后，可在命令面板执行 **HarmonyOS: 检查运行环境**，选择设备并填写应用包名。在 **HarmonyOS Recorder** 输出面板查看 CLI、应用 Ability、设备占用和 UITest 的只读检查结果。锁屏状态无法从当前接口确认时会显示 `unknown`，请观察设备屏幕后再运行。
 
 ## 录制与回放
 

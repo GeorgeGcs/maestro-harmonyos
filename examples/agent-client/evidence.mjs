@@ -13,7 +13,7 @@ function contained(base, target) {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-export async function confinedFile(base, relative) {
+export async function confinedFile(base, relative, maxBytes) {
   if (typeof relative !== 'string' || !relative || /[\\:\x00-\x1f\x7f]/.test(relative) ||
       relative.startsWith('/') || relative.split('/').some(part => !part || part === '.' || part === '..')) {
     throw new Error('Invalid relative artifact path.');
@@ -23,8 +23,22 @@ export async function confinedFile(base, relative) {
   if (!contained(root, target)) throw new Error('Artifact escapes its attempt directory.');
   const file = await fs.open(target, 'r');
   try {
-    if (!(await file.stat()).isFile()) throw new Error('Artifact is not a regular file.');
-    return await file.readFile();
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error('Artifact is not a regular file.');
+    if (maxBytes === undefined) return await file.readFile();
+    if (info.size > maxBytes) throw new Error('Artifact exceeds the read limit.');
+    const bytes = Buffer.alloc(info.size + 1);
+    let total = 0;
+    while (total < bytes.length) {
+      const { bytesRead } = await file.read(bytes, total, bytes.length - total, total);
+      if (!bytesRead) break;
+      total += bytesRead;
+    }
+    const after = await file.stat();
+    if (total !== info.size || after.size !== info.size || after.mtimeMs !== info.mtimeMs) {
+      throw new Error('Artifact changed during the read.');
+    }
+    return bytes.subarray(0, total);
   } finally { await file.close(); }
 }
 
