@@ -284,6 +284,30 @@ CI 分别报告原生 `execution`、设备 `released` 和 `quality.status`。质
 
 日志、报告和截图可能包含设备标识、应用内容、输入文字及本机路径，分享前检查并脱敏。默认生成目录已被 Git 忽略；自己的测试工程也应设置相应忽略规则。YAML 和脚本按普通可执行测试代码审查，避免直接运行来源不明的流程。
 
+## 首次运行预检
+
+在仓库根目录或便携包的 `source` 目录执行。使用源码构建的默认位置时可省略 `--cli-dir`。
+
+```powershell
+node scripts/doctor.mjs --cli-dir ../cli --hdc 'D:\SDK\toolchains\hdc.exe' `
+  --device YOUR_DEVICE_ID --app ohos.samples.componentcollection --json
+```
+
+省略设备时只检查 Java、HDC 和可用的适配 CLI。提供设备后会调用 `agent.preflight` 检查设备连接、会话占用、UITest、应用和启动 Ability。可传 `--ability`、`--module`，或多次传 `--command` 指定检查范围。预检只读，返回码为 `0`（所选范围就绪）、`1`（有必需项阻塞）或 `2`（有必需项未确认）。例如发现了设备和应用，但只读接口无法确认是否锁屏时，仍返回 `unknown`。
+
+VS Code 中用 **HarmonyOS: 检查运行环境** 运行同一协议的设备检查。鸿测和其他调用方可直接使用已有 [`agent.preflight`](agent-protocol.md#3-能力与环境)。
+
+## 离线查看运行证据
+
+传入 CLI 生成的 `runs/<runId>/<attemptId>` 目录，可以生成一个 HTML 或一个包含 `index.html` 的 ZIP。ZIP 打包需要 PowerShell 7。接收方解压后打开 HTML 即可浏览，无需连接设备或安装编辑器。
+
+```powershell
+node scripts/export-run-evidence.mjs --attempt ./artifacts/agent/runs/RUN_ID/ATTEMPT_ID `
+  --output ./failed-run.zip
+```
+
+报告按步骤实例显示对应的尝试、YAML 行和上下文、截图及日志末尾，分别显示原始执行结果与设备清理状态。导出会核对运行标识、产物清单和所展示文件的 SHA-256。被截断的报告不会作为成功导出。生成物是排查入口，完整日志、录像和原生 JUnit 仍在原产物中。对外分享前核对其中的截图、日志和 YAML 是否包含测试数据。
+
 ## 当前支持范围
 
 手机完整 HMOS 场景套件和 HarmonyOS 7 平板的 v0.1.2 完整套件各有独立的 20/20 首次通过记录。平板此前停止的失败批次保留在历史记录中。v0.1.3 的最终修复在 API 22 模拟器完成回归，设备、API 和版本按各自批次登记。独立 OpenHarmony 真机仍待验证。详见[平台范围](platform-compatibility.md)、[手机记录](progress/2026-11-05-hdc-cleanup.md)和[平板记录](progress/2026-11-06-tablet-v012.md)。

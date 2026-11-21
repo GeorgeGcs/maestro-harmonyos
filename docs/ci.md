@@ -11,6 +11,8 @@
 3. 用本次构建的 CLI 调用 `run-device-suite.ps1` 运行固定的 Flow。
 4. 用 `collect-artifacts.mjs` 收集本次 JUnit、截图和作业结果。核对 `state=released` 与 `resolution.releaseConfirmed=true`，再关闭专用模拟器，确认实例、HDC 端口和目标均已退出。作业取消或超时时，按[平台联调检查](#移植到其他-ci-平台)核对持久设备状态。
 
+需要把一次失败交给其他人排查时，对已结束的 `runs/<runId>/<attemptId>` 执行 [离线证据导出](user-guide.md#离线查看运行证据)。HTML 或 ZIP 可作为同一 CI 作业的附加产物。原生退出码、JUnit 和设备释放核验仍由设备作业记录。
+
 ### 移植到其他 CI 平台
 
 复用 Windows runner 的脚本调用和证据校验。每次运行使用新的输出目录，同一个模拟器实例串行使用，设备状态目录留在工作区之外。平台将产物目录归档并解析 JUnit；成功条件同时包含 Flow 通过、证据齐全、会话确认释放和模拟器关闭。若平台强制取消导致脚本来不及收尾，先查持久状态、实例和 HDC 端口，确认本轮资源已释放后再调度下一轮。

@@ -59,6 +59,10 @@
         "title": "HarmonyOS: 检查 Flow 语法"
       },
       {
+        "command": "harmonyosRecorder.checkReadiness",
+        "title": "HarmonyOS: 检查运行环境"
+      },
+      {
         "command": "harmonyosRecorder.rerun",
         "title": "HarmonyOS: 重跑上一轮"
       },
