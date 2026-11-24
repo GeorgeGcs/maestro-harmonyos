@@ -17511,10 +17511,10 @@ index 0000000..a733559
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
 new file mode 100644
-index 0000000..d3d97d2
+index 00000000..a4d05094
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,182 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -17534,7 +17534,11 @@ index 0000000..d3d97d2
 +import java.util.concurrent.atomic.AtomicReference
 +
 +/** Reads a test WebView through an already configured, device-verified HDC forward. */
-+internal class ArkWebLoopback(private val port: Int, private val target: HarmonyOSArkWebTarget? = null) : AutoCloseable {
++internal class ArkWebLoopback(
++    private val port: Int,
++    private val target: HarmonyOSArkWebTarget? = null,
++    private val nowNanos: () -> Long = System::nanoTime,
++) : AutoCloseable {
 +    private val endpoint = "127.0.0.1:$port"
 +    private val logger = LoggerFactory.getLogger(ArkWebLoopback::class.java)
 +    private var connection: Connection? = null
@@ -17568,20 +17572,33 @@ index 0000000..d3d97d2
 +            if (nanos <= 0) throw java.util.concurrent.TimeoutException("ArkWeb snapshot deadline expired")
 +            return Duration.ofNanos(nanos)
 +        }
-+        var active = connection?.takeIf { !it.failed && System.nanoTime() - it.openedAt < FORWARD_TTL_NANOS }
-+        if ((active == null || target != null) && !verifyForward(remaining())) {
-+            logger.debug("ArkWeb device forward not verified")
-+            close()
-+            return null
++        var active = connection?.takeIf { !it.failed && nowNanos() - it.openedAt < FORWARD_TTL_NANOS }
++        val needsVerification = active == null || (target != null &&
++            (active.reusedVerification || nowNanos() - active.verifiedAt >= EXPLICIT_FORWARD_REUSE_NANOS))
++        var verifiedAt = active?.verifiedAt ?: 0L
++        if (needsVerification) {
++            if (!measurePhase("device-forward") { verifyForward(remaining()) }) {
++                logger.debug("ArkWeb device forward not verified")
++                close()
++                return null
++            }
++            verifiedAt = nowNanos()
++            active?.apply {
++                this.verifiedAt = verifiedAt
++                reusedVerification = false
++            }
++        } else if (target != null) {
++            checkNotNull(active).reusedVerification = true
++            logger.info("HarmonyOS ArkWeb phase=device-forward-reused elapsedMs=0")
 +        }
 +        if (active == null) {
 +            close()
-+            val path = discoverPage(remaining())
++            val path = measurePhase("page-discovery") { discoverPage(remaining()) }
 +            if (path == null) {
 +                logger.debug("ArkWeb page discovery did not confirm a unique loopback target")
 +                return null
 +            }
-+            active = Connection()
++            active = Connection(nowNanos(), verifiedAt)
 +            active.socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), active)
 +            connection = active
 +        }
@@ -17601,18 +17618,30 @@ index 0000000..d3d97d2
 +        val pending = Pending(id, CompletableFuture())
 +        active.pending.set(pending)
 +        return try {
-+            check(!active.failed && active.socket.send(payload)) { "Could not send ArkWeb snapshot request" }
-+            val snapshot = pending.result.get(remaining().toNanos(), TimeUnit.NANOSECONDS)
-+            if (snapshot.isEmpty() || snapshot == "null") {
-+                logger.debug("ArkWeb page returned no verified DOM snapshot")
-+                close()
-+                null
-+            } else json.readValue(snapshot, TreeNode::class.java)
++            measurePhase("dom") {
++                check(!active.failed && active.socket.send(payload)) { "Could not send ArkWeb snapshot request" }
++                val snapshot = pending.result.get(remaining().toNanos(), TimeUnit.NANOSECONDS)
++                if (snapshot.isEmpty() || snapshot == "null") {
++                    logger.debug("ArkWeb page returned no verified DOM snapshot")
++                    close()
++                    null
++                } else json.readValue(snapshot, TreeNode::class.java)
++            }
 +        } catch (error: Exception) {
 +            close()
 +            throw error
 +        } finally {
 +            active.pending.compareAndSet(pending, null)
++        }
++    }
++
++    private inline fun <T> measurePhase(phase: String, action: () -> T): T {
++        val started = System.nanoTime()
++        try {
++            return action()
++        } finally {
++            logger.info("HarmonyOS ArkWeb phase={} elapsedMs={}", phase,
++                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started))
 +        }
 +    }
 +
@@ -17624,9 +17653,9 @@ index 0000000..d3d97d2
 +
 +    private data class Pending(val id: Long, val result: CompletableFuture<String>)
 +
-+    private class Connection : WebSocketListener() {
++    private class Connection(val openedAt: Long, var verifiedAt: Long) : WebSocketListener() {
 +        lateinit var socket: WebSocket
-+        val openedAt = System.nanoTime()
++        var reusedVerification = false
 +        val pending = AtomicReference<Pending?>()
 +        @Volatile var failed = false
 +            private set
@@ -17657,6 +17686,9 @@ index 0000000..d3d97d2
 +
 +    private companion object {
 +        val FORWARD_TTL_NANOS = TimeUnit.SECONDS.toNanos(5)
++        // Only the next read on an already verified socket can reuse the proof.
++        // URL and WebView marker are still checked for every DOM read.
++        val EXPLICIT_FORWARD_REUSE_NANOS = TimeUnit.SECONDS.toNanos(2)
 +        const val MAX_JSON_BYTES = 4L * 1024 * 1024
 +        val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).build()
 +        val json = jacksonObjectMapper()
@@ -18234,10 +18266,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 00000000..9e7ef0e4
+index 00000000..1f28adc7
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,848 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -18314,6 +18346,42 @@ index 00000000..9e7ef0e4
 +            assertThat(device.layoutReads - beforeTap).isEqualTo(3)
 +            assertThat(device.commands).containsExactly(listOf("uitest", "uiInput", "click", "14", "14"))
 +            assertThat(device.screenshots).isEqualTo(1) // Session probe only.
++        } finally {
++            driver.close()
++        }
++    }
++
++    @Test
++    fun `retry tap stops after a change visible only in the screenshot`() = runBlocking {
++        val device = Device().apply { size = 80 to 120 }
++        val driver = driver(device)
++        driver.open()
++        try {
++            device.beforeScreenshot = {
++                if (device.commands.isNotEmpty()) {
++                    device.image = png(80, 120, java.awt.Color.WHITE)
++                }
++            }
++            Maestro(driver).tap(14, 14, retryIfNoChange = true)
++            assertThat(device.commands).containsExactly(listOf("uitest", "uiInput", "click", "14", "14"))
++            assertThat(device.screenshots).isEqualTo(3)
++        } finally {
++            driver.close()
++        }
++    }
++
++    @Test
++    fun `retry tap repeats once when layout and pixels are unchanged`() = runBlocking {
++        val device = Device().apply { size = 80 to 120 }
++        val driver = driver(device)
++        driver.open()
++        try {
++            Maestro(driver).tap(14, 14, retryIfNoChange = true)
++            assertThat(device.commands).containsExactly(
++                listOf("uitest", "uiInput", "click", "14", "14"),
++                listOf("uitest", "uiInput", "click", "14", "14"),
++            )
++            assertThat(device.screenshots).isEqualTo(4)
 +        } finally {
 +            driver.close()
 +        }
@@ -19036,8 +19104,16 @@ index 00000000..9e7ef0e4
 +    companion object {
 +        private fun tree(text: String) = TreeNode(attributes = mutableMapOf("text" to text))
 +
-+        private fun png(width: Int, height: Int): ByteArray = ByteArrayOutputStream().use { out ->
-+            ImageIO.write(BufferedImage(width, height, BufferedImage.TYPE_INT_RGB), "png", out)
++        private fun png(width: Int, height: Int, color: java.awt.Color = java.awt.Color.BLACK): ByteArray = ByteArrayOutputStream().use { out ->
++            val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
++            val graphics = image.createGraphics()
++            try {
++                graphics.color = color
++                graphics.fillRect(0, 0, width, height)
++            } finally {
++                graphics.dispose()
++            }
++            ImageIO.write(image, "png", out)
 +            out.toByteArray()
 +        }
 +    }
@@ -24711,10 +24787,10 @@ index 00000000..c7f5502f
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
 new file mode 100644
-index 0000000..53fefc8
+index 00000000..bea02654
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,106 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -24760,7 +24836,7 @@ index 0000000..53fefc8
 +    }
 +
 +    @Test
-+    fun `an explicit page matches only its URL and rechecks the device forward`() {
++    fun `an explicit page checks its marker on every read and rechecks the forward after the reuse window`() {
 +        val json = ObjectMapper()
 +        MockWebServer().use { server ->
 +            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
@@ -24781,12 +24857,24 @@ index 0000000..53fefc8
 +                    )))
 +                }
 +            }))
-+            ArkWebLoopback(server.port, HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")).use { browser ->
++            var now = 0L
++            val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++            ArkWebLoopback(server.port, target, nowNanos = { now }).use { browser ->
 +                val bounds = listOf(0, 0, 100, 100)
 +                val timeout = Duration.ofSeconds(2)
 +                assertThat(browser.snapshot(bounds, timeout) { true }?.attributes?.get("text")).isEqualTo("page two")
 +                assertThat(server.takeRequest().path).isEqualTo("/json/list")
 +                assertThat(server.takeRequest().path).isEqualTo("/devtools/page/two")
++                now += Duration.ofMillis(10).toNanos()
++                assertThat(browser.snapshot(bounds, timeout) { error("forward already verified") }
++                    ?.attributes?.get("text")).isEqualTo("page two")
++                var rechecked = false
++                assertThat(browser.snapshot(bounds, timeout) {
++                    rechecked = true
++                    true
++                }?.attributes?.get("text")).isEqualTo("page two")
++                assertThat(rechecked).isTrue()
++                now += Duration.ofSeconds(2).toNanos()
 +                assertThat(browser.snapshot(bounds, timeout) { false }).isNull()
 +                assertThat(server.requestCount).isEqualTo(2)
 +            }
@@ -25580,7 +25668,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c3886890..67b070fd 100644
+index c3886890..1f57d034 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -20,7 +20,9 @@
@@ -25975,7 +26063,7 @@ index c3886890..67b070fd 100644
          val timeout = (command.timeoutMs() ?: lookupTimeoutMs)
          val debugMessage = """
              Assertion '${command.condition.description()}' failed. Check the UI hierarchy in debug artifacts to verify the element state and properties.
-@@ -562,7 +711,25 @@ class Orchestra(
+@@ -562,7 +711,24 @@ class Orchestra(
              - Element may be temporarily unavailable due to loading state
              - This could be a real regression that needs to be addressed
          """.trimIndent()
@@ -25985,15 +26073,14 @@ index c3886890..67b070fd 100644
 +        val execution = executingCommands.lastOrNull()
 +        if (!evaluateCondition(command.condition, timeoutMs = timeout, commandOptional = command.optional,
 +                onVisibleAssertion = if (shareHierarchy) { selector, lookupTimeout ->
-+                    val (_, filter) = buildFilter(selector)
-+                    val cached = previous?.takeIf {
++                    val reusable = selector.usesOnlyHierarchyFilters()
++                    val cached = if (reusable) previous?.takeIf {
 +                        System.nanoTime() - it.readAt <= TimeUnit.MILLISECONDS.toNanos(250) &&
-+                            selector.childOf == null &&
-+                            filter(it.hierarchy.aggregate()).firstOrNull()?.toUiElementOrNull() != null
-+                    }
-+                    assertionSample = cached ?: findElement(selector, command.optional, lookupTimeout).let {
-+                        AssertionSample(it.hierarchy, System.nanoTime())
-+                    }
++                            matchInHierarchy(selector, it.hierarchy) != null
++                    } else null
++                    assertionSample = cached ?: findElement(
++                        selector, command.optional, lookupTimeout, retainFullHierarchy = reusable,
++                    ).takeIf { reusable }?.let { AssertionSample(it.hierarchy, System.nanoTime()) }
 +                } else null,
 +                onElementWait = if (execution != null && maestro.driver is HarmonyOSDriver) { observation ->
 +                    execution.elementWaits.add(observation)
@@ -26002,7 +26089,7 @@ index c3886890..67b070fd 100644
              throw MaestroException.AssertionFailure(
                  message = "Assertion is false: ${command.condition.description()}",
                  hierarchyRoot = maestro.viewHierarchy().root,
-@@ -824,9 +991,10 @@ class Orchestra(
+@@ -824,9 +990,10 @@ class Orchestra(
  
      private suspend fun clearAppStateCommand(command: ClearStateCommand): Boolean {
          maestro.clearAppState(command.appId)
@@ -26016,7 +26103,7 @@ index c3886890..67b070fd 100644
  
          return true
      }
-@@ -859,7 +1027,7 @@ class Orchestra(
+@@ -859,7 +1026,7 @@ class Orchestra(
          do {
              yield()
              try {
@@ -26025,7 +26112,7 @@ index c3886890..67b070fd 100644
                  val visibility = element.getVisiblePercentage(deviceInfo.widthGrid, deviceInfo.heightGrid)
  
                  logger.info("Scrolling try count: $retryCenterCount, DeviceWidth: ${deviceInfo.widthGrid}, DeviceWidth: ${deviceInfo.heightGrid}")
-@@ -989,29 +1157,60 @@ class Orchestra(
+@@ -989,29 +1156,60 @@ class Orchestra(
  
      private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
          val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
@@ -26102,7 +26189,7 @@ index c3886890..67b070fd 100644
      }
  
      private fun updateMetadata(rawCommand: MaestroCommand, metadata: CommandMetadata) {
-@@ -1042,8 +1241,45 @@ class Orchestra(
+@@ -1042,8 +1240,45 @@ class Orchestra(
      ) {
          val finishedAt = System.currentTimeMillis()
          val startedAt = commandStartTimes.remove(sequenceNumber) ?: finishedAt
@@ -26150,7 +26237,7 @@ index c3886890..67b070fd 100644
          }
      }
  
-@@ -1073,6 +1309,8 @@ class Orchestra(
+@@ -1073,6 +1308,8 @@ class Orchestra(
          condition: Condition?,
          commandOptional: Boolean,
          timeoutMs: Long? = null,
@@ -26159,7 +26246,7 @@ index c3886890..67b070fd 100644
      ): Boolean {
          if (condition == null) {
              return true
-@@ -1109,19 +1347,24 @@ class Orchestra(
+@@ -1109,19 +1346,24 @@ class Orchestra(
          }
  
          condition.visible?.let {
@@ -26192,7 +26279,7 @@ index c3886890..67b070fd 100644
                  try {
                      findElement(
                          selector = it,
-@@ -1135,6 +1378,8 @@ class Orchestra(
+@@ -1135,6 +1377,8 @@ class Orchestra(
                      true
                  }
              }
@@ -26201,7 +26288,7 @@ index c3886890..67b070fd 100644
  
              if (disappeared != true) {
                  return false
-@@ -1144,7 +1389,10 @@ class Orchestra(
+@@ -1144,7 +1388,10 @@ class Orchestra(
          return true
      }
  
@@ -26213,7 +26300,7 @@ index c3886890..67b070fd 100644
          jsEngine.enterScope()
          subflowDepth++
  
-@@ -1152,13 +1400,8 @@ class Orchestra(
+@@ -1152,13 +1399,8 @@ class Orchestra(
              commands
                  .mapIndexed { index, command ->
                      yield()
@@ -26229,7 +26316,7 @@ index c3886890..67b070fd 100644
                          try {
                              // Script evaluation is part of running the command, so keep it inside the
                              // guarded block: a parse error (e.g. a bad numeric field) then reports a
-@@ -1196,6 +1439,7 @@ class Orchestra(
+@@ -1196,6 +1438,7 @@ class Orchestra(
                      } catch (e: DeviceConnectionException) {
                          throw e
                      } catch (e: Throwable) {
@@ -26237,7 +26324,7 @@ index c3886890..67b070fd 100644
                          dispatchFinished(command, CommandOutcome.Failed(e), sequenceNumber)
                          when (onCommandFailed(index, command, e)) {
                              ErrorResolution.FAIL -> throw e
-@@ -1205,6 +1449,7 @@ class Orchestra(
+@@ -1205,6 +1448,7 @@ class Orchestra(
                              }
                          }
                      }
@@ -26245,7 +26332,7 @@ index c3886890..67b070fd 100644
                  }
                  .any { it }
          } finally {
-@@ -1229,7 +1474,7 @@ class Orchestra(
+@@ -1229,7 +1473,7 @@ class Orchestra(
              val onCompleteSuccess: Boolean
              try {
                  val onStartSuccess = subflowConfig?.onFlowStart?.commands?.let {
@@ -26254,7 +26341,7 @@ index c3886890..67b070fd 100644
                  } ?: true
  
                  if (onStartSuccess) {
-@@ -1242,7 +1487,7 @@ class Orchestra(
+@@ -1242,7 +1486,7 @@ class Orchestra(
              } finally {
                  onCompleteSuccess = if (currentCoroutineContext().isActive) {
                      subflowConfig?.onFlowComplete?.commands?.let {
@@ -26263,7 +26350,7 @@ index c3886890..67b070fd 100644
                      } ?: true
                  } else {
                      true
-@@ -1337,9 +1582,12 @@ class Orchestra(
+@@ -1337,9 +1581,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -26279,15 +26366,35 @@ index c3886890..67b070fd 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1482,6 +1730,7 @@ class Orchestra(
+@@ -1482,6 +1729,8 @@ class Orchestra(
          selector: ElementSelector,
          optional: Boolean,
          timeoutMs: Long? = null,
 +        captureHierarchyOnFailure: Boolean = true,
++        retainFullHierarchy: Boolean = false,
      ): FindElementResult {
          val timeout =
              timeoutMs ?: adjustedToLatestInteraction(
-@@ -1552,7 +1801,7 @@ class Orchestra(
+@@ -1496,8 +1745,7 @@ class Orchestra(
+             var fullHierarchy = ViewHierarchy(TreeNode())
+             val found = MaestroTimer.withTimeoutSuspend(timeout) {
+                 fullHierarchy = maestro.viewHierarchy()
+-                val parentHierarchy = resolveParentHierarchy(parentSelector, fullHierarchy)
+-                parentHierarchy?.let { filterFunc(it.aggregate()).firstOrNull()?.toUiElementOrNull() }
++                matchInHierarchy(selector, fullHierarchy, filterFunc)
+             }
+             if (found == null) {
+                 // Both "parent never matched" and "parent matched but child isn't in it" leave `found`
+@@ -1535,7 +1783,7 @@ class Orchestra(
+                     debugMessage = childOfDebugMessage
+                 )
+             }
+-            return FindElementResult(found, ViewHierarchy(found.treeNode))
++            return FindElementResult(found, if (retainFullHierarchy) fullHierarchy else ViewHierarchy(found.treeNode))
+         }
+ 
+ 
+@@ -1552,7 +1800,7 @@ class Orchestra(
              filter = filterFunc
          ) ?: throw MaestroException.ElementNotFound(
              "Element not found: $description",
@@ -26296,7 +26403,27 @@ index c3886890..67b070fd 100644
              debugMessage = exceptionDebugMessage
          )
      }
-@@ -1822,10 +2071,17 @@ class Orchestra(
+@@ -1605,6 +1853,19 @@ class Orchestra(
+         return listOfNotNull(whatFailed, elsewhere).joinToString(" ") + "\n\nPossible causes:\n" + causes
+     }
+ 
++    private fun matchInHierarchy(
++        selector: ElementSelector,
++        hierarchy: ViewHierarchy,
++        filter: ElementFilter = buildFilter(selector).filterFunc,
++    ): UiElement? = resolveParentHierarchy(selector.childOf, hierarchy)?.let {
++        filter(it.aggregate()).firstOrNull()?.toUiElementOrNull()
++    }
++
++    private fun ElementSelector.usesOnlyHierarchyFilters(): Boolean =
++        css == null && listOfNotNull(childOf, containsChild, above, below, leftOf, rightOf)
++            .all { it.usesOnlyHierarchyFilters() } &&
++            containsDescendants.orEmpty().all { it.usesOnlyHierarchyFilters() }
++
+     private fun resolveParentHierarchy(
+         selector: ElementSelector?,
+         hierarchy: ViewHierarchy,
+@@ -1822,10 +2083,17 @@ class Orchestra(
          return true
      }
  
@@ -26318,7 +26445,7 @@ index c3886890..67b070fd 100644
  
      private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
          val result = findElement(command.selector, optional = command.optional)
-@@ -1871,7 +2127,8 @@ class Orchestra(
+@@ -1871,7 +2139,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
@@ -27266,10 +27393,10 @@ index 0000000..75e7d2d
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
 new file mode 100644
-index 0000000..225a604
+index 00000000..381aac63
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,238 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -27329,6 +27456,17 @@ index 0000000..225a604
 +                paths.filter { Files.isRegularFile(it) }.map { it.fileName.toString() }.toList()
 +            }
 +            assertThat(workspaceFiles).containsExactlyElementsIn(RESOURCES)
++        }
++    }
++
++    @Test
++    fun `positive assertions with a parent reuse the original full layout`() {
++        withFlow("scoped-assertions.yaml") { flow ->
++            val before = flow.device.layoutCount
++            assertThat(runBlocking { flow.orchestra.runFlow(flow.commands) }.success).isTrue()
++            // One read serves both scoped assertions and the plain assertion after them.
++            assertThat(flow.device.layoutCount - before).isEqualTo(1)
++            assertThat(flow.device.remoteFiles).isEmpty()
 +        }
 +    }
 +
@@ -27493,6 +27631,7 @@ index 0000000..225a604
 +        val RESOURCES = listOf(
 +            "flow.yaml", "enter-name.yaml", "assertion-failure.yaml", "remote-failure.yaml", "unsupported.yaml",
 +            "scroll-flow.yaml", "enter-scroll-name.yaml", "scroll-not-found.yaml", "sequential-flows.yaml",
++            "scoped-assertions.yaml",
 +        )
 +    }
 +}
@@ -27943,10 +28082,10 @@ index 0000000..5037c3c
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..a808485
+index 00000000..23910955
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/SimulatedHarmonyOSDevice.kt
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,282 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -27971,6 +28110,8 @@ index 0000000..a808485
 +    data class Swipe(val start: Point, val end: Point, val velocity: Int)
 +
 +    var state = State.HOME
++        private set
++    var layoutCount = 0
 +        private set
 +    var tapCount = 0
 +        private set
@@ -28059,6 +28200,7 @@ index 0000000..a808485
 +        }
 +        arguments.take(3) == listOf("uitest", "dumpLayout", "-p") -> {
 +            check(arguments.size == 4)
++            layoutCount++
 +            remoteFiles[arguments[3]] = mapper.writeValueAsBytes(layout())
 +            hostSuccess("Dump layout saved\n")
 +        }
@@ -28153,7 +28295,7 @@ index 0000000..a808485
 +                )
 +            }
 +        }
-+        return node(bounds = "[0,0][$WIDTH,$HEIGHT]", children = children)
++        return node(id = "fixture-root", bounds = "[0,0][$WIDTH,$HEIGHT]", children = children)
 +    }
 +
 +    private fun node(
@@ -28646,6 +28788,24 @@ index 0000000..c7b0ef2
 +---
 +- runFlow: flow.yaml
 +- runFlow: scroll-flow.yaml
+diff --git a/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
+new file mode 100644
+index 00000000..57ae4955
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
+@@ -0,0 +1,12 @@
++appId: ${APP_ID}
++---
++- assertVisible:
++    id: open-form
++    childOf:
++      id: fixture-root
++- assertVisible:
++    id: open-scroll-form
++    childOf:
++      id: fixture-root
++- assertVisible:
++    id: open-form
 diff --git a/maestro-test/src/test/resources/harmonyos/unsupported.yaml b/maestro-test/src/test/resources/harmonyos/unsupported.yaml
 new file mode 100644
 index 0000000..60d3752

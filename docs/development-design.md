@@ -1,6 +1,6 @@
 # Maestro HarmonyOS 开发设计
 
-更新日期：2026-11-05 14:48（北京时间）。本文描述当前仓库实现；尚未实现或未验证的部分单独列出。安装与操作见[使用指南](user-guide.md)，环境配置见[环境说明](setup.md)，消息和磁盘文件格式见[协议索引](protocol/README.md)。
+更新日期为 2026 年 11 月 24 日（北京时间）。本文描述当前仓库实现；尚未实现或未验证的部分单独列出。安装与操作见[使用指南](user-guide.md)，环境配置见[环境说明](setup.md)，消息和磁盘文件格式见[协议索引](protocol/README.md)。
 
 ## 1. 项目解决什么问题
 
@@ -24,7 +24,7 @@ Maestro HarmonyOS 让开发者在电脑上用 Maestro YAML 驱动鸿蒙应用，
 | 批量执行 | 复用上游 Flow 批量执行；矩阵脚本按指定设备逐台调用，不并发分片 |
 | 固定输入与统计 | CI 核对冻结输入和原生 JUnit；验证计划另行固定分母、必测步骤和首次/最终成功口径 |
 | 视频录屏 | Huawei 系统录屏实验后端，默认关闭；与操作生成 YAML 是独立功能 |
-| 实验性命令 | `clearState` 使用 `bm clean -d -n` 清理指定包的数据，以设备明确确认作为成功依据。当前为主机验证阶段。 |
+| 实验性命令 | `clearState` 使用 `bm clean -d -n` 清理指定包的数据，以设备明确确认作为成功依据。已在 API 22 模拟器验证文件和 Preferences 清除。 |
 | 未支持 | HAP 自动安装、修改权限、Studio/MCP 鸿蒙会话、自动创建模拟器等 |
 
 上游有某条 YAML 命令，不代表鸿蒙驱动已经实现其设备行为。未支持的设备操作明确报错，不能用空操作返回成功。
@@ -232,18 +232,24 @@ HDC 进程退出 0 仅表示传输层结果，不能据此确认设备动作成�
 
 `HarmonyOSDriver` 实现上游 `Driver` 接口，设备细节由可替换的 `HarmonyOSDevice` 承担。生产环境使用 `HdcHarmonyOSDevice`，主机测试可以注入模拟设备，但仍测试真实驱动。
 
-| 驱动行为 | 设备映射或处理 |
-| --- | --- |
-| 打开会话 | 设备可用性检查，实际读取一张 PNG 和一份布局 |
-| 启动应用 | `aa start -b <bundle> -a <ability>`，可选 `-m <module>` |
-| 停止、结束应用 | `aa force-stop <bundle>` |
-| 点击、长按 | `uitest uiInput click` / `longClick`；坐标必须在屏幕内且大于 0 |
-| 输入文字 | `uitest uiInput text`；空串不发送输入命令，NUL 拒绝 |
-| 删除文字 | 按字符数发送退格键，计数范围 0～10,000 |
-| 按键 | 映射已实现的返回、主页、电源、回车、退格、Tab、Escape、音量键；其他键报不支持 |
-| 滑动 | 起终点和时长换算为 UITest 速度，限制在 200～40,000；时长是近似值 |
-| 截图 | `uitest screenCap` → 文件接收 → PNG 格式和尺寸检查 → 写入 Maestro 输出 |
-| 布局、断言 | 布局转 `TreeNode`；断言和选择器判断由 Maestro / Orchestra 执行 |
+| 操作 | 实现状态 | 依赖条件 | 验证范围 |
+| --- | --- | --- | --- |
+| 打开会话 | 已实现。探测截图和布局，根据设备条件选择 RPC 或 HDC | 已授权 HDC，UITest 可读截图和布局 | API 26 手机、API 22 模拟器 |
+| `launchApp`、停止应用 | 已实现。通过 `aa start` / `aa force-stop` | 目标包和 Ability 可启动，可自动解析唯一入口或显式配置 | 手机、平板和模拟器的示例 Flow |
+| `tapOn`、`longPressOn` | 已实现。标准选择器取自 UITest，实际通过 `uiInput` 派发 | 定位节点和坐标必须有效，常规点击优先确认目标稳定 | 手机及模拟器验证 ID 点击，长按有主机回归 |
+| `inputText`、`eraseText` | 已实现。文字注入及逐次退格 | 焦点须位于目标输入控件，输入文字依赖设备的 `uiInput text` | 中文输入与退格已有示例用例，特殊输入法组合覆盖有限 |
+| `back`、`pressKey`、`hideKeyboard` | 已实现。映射返回、主页、电源、回车、退格、Tab、Escape、音量键等。收键盘核对焦点 | 收键盘需要已启动的目标应用和可解析的键盘窗口状态 | API 22 模拟器验证收键盘、输入保留及重复调用 |
+| `swipe`、`scrollUntilVisible` | 已实现。距离和时长换算为 UITest 滑动速度 | 时长近似，控件位置和可见范围取决于设备窗口及布局 | 手机、平板和模拟器有滚动场景 |
+| `assertVisible`、`assertNotVisible` | 已实现。设备树转换后交给 Maestro / Orchestra 匹配 | 自绘内容须有可定位节点。ArkWeb 需显式调试和目标核验 | 原生示例有真机结果，ArkWeb 有 API 22 和 API 26 场景记录 |
+| `takeScreenshot` | 已实现。设备 PNG 下载、格式校验及清理 | 默认显示屏，设备需要支持截图和文件传输 | 真机和模拟器已有 PNG 证据 |
+| `startRecording`、`stopRecording` | 实验性。支持 Huawei 系统录屏和主机帧编码 | 系统服务或主机 FFmpeg 按后端分别配置 | 有主机录屏及系统录屏回归证据 |
+| `openLink` | 已实现。由系统分发绝对 URI | 应用或系统需要注册处理器。`browser: true` 限 HTTP(S)，`autoVerify` 路径暂缺 | API 22 模拟器验证 URI 及查询参数 |
+| `clearState`、`launchApp.clearState` | 条件支持。先核对包类型，再通过 `bm clean -d -n` | 只接受可清除用户数据的普通应用 | API 22 模拟器验证文件和 Preferences 清理 |
+| `setOrientation` | 条件支持。经过兼容的 UITest RPC 设置方向 | RPC 已就绪，应用和设备允许旋转 | API 26 手机验证竖屏、横屏和恢复竖屏 |
+| `addMedia` | 条件支持。限指定格式、文件数量和体积的导入 | HDC 文件传输、图库和 `mediatool` 可用 | API 22 模拟器验证 PNG 导入、回读摘要和同名拒绝 |
+| Flow 内安装 HAP、`setPermissions`、`setLocation`、代理、飞行模式、深色模式 | 当前未接入。CI 可在 Flow 前独立准备包 | 安装前核对签名、目标设备和包摘要。其他能力分别取决于系统开放接口 | 固定签名 HAP 已在 API 22 模拟器前置安装并完成 Flow |
+
+详细条件与适用范围见[使用指南](user-guide.md#当前支持范围)。
 
 启动参数目前只映射支持的字符串、布尔值和非负 32 位整数；其他类型报错。不要把 Android intent 参数直接当成鸿蒙 Ability 参数使用。
 
@@ -253,7 +259,9 @@ HDC 进程退出 0 仅表示传输层结果，不能据此确认设备动作成�
 
 普通控件点击会复用刚完成的定位，再取一份新布局核对目标。只有目标身份唯一、窗口清单和边界一致、点击中心仍命中同一可用控件或其子控件时才直接派发。核对失败时用已取得的布局继续全树等待。显式指定等待、变化重试、长按和重复点击仍按原路径执行。
 
-连续的 `assertVisible` 可以在 250 毫秒内共享前一条断言读到的组件树。只有命中同一份树的断言才使用它，未命中会继续实时查找。其他命令会失效这份快照，`assertNotVisible` 仍实时检查页面。
+连续正向断言可以在 250 毫秒内共享同一份完整组件树。带 `childOf` 时仍按标准父容器规则匹配，只有命中才复用。含 CSS 的选择器、负向断言和缓存未命中继续实时查找。其他命令会使快照失效。
+
+API 26 手机的 `uitest help` 提供了按包 `-b`、窗口 `-w` 缩小布局范围的参数，没有提供按控件 ID 直接查询的命令。官方 TestKit 的 `Driver.findComponent` 可以按 ID 查找，但需要受支持的测试端环境。兼容主机当前的 HDC/UITest 入口时，先使用完整树与已有选择器。按窗口取树适合做单窗口实验，启用前要验证弹窗、输入法和跨窗口定位。[官方 UITest 接口](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)
 
 HarmonyOS 的 Flow 失败或记录到设备错误时，会在收尾查询一次目标应用的系统故障事件。查询时间窗覆盖本次 Flow，总预算最多 6 秒。事件按应用和时间筛选，崩溃归因和归档的故障摘要使用同一结果。取消或设备命令超时后会跳过查询，避免给未确认的设备会话增加命令。需要检查成功 Flow 时，可设置 `MAESTRO_HARMONYOS_STRICT_FAULT_DIAGNOSTICS=true`。该模式把查到的应用崩溃计为失败。查询不可用时保留原结果，在日志记录诊断受限。
 
@@ -263,7 +271,13 @@ HarmonyOS 的 Flow 失败或记录到设备错误时，会在收尾查询一次�
 
 录制器使用第 8 节单独描述的布局稳定检查。状态栏排除只发生在录制器的比较视图里，没有修改共享驱动的通用等待，也没有改变标准 CLI 流程的布局内容。
 
-驱动不自动解锁或授予权限。清数据需用 Flow 显式请求。关闭键盘时先检查活动输入法窗口，只派发一次返回，再检查键盘消失且目标应用保留焦点。`capabilities()` 不宣称尚未实现的平台特性；具体不支持的方法抛出 `UnsupportedOperationException`。是否允许业务重试由 Flow 和上游执行层决定，不能通过在 HDC 层盲目重发点击来掩盖错误。
+驱动不自动解锁或授予权限。清数据需用 Flow 显式请求。关闭键盘时先检查活动输入法窗口，只派发一次返回，再检查键盘消失且目标应用保留焦点。Maestro 的 `capabilities()` 目前只有 `FAST_HIERARCHY` 标志，用于选择点击后的变化检测。鸿蒙驱动返回空列表以保留变化重试的像素比较。执行端的命令支持范围由 `agent.describe` 给出，设备当前条件由 `agent.preflight` 检查。是否允许业务重试由 Flow 和上游执行层决定，不能通过在 HDC 层盲目重发点击来掩盖错误。
+
+### HAP 安装与用例准备
+
+通用 CI 已在独立的 API 22 模拟器上安装固定签名的 HAP，核对安装回执后执行 Flow。流程编排中的 `launchApp` 对应应用启动。现有 Maestro YAML 模型没有安装 HAP 的命令；加入安装步骤需要新增语法，或新增直接受控的准备入口。安装超时、任务取消或异常退出后还需核对包和版本，不能只凭 HDC 进程退出认定设备状态已恢复。
+
+建议先提取主机安装入口供 CI 和本地准备复用。输入为显式设备、普通文件路径、预期包名、版本和 SHA-256，安装前校验文件及设备租约。安装完成需同时确认 HDC 回执和 `bm dump` 中的包信息。覆盖安装由调用方显式选择，失败或超时后按既有会话规则阻止接管并核对实际安装状态。常规 YAML 继续直接启动已准备的应用。[官方 HAP 安装说明](https://github.com/openharmony/docs/blob/master/en/application-dev/quick-start/hap-package.md)
 
 ## 8. 录制桥接与 YAML 生成
 
