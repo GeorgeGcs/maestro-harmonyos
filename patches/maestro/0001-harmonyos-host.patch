@@ -1333,10 +1333,10 @@ new file mode 100644
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
 new file mode 100644
-index 0000000..41252b6
+index 00000000..e6b3a36f
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
-@@ -0,0 +1,242 @@
+@@ -0,0 +1,259 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1351,12 +1351,14 @@ index 0000000..41252b6
 +/** Read-only observations; an implementation must never launch, unlock or change application state. */
 +internal interface AgentEnvironmentProbe {
 +    fun devices(): List<String>
++    fun layoutRpcListener(deviceId: String): Boolean? = null
 +    fun lockStatus(deviceId: String): HarmonyOsSessionSupport.DeviceLockStatus
 +    fun execute(deviceId: String, arguments: List<String>): String
 +}
 +
 +internal class HdcAgentEnvironmentProbe(private val hdc: HdcClient = HdcClient()) : AgentEnvironmentProbe {
 +    override fun devices(): List<String> = hdc.listDevices()
++    override fun layoutRpcListener(deviceId: String) = hdc.probeUitestLayoutListener(deviceId, Duration.ofSeconds(2))
 +    override fun lockStatus(deviceId: String) = HarmonyOsSessionSupport.probeDeviceLock(deviceId)
 +    override fun execute(deviceId: String, arguments: List<String>): String =
 +        HdcHarmonyOSDevice(deviceId, hdc).execute(arguments, Duration.ofSeconds(5))
@@ -1455,6 +1457,19 @@ index 0000000..41252b6
 +        if (uitest != null && uitest.matches(Regex("/[^\\r\\n]+/uitest"))) {
 +            check("uitest", "passed", "UITEST_DISCOVERED", "UITest is discoverable; this does not verify every command.")
 +        } else check("uitest", "unknown", "PRECONDITION_UNKNOWN", "UITest availability was not confirmed by a read-only query.")
++
++        if (requested.any { it in LAYOUT_COMMANDS }) {
++            val listening = if (mayProbe) try { probe.layoutRpcListener(deviceId) }
++                catch (error: Exception) { propagateInterrupt(error); null } else null
++            when (listening) {
++                true -> check("layoutRpcListener", "passed", "UITEST_RPC_LISTENER_PRESENT",
++                    "An existing UITest listener was observed. The session will verify the forward and RPC response.", required = false)
++                false -> check("layoutRpcListener", "failed", "UITEST_RPC_LISTENER_MISSING",
++                    "Start a compatible UITest service before using RPC. HDC file layout is available as the fallback.", required = false)
++                null -> check("layoutRpcListener", "unknown", "UITEST_RPC_LISTENER_UNKNOWN",
++                    "The UITest listener state was not confirmed by a read-only observation.", required = false)
++            }
++        }
 +
 +        if ("setOrientation" in requested) check("rotationBackend", "unknown", "PRECONDITION_UNKNOWN",
 +            "Rotation requires an active UITest RPC endpoint and a rotatable foreground application.")
@@ -1557,6 +1572,8 @@ index 0000000..41252b6
 +    }
 +
 +    companion object {
++        private val LAYOUT_COMMANDS = setOf("tapOn", "longPressOn", "assertVisible", "assertNotVisible",
++            "scrollUntilVisible", "extendedWaitUntil", "setOrientation")
 +        val METHODS = listOf("agent.describe", "agent.preflight", "agent.connect", "agent.session", "agent.snapshot",
 +            "agent.action", "agent.cancel", "agent.release", "agent.result", "agent.evidence")
 +        private val commands = listOf(
@@ -6186,10 +6203,10 @@ index 0000000..0d0dcc6
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 0000000..64344b8
+index 00000000..7c61443c
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,258 @@
+@@ -0,0 +1,263 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -6297,6 +6314,11 @@ index 0000000..64344b8
 +                ffmpeg?.takeIf { it.isAbsolute && Files.isRegularFile(it) && Files.isExecutable(it) }
 +                    ?: throw CliError("Set MAESTRO_HARMONYOS_FFMPEG to an absolute FFmpeg executable for host-frames.")
 +            } else null,
++            hostRecordingDeduplicateFrames = when (environment["MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES"]?.trim()) {
++                null, "", "false" -> false
++                "true" -> true
++                else -> throw CliError("MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES must be true or false.")
++            },
 +            recordingRetainMedia = when (val retain = environment["MAESTRO_HARMONYOS_RECORDING_RETAIN_MEDIA"]?.trim()) {
 +                null, "", "false" -> false
 +                "true" -> true
@@ -7090,10 +7112,10 @@ index 0000000..92726cd
 +}
 diff --git a/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
 new file mode 100644
-index 0000000..5ed2ba4
+index 00000000..2b507427
 --- /dev/null
 +++ b/maestro-cli/src/test/kotlin/maestro/cli/harmonyos/HarmonyOsAgentCapabilitiesTest.kt
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,163 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -7114,6 +7136,8 @@ index 0000000..5ed2ba4
 +        var calls = 0
 +        val shell = mutableListOf<List<String>>()
 +        var bundle = ""
++        var rpcListener: Boolean? = null
++        override fun layoutRpcListener(deviceId: String) = rpcListener
 +        override fun devices(): List<String> { calls++; discoveryFailure?.let { throw it }; return targets }
 +        override fun lockStatus(deviceId: String) = lock
 +        override fun execute(deviceId: String, arguments: List<String>): String {
@@ -7169,6 +7193,22 @@ index 0000000..5ed2ba4
 +        val screen = preflight(probe, """{"deviceId":"test-target","commands":["tapOn"]}""")
 +        assertEquals("unknown", screen["readiness"].asText())
 +        assertTrue(screen["checks"].any { it["name"].asText() == "screenUnlocked" && it["status"].asText() == "unknown" })
++    }
++
++    @Test fun `RPC listener observation remains optional for file-backed commands`() {
++        val probe = Probe()
++        for ((listener, code) in listOf(
++            true to "UITEST_RPC_LISTENER_PRESENT",
++            false to "UITEST_RPC_LISTENER_MISSING",
++            null to "UITEST_RPC_LISTENER_UNKNOWN",
++        )) {
++            probe.rpcListener = listener
++            val result = preflight(probe, """{"deviceId":"test-target","commands":["tapOn"]}""")
++            val check = result["checks"].first { it["name"].asText() == "layoutRpcListener" }
++            assertEquals("unknown", result["readiness"].asText())
++            assertFalse(check["required"].asBoolean())
++            assertEquals(code, check["code"].asText())
++        }
 +    }
 +
 +    @Test fun `keyboard dismissal is advertised for flows without claiming device readiness`() {
@@ -11909,10 +11949,43 @@ index 0000000..e54096b
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/Maestro.kt b/maestro-client/src/main/java/maestro/Maestro.kt
-index ddedf17..683ff67 100644
+index ddedf173..28f4976f 100644
 --- a/maestro-client/src/main/java/maestro/Maestro.kt
 +++ b/maestro-client/src/main/java/maestro/Maestro.kt
-@@ -391,6 +391,11 @@ class Maestro(
+@@ -230,11 +230,30 @@ class Maestro(
+     ) {
+         LOGGER.info("Tapping on element: ${tapRepeat ?: ""} $element")
+ 
+-        val settledHierarchy = waitForAppToSettle(initialHierarchy, appId, waitToSettleTimeoutMs)
++        var settleFrom = initialHierarchy
++        val confirmedTarget = if (driver is maestro.drivers.HarmonyOSDriver &&
++            !retryIfNoChange && !waitUntilVisible && !longPress && tapRepeat == null && waitToSettleTimeoutMs == null &&
++            hasHarmonyTargetIdentity(element.treeNode) && harmonyHit(initialHierarchy, element) != null &&
++            driver.hasRecentHierarchy(initialHierarchy)
++        ) {
++            delay(ELEMENT_STABILITY_POLL_INTERVAL_MS)
++            val freshHierarchy = viewHierarchy()
++            settleFrom = freshHierarchy
++            unchangedHarmonyTarget(element.treeNode, initialHierarchy, freshHierarchy)
++                ?.let { freshHierarchy to it }
++        } else null
++        val settledHierarchy = if (confirmedTarget == null) waitForAppToSettle(settleFrom, appId, waitToSettleTimeoutMs)
++            else null
+ 
+         // Scroll momentum is the one motion that routinely outlives a null settle, so re-stabilise
+         // only after a scroll (MA-4124); otherwise trust the hierarchy we have (MA-4135).
+-        val (hierarchyBeforeTap, refreshedElement) = if (settledHierarchy == null && recentScroll) {
++        val (hierarchyBeforeTap, refreshedElement) = if (confirmedTarget != null) {
++            LOGGER.info(
++                if (recentScroll) "Tap aimed via confirmed HarmonyOS scroll target"
++                else "Tap aimed via confirmed HarmonyOS target"
++            )
++            confirmedTarget
++        } else if (settledHierarchy == null && recentScroll) {
+             LOGGER.info("Tap aimed via stabilised hierarchy (null settle after a scroll)")
+             refreshElementUntilStable(element, initialHierarchy)
+         } else {
+@@ -391,6 +410,11 @@ class Maestro(
      ) {
          recentScroll = false // consume the scroll hint (MA-4135)
  
@@ -11924,7 +11997,7 @@ index ddedf17..683ff67 100644
          val capabilities = runInterruptible(Dispatchers.IO) { driver.capabilities() }
  
          if (Capability.FAST_HIERARCHY in capabilities) {
-@@ -411,7 +416,7 @@ class Maestro(
+@@ -411,7 +435,7 @@ class Maestro(
      ) {
          LOGGER.info("Tapping at ($x, $y) using hierarchy based logic for wait")
  
@@ -11933,6 +12006,51 @@ index ddedf17..683ff67 100644
  
          val retries = getNumberOfRetries(retryIfNoChange)
          repeat(retries) {
+@@ -798,6 +822,44 @@ class Maestro(
+         // Mirrors IOSDriver.SCREEN_SETTLE_TIMEOUT_MS (3000ms): the element-stability wait
+         // stands in for the settle confirmation the iOS driver could not give, so keep the
+         // two budgets aligned when tuning either.
++        private fun hasHarmonyTargetIdentity(node: TreeNode) =
++            !node.attributes["hostWindowId"].isNullOrBlank() && !node.attributes["accessibilityId"].isNullOrBlank()
++
++        private fun harmonyHit(hierarchy: ViewHierarchy, element: UiElement): TreeNode? {
++            if (element.treeNode.enabled != true) return null
++            val center = element.bounds.center()
++            val hit = hierarchy.getElementAt(hierarchy.root, center.x, center.y) ?: return null
++            // A named container can be hit through an icon or label inside the same window.
++            return hit.takeIf {
++                it.enabled != false && it.attributes["hostWindowId"] == element.treeNode.attributes["hostWindowId"] &&
++                    element.treeNode.aggregate().any { node -> node === it }
++            }
++        }
++
++        internal fun unchangedHarmonyTarget(
++            target: TreeNode,
++            before: ViewHierarchy,
++            after: ViewHierarchy,
++        ): UiElement? {
++            if (!hasHarmonyTargetIdentity(target)) return null
++            val window = target.attributes["hostWindowId"]
++            val id = target.attributes["accessibilityId"]
++            val beforeNodes = before.aggregate()
++            val afterNodes = after.aggregate()
++            fun windows(nodes: List<TreeNode>) = nodes.mapNotNull { it.attributes["hostWindowId"] }.distinct()
++            if (windows(beforeNodes) != windows(afterNodes)) return null
++
++            fun findTarget(nodes: List<TreeNode>) = nodes.singleOrNull {
++                it.attributes["hostWindowId"] == window && it.attributes["accessibilityId"] == id
++            }?.takeIf { it.attributes == target.attributes }?.toUiElementOrNull()
++
++            val initial = findTarget(beforeNodes) ?: return null
++            val latest = findTarget(afterNodes) ?: return null
++            val initialHit = harmonyHit(before, initial) ?: return null
++            val latestHit = harmonyHit(after, latest) ?: return null
++            return latest.takeIf { initialHit.attributes == latestHit.attributes }
++        }
++
+         private const val ELEMENT_STABILITY_TIMEOUT_MS: Long = 3000
+         private const val ELEMENT_STABILITY_POLL_INTERVAL_MS: Long = 100
+ 
 diff --git a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt b/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
 index 5a191dd..c6199bf 100644
 --- a/maestro-client/src/main/java/maestro/debuglog/LogConfig.kt
@@ -12069,10 +12187,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..640a473
+index 00000000..6efde922
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,675 @@
+@@ -0,0 +1,689 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -12401,17 +12519,28 @@ index 0000000..640a473
 +        }
 +    }
 +
-+    override fun waitForAppToSettle(initialHierarchy: ViewHierarchy?, appId: String?, timeoutMs: Int?): ViewHierarchy? {
-+        requireOpen()
-+        val deadline = deadline(timeoutMs?.toLong() ?: config.settleTimeout.toMillis())
-+        val sample = lastHierarchy
-+        lastHierarchy = null
-+        val info = lastDeviceInfo
-+        var previous = sample?.root?.takeIf { root ->
-+            initialHierarchy != null && info != null &&
++    fun logLayoutBackend() {
++        (device as? HdcHarmonyOSDevice)?.logLayoutBackend()
++    }
++
++    internal fun hasRecentHierarchy(initialHierarchy: ViewHierarchy): Boolean =
++        recentHierarchyMatching(initialHierarchy) != null
++
++    private fun recentHierarchyMatching(initialHierarchy: ViewHierarchy?): TreeNode? {
++        val sample = lastHierarchy ?: return null
++        val info = lastDeviceInfo ?: return null
++        return sample.root.takeIf { root ->
++            initialHierarchy != null &&
 +                System.nanoTime() - sample.finishedAt <= config.pollInterval.toNanos().coerceAtLeast(250_000_000) &&
 +                (root.filterOutOfBounds(info.widthGrid, info.heightGrid) ?: root) == initialHierarchy.root
 +        }
++    }
++
++    override fun waitForAppToSettle(initialHierarchy: ViewHierarchy?, appId: String?, timeoutMs: Int?): ViewHierarchy? {
++        requireOpen()
++        val deadline = deadline(timeoutMs?.toLong() ?: config.settleTimeout.toMillis())
++        var previous = recentHierarchyMatching(initialHierarchy)
++        lastHierarchy = null
 +        var previousSampleNanos = 0L
 +        // Reuse a matching pre-action sample from this driver. Input invalidates the sample.
 +        // Post-action settling still needs two fresh samples.
@@ -12500,7 +12629,10 @@ index 0000000..640a473
 +        recordingFailure?.let { throw it }
 +        check(recording == null) { "This driver already owns a recording" }
 +        val host = config.hostRecordingFfmpeg?.let {
-+            HarmonyOSHostFrameRecording(out, it, config.recordingMaxDuration, config.recordingMaxBytes, config.recordingStopTimeout)
++            HarmonyOSHostFrameRecording(
++                out, it, config.recordingMaxDuration, config.recordingMaxBytes, config.recordingStopTimeout,
++                deduplicateFrames = config.hostRecordingDeduplicateFrames,
++            )
 +        }
 +        try {
 +            val current = host ?: transport.withLock { device.startScreenRecording(out, config) }
@@ -12827,10 +12959,10 @@ index 0000000..22ccee8
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 0000000..4499561
+index 00000000..42e589f3
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,67 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -12855,6 +12987,7 @@ index 0000000..4499561
 +    val arkWebTarget: HarmonyOSArkWebTarget? = null,
 +    val automaticLayoutRpc: Boolean = false,
 +    val hostRecordingFfmpeg: Path? = null,
++    val hostRecordingDeduplicateFrames: Boolean = false,
 +) {
 +    init {
 +        require((layoutRpcPort == null) == (layoutRpcDevice == null)) { "Set both layout RPC port and target device" }
@@ -12976,10 +13109,10 @@ index 0000000..38d2f7d
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt
 new file mode 100644
-index 0000000..93be5a1
+index 00000000..e92fcfbf
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,159 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
@@ -13007,6 +13140,7 @@ index 0000000..93be5a1
 +    private val maxDuration: Duration,
 +    private val maxBytes: Long,
 +    private val stopTimeout: Duration,
++    private val deduplicateFrames: Boolean,
 +) : ScreenRecording {
 +    override val startedAt = Instant.now()
 +    private val startNanos = System.nanoTime()
@@ -13016,6 +13150,7 @@ index 0000000..93be5a1
 +    private val dropped = AtomicInteger()
 +    private val frames = mutableListOf<Pair<String, Long>>()
 +    private var savedBytes = 0L
++    private var duplicates = 0
 +    @Volatile private var accepting = true
 +    @Volatile private var failure: IOException? = null
 +    private val writer = Thread({ stageFrames() }, "maestro-harmonyos-host-video").apply {
@@ -13033,9 +13168,14 @@ index 0000000..93be5a1
 +    }
 +
 +    private fun stageFrames() {
++        var previousBytes: ByteArray? = null
 +        try {
 +            while (accepting || pending.isNotEmpty()) {
 +                val frame = pending.poll(100, TimeUnit.MILLISECONDS) ?: continue
++                if (deduplicateFrames && previousBytes?.contentEquals(frame.bytes) == true) {
++                    duplicates++
++                    continue
++                }
 +                if (savedBytes + frame.bytes.size > maxBytes) {
 +                    throw IOException("Host recording reached the frame storage limit.")
 +                }
@@ -13043,6 +13183,7 @@ index 0000000..93be5a1
 +                Files.write(directory.resolve(name), frame.bytes)
 +                savedBytes += frame.bytes.size
 +                frames += name to frame.capturedAt
++                if (deduplicateFrames) previousBytes = frame.bytes
 +            }
 +        } catch (error: IOException) {
 +            failure = error
@@ -13066,6 +13207,7 @@ index 0000000..93be5a1
 +            val manifest = directory.resolve("frames.ffconcat")
 +            Files.writeString(manifest, buildString {
 +                appendLine("ffconcat version 1.0")
++                // Skipped duplicates extend the previous image to the next saved frame or recording stop.
 +                frames.forEachIndexed { index, (name, capturedAt) ->
 +                    val end = frames.getOrNull(index + 1)?.second ?: finishedAt
 +                    val duration = (end - capturedAt).coerceAtLeast(40_000_000) / 1e9
@@ -13082,8 +13224,8 @@ index 0000000..93be5a1
 +                sink.writeAll(source)
 +                sink.flush()
 +            }
-+            logger.info("HarmonyOS host recording: frames={} dropped={} durationMs={}",
-+                frames.size, dropped.get(), Duration.ofNanos(finishedAt - startNanos).toMillis())
++            logger.info("HarmonyOS host recording: frames={} duplicates={} deduplicateFrames={} dropped={} durationMs={}",
++                frames.size, duplicates, deduplicateFrames, dropped.get(), Duration.ofNanos(finishedAt - startNanos).toMillis())
 +        } finally {
 +            if (writer.isAlive) writer.interrupt()
 +            if (!writer.isAlive) directory.toFile().deleteRecursively()
@@ -14023,10 +14165,10 @@ index 0000000..35a28d5
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..53e90f8
+index 00000000..a01a50f5
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,516 @@
+@@ -0,0 +1,520 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -14071,6 +14213,11 @@ index 0000000..53e90f8
 +    private val automaticLayoutRpc: Boolean = false,
 +) : HarmonyOSDevice {
 +    private var layoutChannel: LoopbackLayoutChannel? = null
++    private var layoutReason = "not_connected"
++
++    internal fun logLayoutBackend() {
++        logger.info("HarmonyOS layout backend={} reason={}", if (layoutChannel == null) "hdc" else "rpc", layoutReason)
++    }
 +    private var displayRpcUnsupported = false
 +    private var reportedArkWebSource: String? = null
 +    private val arkWeb = arkWebPort?.let { ArkWebLoopback(it, arkWebTarget) }
@@ -14087,23 +14234,21 @@ index 0000000..53e90f8
 +    override fun connect() {
 +        hdc.selectDevice(deviceId)
 +        val timeout = Duration.ofSeconds(2)
-+        val port = when {
-+            layoutPort != null -> layoutPort.takeIf { hasLayoutForward(it, timeout) }
++        val forward = when {
++            layoutPort != null -> if (hasLayoutForward(layoutPort, timeout)) {
++                HdcClient.LayoutForward(layoutPort, "explicit_forward")
++            } else HdcClient.LayoutForward(null, "explicit_forward_unavailable")
 +            automaticLayoutRpc -> try {
 +                hdc.openAutomaticUitestLayoutForward(deviceId, timeout)
 +            } catch (error: HdcException) {
 +                checkInterrupted()
-+                logger.debug("Automatic UITest forward failed ({})", error.javaClass.simpleName)
-+                null
++                HdcClient.LayoutForward(null, "automatic_forward_failed_${error.javaClass.simpleName}")
 +            }
-+            else -> return
++            else -> HdcClient.LayoutForward(null, "automatic_rpc_disabled")
 +        }
-+        val mode = if (layoutPort == null) "automatic" else "explicit"
-+        if (port == null) logger.info("UITest RPC ({}) unavailable; using HDC layout for this session", mode)
-+        else {
-+            layoutChannel = LoopbackLayoutChannel(port)
-+            logger.info("UITest RPC layout enabled for this session ({})", mode)
-+        }
++        layoutReason = forward.reason
++        layoutChannel = forward.port?.let(::LoopbackLayoutChannel)
++        logLayoutBackend()
 +    }
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
@@ -14367,7 +14512,8 @@ index 0000000..53e90f8
 +        channel.close()
 +        layoutChannel = null
 +        checkInterrupted()
-+        logger.warn("UITest RPC layout failed ({}); using HDC layout for the rest of this session", error.javaClass.simpleName)
++        layoutReason = "rpc_read_failed_${error.javaClass.simpleName}"
++        logLayoutBackend()
 +    }
 +
 +    override fun execute(arguments: List<String>, timeout: Duration): String = executeWithReceipt(arguments, timeout, false)
@@ -16631,10 +16777,10 @@ index 0000000..e0f1924
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 0000000..6e7599c
+index 00000000..4e4759ac
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,383 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -16718,10 +16864,27 @@ index 0000000..6e7599c
 +        return result.stdout
 +    }
 +
-+    /** Uses a running UITest service; creating a transport never starts or replaces a device daemon. */
-+    internal fun openAutomaticUitestLayoutForward(deviceId: String, timeout: Duration): Int? {
++    /** A read-only observation. A malformed or unreadable socket table is inconclusive. */
++    fun probeUitestLayoutListener(deviceId: String, timeout: Duration): Boolean? {
 +        validateDeviceId(deviceId)
-+        val journal = recoveryJournal ?: return null
++        val sockets = execute(listOf("-t", deviceId, "shell", "cat /proc/net/unix"), timeout,
++            category = HdcCommandCategory.SERVICE_QUERY)
++        if (sockets.stderr.isNotBlank()) return null
++        val lines = sockets.stdout.lineSequence().filter { it.isNotBlank() }.toList()
++        if (lines.any { line ->
++                val columns = line.trim().split(Regex("\\s+"))
++                columns.size == 8 && columns[3].toIntOrNull(16)?.and(0x10000) == 0x10000 &&
++                    columns[4].toIntOrNull(16) == 1 && columns[7] == "@uitest_socket"
++            }) return true
++        return if (lines.firstOrNull()?.trim()?.matches(Regex("Num\\s+RefCount\\s+.*")) == true) false else null
++    }
++
++    internal data class LayoutForward(val port: Int?, val reason: String)
++
++    /** Uses a running UITest service; creating a transport never starts or replaces a device daemon. */
++    internal fun openAutomaticUitestLayoutForward(deviceId: String, timeout: Duration): LayoutForward {
++        validateDeviceId(deviceId)
++        val journal = recoveryJournal ?: return LayoutForward(null, "session_ownership_unavailable")
 +        check(journal.deviceId == deviceId) { "UITest forward does not match the session target." }
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        fun remaining(): Duration {
@@ -16729,19 +16892,17 @@ index 0000000..6e7599c
 +            if (nanos <= 0) throw HdcTimeoutException(timeout)
 +            return Duration.ofNanos(nanos)
 +        }
-+        val sockets = execute(listOf("-t", deviceId, "shell", "cat /proc/net/unix"), remaining(),
-+            category = HdcCommandCategory.SERVICE_QUERY)
-+        if (sockets.stderr.isNotBlank() || sockets.stdout.lineSequence().none { line ->
-+                val columns = line.trim().split(Regex("\\s+"))
-+                columns.size == 8 && columns[3].toIntOrNull(16)?.and(0x10000) == 0x10000 &&
-+                    columns[4].toIntOrNull(16) == 1 && columns[7] == "@uitest_socket"
-+            }) return null
++        when (probeUitestLayoutListener(deviceId, remaining())) {
++            false -> return LayoutForward(null, "listener_missing")
++            null -> return LayoutForward(null, "listener_unknown")
++            true -> Unit
++        }
 +        val port = try {
 +            ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
 +        } catch (error: java.io.IOException) {
 +            throw HdcException("No loopback port could be allocated for UITest.", error)
 +        }
-+        if (portRows(listForwards(remaining()), port).isNotEmpty()) return null
++        if (portRows(listForwards(remaining()), port).isNotEmpty()) return LayoutForward(null, "host_port_in_use")
 +        journal.registerLayoutForward(port)
 +        val created = execute(listOf("-t", deviceId, "fport", "tcp:$port", UITEST_ENDPOINT), remaining(), trackHost = true,
 +            category = HdcCommandCategory.LAYOUT_FORWARD_CREATE)
@@ -16749,7 +16910,8 @@ index 0000000..6e7599c
 +            throw HdcException("HDC did not confirm creation of the UITest forward.")
 +        }
 +        journal.confirmLayoutForward(port)
-+        return port.takeIf { hasUitestLayoutForward(deviceId, it, remaining()) }
++        return if (hasUitestLayoutForward(deviceId, port, remaining())) LayoutForward(port, "automatic_forward")
++        else LayoutForward(null, "forward_unverified")
 +    }
 +
 +    /** Reconcile only the registered local port. An exact but unconfirmed rule needs operator review. */
@@ -18072,18 +18234,21 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..8844d7d
+index 00000000..9e7ef0e4
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,747 @@
+@@ -0,0 +1,804 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.runBlocking
 +import maestro.KeyCode
++import maestro.Maestro
 +import maestro.Point
 +import maestro.ScreenRecording
 +import maestro.SwipeDirection
 +import maestro.TreeNode
++import maestro.UiElement.Companion.toUiElement
 +import maestro.ViewHierarchy
 +import maestro.device.Platform
 +import maestro.drivers.HarmonyOSDriver
@@ -18100,6 +18265,60 @@ index 0000000..8844d7d
 +import javax.imageio.ImageIO
 +
 +class HarmonyOSDriverTest {
++    @Test fun `tap target must remain unique visible enabled and in the same window`() {
++        val child = TreeNode(mutableMapOf("hostWindowId" to "1", "bounds" to "[5,5][15,15]"))
++        val target = TreeNode(mutableMapOf(
++            "hostWindowId" to "1", "accessibilityId" to "7", "bounds" to "[0,0][20,20]",
++        ), children = listOf(child), enabled = true)
++        fun snapshot(vararg children: TreeNode) = ViewHierarchy(TreeNode(children = children.toList()))
++        val before = snapshot(target)
++        val after = snapshot(TreeNode(mutableMapOf("bounds" to "[40,40][60,60]")), target)
++        assertThat(Maestro.unchangedHarmonyTarget(target, before, after)?.treeNode).isEqualTo(target)
++
++        val moved = target.copy(attributes = (target.attributes + ("bounds" to "[20,20][40,40]")).toMutableMap())
++        val duplicate = target.copy(attributes = (target.attributes + ("text" to "Another target")).toMutableMap())
++        val otherWindow = target.copy(attributes = (target.attributes + ("hostWindowId" to "2")).toMutableMap())
++        val coversTarget = TreeNode(mutableMapOf("hostWindowId" to "1", "bounds" to "[0,0][20,20]"))
++        val addedWindow = TreeNode(mutableMapOf("hostWindowId" to "2", "bounds" to "[60,60][70,70]"))
++        val changedChild = target.copy(children = listOf(child.copy(attributes = (child.attributes +
++            ("text" to "New label")).toMutableMap())))
++        val changedSnapshots = listOf(
++            snapshot(moved), snapshot(target, duplicate), snapshot(otherWindow),
++            snapshot(target, coversTarget), snapshot(target, addedWindow),
++            snapshot(target.copy(enabled = false)), snapshot(changedChild),
++        )
++        for (changed in changedSnapshots) {
++            assertThat(Maestro.unchangedHarmonyTarget(target, before, changed)).isNull()
++        }
++    }
++
++    @Test fun `plain tap checks the target once after locating it`() = runBlocking {
++        val device = Device().apply { size = 80 to 120 }
++        val driver = driver(device)
++        driver.open()
++        try {
++            val maestro = Maestro(driver)
++            val target = TreeNode(mutableMapOf(
++                "hostWindowId" to "1", "accessibilityId" to "7", "bounds" to "[4,4][24,24]",
++            ), enabled = true)
++            fun page(label: String) = TreeNode(children = listOf(target, TreeNode(
++                mutableMapOf("text" to label, "bounds" to "[40,40][60,60]"),
++            )))
++            device.layout = { page("before") }
++            val hierarchy = maestro.viewHierarchy()
++            val beforeTap = device.layoutReads
++            device.layout = { page("changed elsewhere") }
++
++            maestro.tap(hierarchy.root.children.first().toUiElement(), hierarchy)
++
++            assertThat(device.layoutReads - beforeTap).isEqualTo(3)
++            assertThat(device.commands).containsExactly(listOf("uitest", "uiInput", "click", "14", "14"))
++            assertThat(device.screenshots).isEqualTo(1) // Session probe only.
++        } finally {
++            driver.close()
++        }
++    }
++
 +    @Test
 +    fun `open verifies screenshot and layout then close rejects actions`() {
 +        val device = Device()
@@ -24368,10 +24587,10 @@ index 0000000..6322d73
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/UitestForwardRecoveryTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/UitestForwardRecoveryTest.kt
 new file mode 100644
-index 0000000..abf51e7
+index 00000000..c7f5502f
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/hdc/UitestForwardRecoveryTest.kt
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,118 @@
 +package maestro.harmonyos.hdc
 +
 +import com.google.common.truth.Truth.assertThat
@@ -24392,7 +24611,7 @@ index 0000000..abf51e7
 +    @Test fun `missing listener does not create or register a forward`() {
 +        val fixture = ForwardFixture(listening = false)
 +        newJournal().use { journal ->
-+            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout)).isNull()
++            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout).reason).isEqualTo("listener_missing")
 +            journal.seal()
 +            assertThat(journal.recover(fixture.client).state).isEqualTo("complete")
 +        }
@@ -24403,7 +24622,7 @@ index 0000000..abf51e7
 +    @Test fun `a confirmed forward is persisted before use and recovered after reopen`() {
 +        val fixture = ForwardFixture()
 +        newJournal().use { journal ->
-+            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout)).isEqualTo(fixture.port)
++            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout).port).isEqualTo(fixture.port)
 +            assertThat(fixture.intentAtCreation).contains("\"confirmed\":false")
 +            assertThat(Files.readString(path)).contains("\"confirmed\":true")
 +        }
@@ -24418,7 +24637,7 @@ index 0000000..abf51e7
 +    @Test fun `manual or replacement rule owned by another device is preserved`() {
 +        val fixture = ForwardFixture()
 +        newJournal().use { journal ->
-+            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout)).isNotNull()
++            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout).port).isNotNull()
 +            fixture.row = fixture.row!!.replace(device, "another-device")
 +            journal.seal()
 +            assertThat(journal.recover(fixture.client).state).isEqualTo("complete")
@@ -24445,7 +24664,7 @@ index 0000000..abf51e7
 +    @Test fun `malformed rule listing never counts as confirmed release`() {
 +        val fixture = ForwardFixture()
 +        newJournal().use { journal ->
-+            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout)).isNotNull()
++            assertThat(fixture.client.withRecoveryJournal(journal).openAutomaticUitestLayoutForward(device, timeout).port).isNotNull()
 +            fixture.malformedList = true
 +            journal.seal()
 +            assertThat(journal.recover(fixture.client).state).isEqualTo("unknown")
@@ -24467,7 +24686,8 @@ index 0000000..abf51e7
 +        val client = HdcClient("fixture", HdcCommandRunner { command, _ ->
 +            val output = when {
 +                command.drop(1) == listOf("-t", device, "shell", "cat /proc/net/unix") ->
-+                    if (listening) "0: 00000002 0 10000 1 1 1234 @uitest_socket" else ""
++                    "Num RefCount Protocol Flags Type St Inode Path" +
++                        if (listening) "\n0: 00000002 0 10000 1 1 1234 @uitest_socket" else ""
 +                command.drop(1) == listOf("fport", "ls") -> if (malformedList) "unrecognized" else row ?: "[Empty]"
 +                command.take(5) == listOf("fixture", "-t", device, "fport", "rm") -> {
 +                    check(command.drop(5) == listOf("tcp:$port", "localabstract:uitest_socket"))
@@ -25360,7 +25580,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..2e62f6d 100644
+index c3886890..67b070fd 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -20,7 +20,9 @@
@@ -25504,10 +25724,11 @@ index c388689..2e62f6d 100644
  
          val config = YamlCommandReader.getConfig(commands)
  
-@@ -233,9 +300,14 @@ class Orchestra(
+@@ -233,9 +300,15 @@ class Orchestra(
  
          onFlowStart(commands)
          dispatch("onFlowStart") { it.onFlowStart() }
++        (maestro.driver as? HarmonyOSDriver)?.logLayoutBackend()
 +        val traceArtifacts = ExecutionTraceArtifacts(artifactsGenerator::allocateFlowLog,
 +            artifactsGenerator::refreshManifest, { artifactsGenerator.artifactManifest })
 +        dispatch("onExecutionTraceReady") { it.onExecutionTraceReady(traceArtifacts) }
@@ -25519,7 +25740,7 @@ index c388689..2e62f6d 100644
          try {
              executeDefineVariablesCommands(commands, config)
              // After the variables: `appId: ${APP_ID}` only evaluates once they are defined.
-@@ -248,6 +320,8 @@ class Orchestra(
+@@ -248,6 +321,8 @@ class Orchestra(
                      commands = it,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -25528,7 +25749,7 @@ index c388689..2e62f6d 100644
                  )
              } ?: true
  
-@@ -256,52 +330,103 @@ class Orchestra(
+@@ -256,52 +331,103 @@ class Orchestra(
                      commands = filteredCommands,
                      config = config,
                      shouldReinitJsEngine = false,
@@ -25662,7 +25883,7 @@ index c388689..2e62f6d 100644
              }
  
              exception?.let { throw it }
-@@ -314,10 +439,28 @@ class Orchestra(
+@@ -314,10 +440,28 @@ class Orchestra(
          }
      }
  
@@ -25691,7 +25912,7 @@ index c388689..2e62f6d 100644
      ): Boolean {
          if (shouldReinitJsEngine) {
              initJsEngine(config)
-@@ -333,11 +476,7 @@ class Orchestra(
+@@ -333,11 +477,7 @@ class Orchestra(
                  // Check for pause before executing each command
                  flowController.waitIfPaused()
  
@@ -25704,7 +25925,7 @@ index c388689..2e62f6d 100644
  
                  jsEngine.onLogMessage { msg ->
                      val metadata = getMetadata(command)
-@@ -392,16 +531,21 @@ class Orchestra(
+@@ -392,16 +532,21 @@ class Orchestra(
                  } catch (e: DeviceConnectionException) {
                      throw e
                  } catch (e: Throwable) {
@@ -25727,7 +25948,7 @@ index c388689..2e62f6d 100644
              }
          return true
      }
-@@ -425,6 +569,7 @@ class Orchestra(
+@@ -425,6 +570,7 @@ class Orchestra(
       */
      private suspend fun executeCommand(maestroCommand: MaestroCommand, config: MaestroConfig?): Boolean {
          val command = maestroCommand.asCommand()
@@ -25735,7 +25956,7 @@ index c388689..2e62f6d 100644
  
          flowController.waitIfPaused()
  
-@@ -489,7 +634,7 @@ class Orchestra(
+@@ -489,7 +635,7 @@ class Orchestra(
              else -> true
          }.also { mutating ->
              if (mutating) {
@@ -25744,7 +25965,7 @@ index c388689..2e62f6d 100644
              }
          }
      }
-@@ -553,6 +698,9 @@ class Orchestra(
+@@ -553,6 +699,9 @@ class Orchestra(
      }
  
      private suspend fun assertConditionCommand(command: AssertConditionCommand): Boolean {
@@ -25754,7 +25975,7 @@ index c388689..2e62f6d 100644
          val timeout = (command.timeoutMs() ?: lookupTimeoutMs)
          val debugMessage = """
              Assertion '${command.condition.description()}' failed. Check the UI hierarchy in debug artifacts to verify the element state and properties.
-@@ -562,7 +710,25 @@ class Orchestra(
+@@ -562,7 +711,25 @@ class Orchestra(
              - Element may be temporarily unavailable due to loading state
              - This could be a real regression that needs to be addressed
          """.trimIndent()
@@ -25781,7 +26002,7 @@ index c388689..2e62f6d 100644
              throw MaestroException.AssertionFailure(
                  message = "Assertion is false: ${command.condition.description()}",
                  hierarchyRoot = maestro.viewHierarchy().root,
-@@ -824,9 +990,10 @@ class Orchestra(
+@@ -824,9 +991,10 @@ class Orchestra(
  
      private suspend fun clearAppStateCommand(command: ClearStateCommand): Boolean {
          maestro.clearAppState(command.appId)
@@ -25795,7 +26016,7 @@ index c388689..2e62f6d 100644
  
          return true
      }
-@@ -859,7 +1026,7 @@ class Orchestra(
+@@ -859,7 +1027,7 @@ class Orchestra(
          do {
              yield()
              try {
@@ -25804,7 +26025,7 @@ index c388689..2e62f6d 100644
                  val visibility = element.getVisiblePercentage(deviceInfo.widthGrid, deviceInfo.heightGrid)
  
                  logger.info("Scrolling try count: $retryCenterCount, DeviceWidth: ${deviceInfo.widthGrid}, DeviceWidth: ${deviceInfo.heightGrid}")
-@@ -989,29 +1156,60 @@ class Orchestra(
+@@ -989,29 +1157,60 @@ class Orchestra(
  
      private suspend fun retryCommand(command: RetryCommand, config: MaestroConfig?): Boolean {
          val maxRetries = (command.maxRetries?.toIntOrNull() ?: 1).coerceAtMost(MAX_RETRIES_ALLOWED)
@@ -25881,7 +26102,7 @@ index c388689..2e62f6d 100644
      }
  
      private fun updateMetadata(rawCommand: MaestroCommand, metadata: CommandMetadata) {
-@@ -1042,8 +1240,45 @@ class Orchestra(
+@@ -1042,8 +1241,45 @@ class Orchestra(
      ) {
          val finishedAt = System.currentTimeMillis()
          val startedAt = commandStartTimes.remove(sequenceNumber) ?: finishedAt
@@ -25929,7 +26150,7 @@ index c388689..2e62f6d 100644
          }
      }
  
-@@ -1073,6 +1308,8 @@ class Orchestra(
+@@ -1073,6 +1309,8 @@ class Orchestra(
          condition: Condition?,
          commandOptional: Boolean,
          timeoutMs: Long? = null,
@@ -25938,7 +26159,7 @@ index c388689..2e62f6d 100644
      ): Boolean {
          if (condition == null) {
              return true
-@@ -1109,19 +1346,24 @@ class Orchestra(
+@@ -1109,19 +1347,24 @@ class Orchestra(
          }
  
          condition.visible?.let {
@@ -25971,7 +26192,7 @@ index c388689..2e62f6d 100644
                  try {
                      findElement(
                          selector = it,
-@@ -1135,6 +1377,8 @@ class Orchestra(
+@@ -1135,6 +1378,8 @@ class Orchestra(
                      true
                  }
              }
@@ -25980,7 +26201,7 @@ index c388689..2e62f6d 100644
  
              if (disappeared != true) {
                  return false
-@@ -1144,7 +1388,10 @@ class Orchestra(
+@@ -1144,7 +1389,10 @@ class Orchestra(
          return true
      }
  
@@ -25992,7 +26213,7 @@ index c388689..2e62f6d 100644
          jsEngine.enterScope()
          subflowDepth++
  
-@@ -1152,13 +1399,8 @@ class Orchestra(
+@@ -1152,13 +1400,8 @@ class Orchestra(
              commands
                  .mapIndexed { index, command ->
                      yield()
@@ -26008,7 +26229,7 @@ index c388689..2e62f6d 100644
                          try {
                              // Script evaluation is part of running the command, so keep it inside the
                              // guarded block: a parse error (e.g. a bad numeric field) then reports a
-@@ -1196,6 +1438,7 @@ class Orchestra(
+@@ -1196,6 +1439,7 @@ class Orchestra(
                      } catch (e: DeviceConnectionException) {
                          throw e
                      } catch (e: Throwable) {
@@ -26016,7 +26237,7 @@ index c388689..2e62f6d 100644
                          dispatchFinished(command, CommandOutcome.Failed(e), sequenceNumber)
                          when (onCommandFailed(index, command, e)) {
                              ErrorResolution.FAIL -> throw e
-@@ -1205,6 +1448,7 @@ class Orchestra(
+@@ -1205,6 +1449,7 @@ class Orchestra(
                              }
                          }
                      }
@@ -26024,7 +26245,7 @@ index c388689..2e62f6d 100644
                  }
                  .any { it }
          } finally {
-@@ -1229,7 +1473,7 @@ class Orchestra(
+@@ -1229,7 +1474,7 @@ class Orchestra(
              val onCompleteSuccess: Boolean
              try {
                  val onStartSuccess = subflowConfig?.onFlowStart?.commands?.let {
@@ -26033,7 +26254,7 @@ index c388689..2e62f6d 100644
                  } ?: true
  
                  if (onStartSuccess) {
-@@ -1242,7 +1486,7 @@ class Orchestra(
+@@ -1242,7 +1487,7 @@ class Orchestra(
              } finally {
                  onCompleteSuccess = if (currentCoroutineContext().isActive) {
                      subflowConfig?.onFlowComplete?.commands?.let {
@@ -26042,7 +26263,7 @@ index c388689..2e62f6d 100644
                      } ?: true
                  } else {
                      true
-@@ -1337,9 +1581,12 @@ class Orchestra(
+@@ -1337,9 +1582,12 @@ class Orchestra(
              maestro.clearAppState(command.appId)
          }
  
@@ -26058,7 +26279,7 @@ index c388689..2e62f6d 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1482,6 +1729,7 @@ class Orchestra(
+@@ -1482,6 +1730,7 @@ class Orchestra(
          selector: ElementSelector,
          optional: Boolean,
          timeoutMs: Long? = null,
@@ -26066,7 +26287,7 @@ index c388689..2e62f6d 100644
      ): FindElementResult {
          val timeout =
              timeoutMs ?: adjustedToLatestInteraction(
-@@ -1552,7 +1800,7 @@ class Orchestra(
+@@ -1552,7 +1801,7 @@ class Orchestra(
              filter = filterFunc
          ) ?: throw MaestroException.ElementNotFound(
              "Element not found: $description",
@@ -26075,7 +26296,7 @@ index c388689..2e62f6d 100644
              debugMessage = exceptionDebugMessage
          )
      }
-@@ -1822,10 +2070,17 @@ class Orchestra(
+@@ -1822,10 +2071,17 @@ class Orchestra(
          return true
      }
  
@@ -26097,7 +26318,7 @@ index c388689..2e62f6d 100644
  
      private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
          val result = findElement(command.selector, optional = command.optional)
-@@ -1871,7 +2126,8 @@ class Orchestra(
+@@ -1871,7 +2127,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
