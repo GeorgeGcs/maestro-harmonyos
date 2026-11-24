@@ -1,6 +1,6 @@
 # Maestro HarmonyOS
 
-[演示入口](docs/demo.md) · [v0.1.4 发行说明](docs/releases/0.1.4.md) · [GitCode 发行页](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
+[演示入口](docs/demo.md) · [v0.1.4 发行说明](docs/releases/0.1.4.md) · [AtomGit 发行页](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
 
 **v0.1.4 已发布。** 新增 `hideKeyboard`、VS Code 命令补全和 Agent 预检支持，修复启动时的窗口焦点判断。后台预览和主机录屏共用缩小帧，显式截图仍保存原尺寸。API 22 模拟器的静态页面短测中，预览单帧数据量减少约 **80.3%**。
 
@@ -10,14 +10,14 @@
 
 工具运行在开发或测试电脑上，测试应用需提前安装，无需引入 ArkTS/HAR 运行依赖。本项目是独立社区适配项目，与 Maestro 上游及操作系统厂商不存在官方隶属关系。
 
-**让 Agent 调用测试：[鸿测 Agent 开源仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。** 鸿测基于本项目提供 MCP、CLI 和 HTTP 接口，负责提交回归任务、查询执行状态和交付 HTML 报告。接入方式见下方 [Agent 接入](#agent-接入)。
+**让 Agent 调用测试：[鸿测 Agent 开源仓库](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent)。** 鸿测基于本项目提供 MCP、CLI 和 HTTP 接口，负责提交回归任务、查询执行状态和交付 HTML 报告。接入方式见下方 [Agent 接入](#agent-接入)。
 
-**下载 v0.1.4** 的便携包、独立 Windows CLI 或 VS Code 插件 0.1.3。下载后按 `SHA256SUMS` 校验文件，附件所用源码提交见 `release-manifest.json`。 [GitCode 发行页](https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos/releases) · [安装说明](docs/releases/0.1.4.md#安装)
+**下载 v0.1.4** 的便携包、独立 Windows CLI 或 VS Code 插件 0.1.3。下载后按 `SHA256SUMS` 校验文件，附件所用源码提交见 `release-manifest.json`。 [AtomGit 发行页](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases) · [安装说明](docs/releases/0.1.4.md#安装)
 
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度**为 **100%**（更新于 2026 年 11 月 20 日 17:15，北京时间）。课题交付材料已完成，v0.1.4 的发行附件已上传。
+- **当前进度**为 **100%**（更新于 2026 年 11 月 24 日 15:42，北京时间）。课题交付材料已完成，v0.1.4 的发行附件已上传。合入发布后的源码变更见[最新回归](#11-月-24-日源码回归)。
 
 Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。手机固定版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。后续修复及平板验证单独记录，不替换这份版本基线。
 
@@ -53,7 +53,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | VS Code 运行与失败定位 | 运行中高亮 YAML 并显示子 Flow 状态。点击失败步骤可在同一区域查看失败行、截图和日志摘要，平板已验证停止、确认释放和重跑。见[插件说明](packages/vscode/README.md#看运行进度停止与重跑)及[真机验收记录](docs/progress/2026-11-14-vscode-live-run.md)。 |
 | VS Code 触摸录制与语法检查 | 点击优先生成控件 ID 或文本。插件用录制前的控件树核对首个点击，重复匹配时尝试用唯一父容器生成 `childOf`。同一条文本选择器已从平板录制并在手机回放通过。源码版插件已在真实 VS Code 中验证常用命令和参数补全，以及保存后定位 Maestro 语法错误，无需连接设备。见[录制与检查说明](packages/vscode/README.md#在-vs-code-里录制真机触摸)。 |
 | CI 与设备收尾 | 通用 Windows CI 已从干净源码构建 CLI、自动启动 API 22 模拟器、安装 HAP 并执行 Flow。已归档 JUnit 和截图，确认会话释放、模拟器关闭。见[流程与证据](docs/ci.md)。 |
-| Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent)。 |
+| Agent 接入 | 鸿测通过 MCP、HTTP 或 CLI 提交已登记的回归用例，由独立 worker 执行并交付 HTML 报告。同一接口也接入了 Android、iOS 和 Web，各平台的验证范围见[鸿测仓库](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent)。 |
 
 ### API 26 真机性能
 
@@ -77,6 +77,21 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 测试设备已有受支持的 UITest 服务时，CLI 能自动建立并回收本次 RPC 转发。也可以显式指定转发，连接或读取失败时由 HDC 继续取树。[配置步骤](docs/setup.md#rpc-取树)
 
+### 11 月 24 日源码回归
+
+以下数据来自 `main` 的源码构建。已发布附件的版本及验证范围见页首发行说明。
+
+| 场景 | 对照条件 | 结果 |
+| --- | --- | --- |
+| 普通控件点击 | 同一台 API 26 手机、同一 HAP 和 Flow，HDC 后端，修改前后各 3 轮 | 点击耗时中位数从 **12.14 秒降至 10.01 秒**，缩短 **17.6%**。点击前取树从 2～3 次减为 2 次，点击后的 2 次查询保留。 |
+| 带 `childOf` 的连续正向断言 | 同一台 API 26 手机、同一 HAP 和 Flow，A/B 交替运行 3 组 | 每轮取树从 3 次减为 **1～2 次**，三条断言的耗时中位数从 **7.13 秒降至 4.29 秒**，缩短约 **40%**。 |
+| 显式 WebView 目标下的 ArkWeb 滚动 | 同一台 API 22 模拟器与双 WebView HAP，前后各 1 轮，每轮 2 次滑动 | 设备进程与转发核验从 **8 次减为 4 次**。新版核验耗时中位数 **228 毫秒**，DOM 读取 **5 毫秒**。滑动耗时均约 **5.1 秒**。 |
+
+普通点击在目标、窗口和边界核对通过后派发。连续正向断言可在 **250 毫秒**内复用命中的完整树，未命中、负向断言或含 CSS 的选择器仍实时查询。ArkWeb 可在同一连接内复用两秒内紧接的一次转发核验，每次仍读取新 DOM，并核对页面 URL 和 WebView 标记。
+
+`retryTapIfNoChange` 保留截图比较。主机回归中，控件树不变而画面改变时只点击一次，画面和树都不变时点击两次。显式截图仍保存原尺寸。最新版源码的对应主机回归 **343 项通过、3 项跳过**。 [对照方法与结果](docs/progress/2026-11-24-query-performance.md) · [驱动操作与设备条件](docs/development-design.md#7-驱动行为与等待)
+
+
 ## 背景与用途
 
 Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。维护页面回归用例时，团队还需要组织测试代码、等待条件、失败处理和公共流程。已有其他移动平台用例的团队，也需要处理测试体系之间的迁移与复用。
@@ -85,7 +100,7 @@ Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。维护
 
 ## 官方示例
 
-新增 [HMOS 代码工坊](examples/hmos-code-lab/README.md)的固定版本获取入口。它来自华为 [HarmonyOS_Samples/sample_in_harmonyos](https://gitcode.com/HarmonyOS_Samples/sample_in_harmonyos)，手机和平板使用同一个 `phone` 模块；本仓补充前台常亮和 Maestro Flow。
+新增 [HMOS 代码工坊](examples/hmos-code-lab/README.md)的固定版本获取入口。它来自华为 [HarmonyOS_Samples/sample_in_harmonyos](https://atomgit.com/HarmonyOS_Samples/sample_in_harmonyos)，手机和平板使用同一个 `phone` 模块；本仓补充前台常亮和 Maestro Flow。
 
 ```powershell
 node examples/hmos-code-lab/prepare.mjs
@@ -172,8 +187,8 @@ Maestro 负责解析、编排、等待和断言；适配层将 UITest 布局映�
 需要让 Agent 执行已有 YAML 并交付报告时，可使用鸿测 Agent。它将本项目的 CLI 封装为独立 worker，提供任务提交、请求去重、状态查询、证据核验和 JSON/HTML 报告。Maestro HarmonyOS 负责实际设备操作与会话清理；上层 Agent 按宿主能力选择 MCP、CLI 或 HTTP，调用同一个 worker。
 
 1. 按本仓[使用指南](docs/user-guide.md)准备 CLI、Java、HDC 和已安装的目标应用，先跑通所需 Flow。
-2. 按[鸿测 README](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent/blob/main/README.md)部署 worker，在本地 JSON 配置中绑定设备、实际 CLI 分发包及其指纹，并登记应用和 Flow。配置模板见 [device-config.example.json](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent/blob/main/device-config.example.json)。鸿测通过 `HONGCE_MAESTRO_CONFIG` 读取此 JSON，本仓的 `config.local.ps1` 仅配置底层工具路径。
-3. 将鸿测的通用回归 Skill 和所选协议入口接到 Agent，按已登记的用例提交任务，保存 `request_id` / `run_id`，查询终态并读取报告。完整配置与调用示例见[鸿测真机执行指南](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent/blob/main/docs/worker-device-execution.md)。
+2. 按[鸿测 README](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent/blob/main/README.md)部署 worker，在本地 JSON 配置中绑定设备、实际 CLI 分发包及其指纹，并登记应用和 Flow。配置模板见 [device-config.example.json](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent/blob/main/device-config.example.json)。鸿测通过 `HONGCE_MAESTRO_CONFIG` 读取此 JSON，本仓的 `config.local.ps1` 仅配置底层工具路径。
+3. 将鸿测的通用回归 Skill 和所选协议入口接到 Agent，按已登记的用例提交任务，保存 `request_id` / `run_id`，查询终态并读取报告。完整配置与调用示例见[鸿测真机执行指南](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent/blob/main/docs/worker-device-execution.md)。
 
 配置完成后，可以对 Agent 说：“执行这个应用已登记的冒烟回归，结束后给我 HTML 报告，说明失败、阻塞和未执行项。”鸿测当前执行已登记的 YAML，真实用例不自动修改或重放；现有执行器关闭录屏，`cleanup=unknown` 不会算作通过。完整套件的首次通过率与录屏验证仍按本仓[验证计划](docs/validation-plan.md)执行。
 
@@ -198,9 +213,9 @@ node examples/agent-client/run.mjs `
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和通用 Windows CI 入口。首次与重试后的最终结果分别记录。 |
 | VS Code 辅助编写 | 支持截图与控件树点选、真机触摸录制和 UITest 记录导入。点击优先使用经同次录制控件树核对的唯一 ID 或文本，证据不足时生成坐标供核对。生成的标准 Maestro YAML 可在插件内校验和回放，运行面板可查看当前行、各次重试和对应的失败证据。 |
-| 视频与会话恢复 | 录屏默认关闭。启用主机录像时，VS Code 预览与录屏复用截图通道。Huawei 系统录屏仍支持[分段执行](examples/hmos-code-lab/flows/recorded-suite/README.md)，已有完整场景三段原片解码记录。会话异常后的设备释放仍按原会话和资源凭据核验。 |
+| 视频与会话恢复 | 录屏默认关闭。启用主机录像时，VS Code 预览与录屏复用截图通道。主机录像默认保留连续相同帧。设置 `MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES=true` 可合并连续相同画面并保留停留时长。Huawei 系统录屏仍支持[分段执行](examples/hmos-code-lab/flows/recorded-suite/README.md)，已有完整场景三段原片解码记录。会话异常后的设备释放仍按原会话和资源凭据核验。 |
 
-每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。HAP 安装、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
+每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。CI 支持在运行前安装固定签名的 HAP。Flow 内安装 HAP、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
 各版发行说明记录对应的源码、文件摘要和设备范围。本次 v0.1.4 的设备回归在 API 22 模拟器完成，平板 20 轮结果对应 v0.1.2。 [v0.1.4](docs/releases/0.1.4.md) · [v0.1.3](docs/releases/0.1.3.md) · [v0.1.2](docs/releases/0.1.2.md) · [v0.1.1](docs/releases/0.1.1.md)
 
@@ -209,7 +224,7 @@ node examples/agent-client/run.mjs `
 ## 文档与贡献
 
 - 开始使用：[使用指南](docs/user-guide.md) · [环境与运行参数](docs/setup.md) · [HMOS 代码工坊](examples/hmos-code-lab/README.md) · [ComponentCollection 场景](examples/component-collection/README.md)
-- 编写与接入：[VSCode 插件](packages/vscode/README.md) · [鸿测 Agent 开源仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent) · [Agent 客户端](examples/agent-client/README.md) · [便携联调包](docs/agent-bundle.md)
+- 编写与接入：[VSCode 插件](packages/vscode/README.md) · [鸿测 Agent 开源仓库](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent) · [Agent 客户端](examples/agent-client/README.md) · [便携联调包](docs/agent-bundle.md)
 - 开发与维护：[开发设计](docs/development-design.md) · [Maestro 源码 fork](#maestro-源码-fork) · [贡献说明](CONTRIBUTING.md) · [主机测试](host-tests/README.md) · [第三方来源](THIRD_PARTY.md)
 
 <details>
