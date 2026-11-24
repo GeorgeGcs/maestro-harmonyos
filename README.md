@@ -154,7 +154,14 @@ flowchart LR
 
 Maestro 负责解析、编排、等待和断言；适配层将 UITest 布局映射为 Maestro 节点，用文本、ID 等选择器定位控件，再调用设备操作。会话记录命令与临时资源的清理状态；无法确认释放时保留 `unknown` 并阻止接管，恢复不会改写原用例结果。
 
-Kotlin 实现采用固定上游加补丁的交付方式；VSCode 扩展、运行脚本和客户端示例直接保存在本仓。上游版本见 [upstream.lock.json](upstream.lock.json)，模块职责与执行过程见[开发设计](docs/development-design.md)，更新实现的方法见[补丁说明](patches/maestro/README.md)。
+## Maestro 源码 fork
+
+项目最初把鸿蒙适配整理成一份补丁，并固定 Maestro 上游提交。维护者能据此查清改了哪些上游文件，CI 也能从相同基线重新构建。为了方便按 Kotlin 类阅读实现、在 IDE 中调试和直接编译，我们后来把应用补丁后的完整源码维护在 `harmonyos/stable` 分支。
+
+- **适配主仓（本仓）**保存上游锁、鸿蒙补丁、VS Code 扩展、运行脚本和示例。核对改动或复现交付构建，可按[上游锁](upstream.lock.json)和[补丁说明](patches/maestro/README.md)准备源码。
+- **Maestro 源码 fork** 包含完整的 Gradle 工程和已集成的鸿蒙适配。检出后可直接打开工程，构建 `:maestro-cli:installDist`。两个平台同步同一条分支历史。[AtomGit 源码镜像](https://atomgit.com/GeorgeGcs/maestro-source-fork) · [GitHub 源码分支](https://github.com/GeorgeGcs/Maestro-fork/tree/harmonyos/stable)
+
+复现本仓对应的源码时，以 [source-fork.lock.json](source-fork.lock.json) 中的提交为准。CI 比较该提交的完整源码树与固定上游应用补丁后的结果。构建环境和缓存用法见[构建复现](docs/build-reproducibility.md#用缓存构建)。 [一致性核验](docs/ci.md#核心回归与源码-fork)
 
 ## Agent 接入
 
@@ -203,9 +210,7 @@ node examples/agent-client/run.mjs `
 
 - 开始使用：[使用指南](docs/user-guide.md) · [环境与运行参数](docs/setup.md) · [HMOS 代码工坊](examples/hmos-code-lab/README.md) · [ComponentCollection 场景](examples/component-collection/README.md)
 - 编写与接入：[VSCode 插件](packages/vscode/README.md) · [鸿测 Agent 开源仓库](https://gitcode.com/HarmonyPandaWorkshop/hongce-agent) · [Agent 客户端](examples/agent-client/README.md) · [便携联调包](docs/agent-bundle.md)
-- 开发与维护：[开发设计](docs/development-design.md) · [贡献说明](CONTRIBUTING.md) · [主机测试](host-tests/README.md) · [第三方来源](THIRD_PARTY.md)
-
-也可直接检出[可构建源码 fork](https://github.com/GeorgeGcs/Maestro-fork/tree/harmonyos/stable)。固定提交在 [source-fork.lock.json](source-fork.lock.json)，源码与补丁的一致性由 [CI 校验](docs/ci.md#核心回归与源码-fork)维护。
+- 开发与维护：[开发设计](docs/development-design.md) · [Maestro 源码 fork](#maestro-源码-fork) · [贡献说明](CONTRIBUTING.md) · [主机测试](host-tests/README.md) · [第三方来源](THIRD_PARTY.md)
 
 <details>
 <summary>运行、协议及历史验证参考</summary>
