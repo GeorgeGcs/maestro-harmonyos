@@ -1,10 +1,8 @@
 # Maestro HarmonyOS
 
-[演示入口](docs/demo.md) · [v0.1.4 发行说明](docs/releases/0.1.4.md) · [AtomGit 发行页](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases)
+[演示入口](docs/demo.md) · [v0.1.5 发行说明](docs/releases/0.1.5.md) · [AtomGit 下载](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/tag/v0.1.5)
 
-**v0.1.4 已发布。** 新增 `hideKeyboard`、VS Code 命令补全和 Agent 预检支持，修复启动时的窗口焦点判断。后台预览和主机录屏共用缩小帧，显式截图仍保存原尺寸。API 22 模拟器的静态页面短测中，预览单帧数据量减少约 **80.3%**。
-
-本版累计通过 **1,269 项** TAP/JUnit 检查。API 22 模拟器的 ComponentCollection 五条 Flow **5/5 通过，用时 4 分 7 秒**。解压后的 CLI 已验证故意失败、截图留证、释放设备和重跑，实际安装的 VS Code 插件 0.1.3 已验证预览与录屏。 [Windows CI](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/44548088023)
+**v0.1.5 已发布。** 普通点击减少重复取树，带 `childOf` 的正向断言可短时复用布局。显式 WebView 目标可复用相邻读取的转发核验。新增 CLI 与 VS Code 运行预检、失败证据离线导出和主机录像去重开关。
 
 **用标准 Maestro YAML 编写鸿蒙应用的界面自动化测试。** 在电脑上连接设备，查找控件、点击、输入、滑动和检查结果，保存截图与运行报告。应用改版后可以重复执行同一个 Flow，检查原有操作是否仍然正常。
 
@@ -12,12 +10,12 @@
 
 **让 Agent 调用测试：[鸿测 Agent 开源仓库](https://atomgit.com/HarmonyPandaWorkshop/hongce-agent)。** 鸿测基于本项目提供 MCP、CLI 和 HTTP 接口，负责提交回归任务、查询执行状态和交付 HTML 报告。接入方式见下方 [Agent 接入](#agent-接入)。
 
-**下载 v0.1.4** 的便携包、独立 Windows CLI 或 VS Code 插件 0.1.3。下载后按 `SHA256SUMS` 校验文件，附件所用源码提交见 `release-manifest.json`。 [AtomGit 发行页](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases) · [安装说明](docs/releases/0.1.4.md#安装)
+**下载 v0.1.5** 的 Windows CLI、VS Code 插件 0.1.5 或便携包。便携包已包含同一套 CLI 和示例。下载后按 `SHA256SUMS` 校验文件，附件所用源码提交见 `release-manifest.json`。 [AtomGit 下载](https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos/releases/tag/v0.1.5) · [安装说明](docs/releases/0.1.5.md#安装)
 
 ## 交付进度
 
 - **交付时间：** 具备交付条件后提前提交，最晚 2026 年 12 月 23 日。
-- **当前进度**为 **100%**（更新于 2026 年 11 月 24 日 15:42，北京时间）。课题交付材料已完成，v0.1.4 的发行附件已上传。发行后合入的源码变更见[最新回归](#11-月-24-日源码回归)。
+- **当前进度**为 **100%**（更新于 2026 年 11 月 24 日 21:01，北京时间）。课题交付材料已完成，v0.1.5 发行附件已上线。
 
 Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通用 CI 入口已实现。手机固定版本的 HMOS 完整组件套件在同一台真机上 **20/20 轮首次通过，通过率 100%**；未使用 YAML 重试，人工干预、固定输入和执行证据均已复核，所有轮次正常清理。后续修复及平板验证单独记录，不替换这份版本基线。
 
@@ -28,7 +26,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 | 导航修复及完整场景单轮 | **通过** | 按钮定向回归 3 分 36 秒、完整单轮 12 分 51 秒；未使用重试，CLI 与 runner 退出码均为 0，`cleanup=complete` |
 | HDC 诊断及最终清理核验 | **单轮与 20 轮收尾通过** | 501 项 JVM 回归通过；真机 20 轮清理完成，设备最终释放；23,114 次 HDC 调用日志已核对，本批未复现此前约 5 秒的超时故障 |
 | 完整场景分段录屏 | **此前版本通过一次完整运行** | `728859cb` CLI 执行 12 分 55 秒，输入、按钮、弹窗三段原片均完整解码通过，清理完成 |
-| 交付文件与插件回放 | **v0.1.4 主机回归与模拟器验证通过** | 1,269 项 TAP/JUnit 检查通过。API 22 模拟器 5/5 通过，耗时 4 分 7 秒。实际发行包完成失败留证、设备释放及重跑验证，实际安装插件完成预览和录屏。见[发行说明](docs/releases/0.1.4.md#验证) |
+| 最新发行包核验 | **v0.1.5 通过** | API 22 模拟器 ComponentCollection **5/5，3 分 41 秒**。故意失败返回非零并导出截图与离线报告，设备释放后重新运行通过。JVM **673 项通过、2 项跳过**，VSIX 实际安装及扩展宿主检查通过。见[发行说明](docs/releases/0.1.5.md#验证) |
 | 手机完整套件 20 轮稳定性 | **通过** | 11 月 5 日 01:20:50～05:38:24，20 轮耗时 **4 小时 17 分 34 秒**，单轮平均约 **12 分 52 秒**；固定版本 20/20 首次通过，100%，无重试、无人工干预，清理及证据复核通过 |
 | HarmonyOS 7 平板补充验证 | **v0.1.2 完整套件 20/20 首次通过** | 11 月 5 日 20:30～23:59，约 **3 小时 29 分钟**；无重试、无人工干预，20 轮清理完成、设备正常释放。15,673 次已归档 HDC 调用无失败，见[平板记录](docs/progress/2026-11-06-tablet-v012.md)；旧失败批次保留 |
 
@@ -89,7 +87,7 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 普通点击在目标、窗口和边界核对通过后派发。连续正向断言可在 **250 毫秒**内复用命中的完整树，未命中、负向断言或含 CSS 的选择器仍实时查询。ArkWeb 可在同一连接内复用两秒内紧接的一次转发核验，每次仍读取新 DOM，并核对页面 URL 和 WebView 标记。
 
-`retryTapIfNoChange` 保留截图比较。主机回归中，控件树不变而画面改变时只点击一次，画面和树都不变时点击两次。显式截图仍保存原尺寸。最新版源码的对应主机回归 **343 项通过、3 项跳过**。 [对照方法与结果](docs/progress/2026-11-24-query-performance.md) · [驱动操作与设备条件](docs/development-design.md#7-驱动行为与等待)
+`retryTapIfNoChange` 保留截图比较。主机回归中，控件树不变而画面改变时只点击一次，画面和树都不变时点击两次。显式截图仍保存原尺寸。该轮源码对照中的定向主机回归 **343 项通过、3 项跳过**。 [对照方法与结果](docs/progress/2026-11-24-query-performance.md) · [驱动操作与设备条件](docs/development-design.md#7-驱动行为与等待)
 
 `agent.preflight` 可以检查 UITest RPC 监听。实际取树后端和回退原因可在 `maestro.log` 中查看。
 
@@ -125,7 +123,7 @@ node examples/hmos-code-lab/prepare.mjs
 
 ## 跑一个 Flow
 
-先按使用指南准备 JDK 17、Node.js 22.12+ 和 HDC，再下载并校验 v0.1.4 的 CLI、VSIX 或便携包。需要自行构建时，从固定上游应用本仓的鸿蒙补丁。插件需配置 Java、HDC 和鸿蒙适配 CLI。 [使用指南](docs/user-guide.md) · [v0.1.4 安装说明](docs/releases/0.1.4.md#安装) · [构建说明](docs/build-reproducibility.md)
+先按使用指南准备 JDK 17、Node.js 22.12+ 和 HDC，再下载并校验 v0.1.5 的 CLI、VSIX 或便携包。需要自行构建时，从固定上游应用本仓的鸿蒙补丁。插件需配置 Java、HDC 和鸿蒙适配 CLI。 [使用指南](docs/user-guide.md) · [v0.1.5 安装说明](docs/releases/0.1.5.md#安装) · [构建说明](docs/build-reproducibility.md)
 
 使用便携包时，在解压后的 `source` 目录执行下列脚本，并加上 `-CliDir ../cli`，无需重新编译 CLI。源码检出并构建的用户使用脚本默认路径即可。
 
@@ -219,7 +217,7 @@ node examples/agent-client/run.mjs `
 
 每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。CI 支持在运行前安装固定签名的 HAP。Flow 内安装 HAP、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
-各版发行说明记录对应的源码、文件摘要和设备范围。本次 v0.1.4 的设备回归在 API 22 模拟器完成，平板 20 轮结果对应 v0.1.2。 [v0.1.4](docs/releases/0.1.4.md) · [v0.1.3](docs/releases/0.1.3.md) · [v0.1.2](docs/releases/0.1.2.md) · [v0.1.1](docs/releases/0.1.1.md)
+各版发行说明记录对应的源码、文件摘要和设备范围。v0.1.5 发行包在 API 22 模拟器完成复测，历史手机和平板的 20 轮分别沿用原冻结版本。 [v0.1.5](docs/releases/0.1.5.md) · [v0.1.4](docs/releases/0.1.4.md) · [v0.1.3](docs/releases/0.1.3.md) · [v0.1.2](docs/releases/0.1.2.md) · [v0.1.1](docs/releases/0.1.1.md)
 
 详细范围见[测试计划与记录](docs/acceptance.md)、[重复验证计划](docs/validation-plan.md)、[手机完整套件记录](docs/progress/2026-11-05-hdc-cleanup.md)和[平板完整套件记录](docs/progress/2026-11-06-tablet-v012.md)。
 
@@ -259,5 +257,5 @@ node examples/agent-client/run.mjs `
 | 官方示例应用典型交互覆盖 | 采用固定版本 HMOS 代码工坊，套件覆盖输入、按钮、弹窗及导航 | [官方示例来源与获取](examples/hmos-code-lab/README.md)、[完整套件](examples/hmos-code-lab/flows/suite/README.md)；按所选场景核验，不声称覆盖应用全部功能 |
 | 至少一台真实鸿蒙设备完整跑通，系统 OS 6.0.0 及以上 | 手机已有完整套件记录；HarmonyOS 7.0.0 平板同版 CLI 完整套件 20/20 通过，清理与释放通过 | [手机记录](docs/progress/2026-11-05-hdc-cleanup.md)、[平板 20 轮](docs/progress/2026-11-06-tablet-v012.md)；API 级别与产品系统版本分别登记 |
 | 完整场景套件 20 轮，首次通过率 ≥95% | 手机与平板各自在固定环境 20/20 首次通过，100%；均无重试、无人工干预、全部清理完成；手机 20 轮 4 小时 17 分 34 秒，平板约 3 小时 29 分钟 | [手机 20 轮](docs/progress/2026-11-05-hdc-cleanup.md#完整套件-20-轮)、[平板补充验证](docs/progress/2026-11-06-tablet-v012.md)、[统计方法](docs/validation-plan.md)；版本、设备与结果分别统计，不混算 |
-| 开源、完整使用文档与开发指南 | 源码、固定上游补丁、示例、CLI / VSIX / 便携包已公开 | [使用指南](docs/user-guide.md)、[开发设计](docs/development-design.md)、[贡献说明](CONTRIBUTING.md)、[v0.1.4 发行版](docs/releases/0.1.4.md) |
+| 开源、完整使用文档与开发指南 | 源码、固定上游补丁、示例、CLI / VSIX / 便携包已公开 | [使用指南](docs/user-guide.md)、[开发设计](docs/development-design.md)、[贡献说明](CONTRIBUTING.md)、[v0.1.5 发行版](docs/releases/0.1.5.md) |
 | 兼容建议：HarmonyOS 与 OpenHarmony，并说明差异 | HDC、UITest、aa 公共接口已对照可用；独立 OpenHarmony 真机尚未验证，无设备 | [平台兼容范围](docs/platform-compatibility.md)：文本命令版本、布局、权限、应用安装与 Huawei 录屏后端分别说明；不以共用底座替代设备测试 |
