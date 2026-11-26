@@ -309,6 +309,8 @@ $cli = './.upstream/maestro/maestro-cli/build/install/maestro/bin/maestro.bat'
 
 每行写一条 JSON 请求。标准输出只有协议消息，诊断写标准错误；异步请求可乱序返回，按 `id` 匹配。先发 `agent.describe`，需要恢复时首条请求明确传 `schemaVersion:2`，再用明确的本地设备标识调用 `agent.preflight`。预检不启动应用：当前会查询 HDC 连接、设备锁、持久恢复记录、UITest 路径和可选的应用/模块/Ability 元数据。无法可靠读取的锁屏状态为 `unknown`；录屏还要求显式启用实验后端，工具存在不代表录屏成功。
 
+请求 `tapOn`、`assertVisible` 等取树相关命令时，预检追加可选的 `layoutRpcListener` 观察项。其代码区分 `UITEST_RPC_LISTENER_PRESENT`、`UITEST_RPC_LISTENER_MISSING` 和 `UITEST_RPC_LISTENER_UNKNOWN`，`required` 为 `false`。预检只观察监听。实际会话使用的后端和回退原因写入 `maestro.log`。
+
 预检返回后，调用方仍须明确决定是否执行。`agent.connect` 成功意味着取得会话；只有会话为 `idle` 才能抓快照或提交动作。点击节点使用同会话的新快照，参数沿用[原动作格式](recorder-protocol.md)。每次执行先生成 `runId`、`attemptId` 和序号，收到登记结果后轮询 `agent.result`。响应丢失时查询原尝试，不能换一个传输 `id` 重发动作。
 
 `artifactsDir` 使用稳定的本地绝对目录。登记在 `<artifactsDir>/runs/<runId>/<attemptId>/`，同一输出根下的跨进程登记使用文件锁。相同标识再次提交会被拒绝；主动更换输出根意味着另一份登记空间，调用方不能用换目录规避查重。`agent.result/evidence` 查询本进程已通过 `agent.connect` 配置过的输出根；尚未配置时可直接读取该目录的结果文件。恢复读到失去执行进程的未完成尝试时，保留 `unknown`，不自动续跑。

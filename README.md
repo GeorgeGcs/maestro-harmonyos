@@ -75,7 +75,19 @@ Maestro 鸿蒙适配、YAML 执行、重试与报告、VSCode 辅助工具和通
 
 各阶段的显式截图均成功保存。最终构建的四轮均使用 RPC 取树和查询尺寸，ArkWeb 测试结束后恢复了原 HAP 并移除了转发。以上为源码构建的短用例数据，完整套件的稳定性记录见前文。
 
-测试设备已有受支持的 UITest 服务时，CLI 能自动建立并回收本次 RPC 转发。也可以显式指定转发，连接或读取失败时由 HDC 继续取树。[配置步骤](docs/setup.md#rpc-取树)
+测试设备已有受支持的 UITest 服务时，CLI 能自动建立并回收本次 RPC 转发。也可以显式指定转发，连接或读取失败时由 HDC 继续取树。[就绪检查、测试入口和实际取树日志](docs/setup.md#检查和准备-rpc)
+
+### 11 月 26 日真机 ArkWeb CSS 回归
+
+在同一台 API 26 手机上运行 ComponentCollection 双 WebView 样例。Flow 在第二个 WebView 中按 CSS 读取计数、检查第一个 WebView 的输入框未被选中、点击按钮、核对计数变化并截图。
+
+| 原生取树方式 | 首轮 | 重跑 | 首轮 HDC `dumpLayout` 次数 |
+| --- | ---: | ---: | ---: |
+| 优化前，HDC | 43.084 秒 | 41.551 秒 | 12 |
+| 复用本次 CSS 定位的布局，关闭 RPC | 33.036 秒 | — | 8 |
+| 复用本次 CSS 定位的布局，要求 RPC | 11.168 秒 | 10.685 秒 | 0 |
+
+按 JUnit 记录的 Flow 耗时，关闭 RPC 时首轮缩短 **23.3%**，启用 RPC 后相对优化前缩短 **74.1%**。修复版 HDC 对照跑了 1 轮，两条正向 CSS 断言各取 1 次原生布局。两种后端都保存了截图并释放会话。计时不含准备样例、启动测试代理和回收转发。这组数据来自源码构建。[双 WebView 用例](examples/arkweb-probe/dom-css-secondary.yaml) · [复现条件](examples/arkweb-probe/README.md#两个-webview)
 
 ### 11 月 24 日源码回归
 
