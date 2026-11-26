@@ -142,9 +142,13 @@ Get-ChildItem ./artifacts -Recurse -Filter '*.log' |
 ```powershell
 $env:MAESTRO_HARMONYOS_RECORDING = 'host-frames'
 $env:MAESTRO_HARMONYOS_FFMPEG = 'C:/tools/ffmpeg/bin/ffmpeg.exe'
+# 可选，合并连续相同帧
+# $env:MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES = 'true'
 ```
 
 采集使用设备截图。打开 VS Code 预览时，预览与录像复用同一条采集通道，并优先复用 Flow 已取得的画面。预览至少间隔两秒，后台最多每 500 ms 尝试采一帧，设备操作优先。录制保留帧的实际时间间隔，以 H.264 编码生成无声 MP4。主机端在停止时编码并校验 MP4 结构。[FFmpeg 拼接与时间戳说明](https://ffmpeg.org/ffmpeg-formats.html#concat)
+
+主机录屏默认保留所有已接收的帧。设置 `MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES=true` 可跳过连续且字节相同的 PNG，减少临时帧写入和送入编码器的帧数。静止画面的停留时长延续到下一张不同画面或录屏结束。设为 `false` 即关闭。此开关仅用于主机录屏，设备采集频率、预览和显式截图沿用各自的设置。运行日志分别记录合并帧数和队列丢帧数。
 
 主机录像沿用 180 秒录制时长和 512 MiB 上限，时长可用 `MAESTRO_HARMONYOS_RECORDING_MAX_SECONDS` 调整。采样间隔受设备截图速度影响，适合回归证据和故障回看。需要系统帧率或音轨时可以使用 Huawei 系统录屏。
 
@@ -209,6 +213,25 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 ## RPC 取树
 
 CLI 和 VS Code 默认在所选设备上检查 UITest 的 `@uitest_socket` 监听。存在监听时，Maestro 登记并建立一个本机 HDC 转发，经 `captureLayout` 读取节点。服务未运行、转发不可用或 RPC 读取失败时，继续使用 HDC 取树。自动模式由设备会话负责核对和移除本次建立的转发。可设置 `MAESTRO_HARMONYOS_LAYOUT_RPC_AUTO=false` 跳过自动探测。
+
+### 检查和准备 RPC
+
+先用新版 CLI 检查指定设备。此命令只查看设备锁和 UITest socket，输出 `UITEST_RPC_LISTENER_PRESENT`、`UITEST_RPC_LISTENER_MISSING` 或 `UITEST_RPC_LISTENER_UNKNOWN`。每个 Flow 的 `maestro.log` 会写入 `HarmonyOS layout backend=...` 和原因，连接或读树回退也会更新记录。
+
+```powershell
+node scripts/with-harmonyos-layout-rpc.mjs --cli-dir $cliDir --device $device
+```
+
+在专用测试设备上，如已按官方工具安装适配该系统和架构的测试代理，位于 `/data/local/tmp/agent.so`，可传入事先核验的 SHA-256 并执行一轮测试。脚本使用已安装的代理并核对进程身份，没有占用的 UITest 进程时才会启动。CLI 回收本轮转发后，准备脚本停止本轮启动的测试进程并核对 socket 和转发清单。设备已运行 UITest 服务时，可省略 `--agent-sha256`，脚本会复用该服务并交由 CLI 回收本轮转发。
+
+```powershell
+node scripts/with-harmonyos-layout-rpc.mjs --cli-dir $cliDir --device $device --agent-sha256 $agentSha256 --require-layout-rpc -- `
+  pwsh -NoProfile -File scripts/run-harmonyos.ps1 -CliDir $cliDir -DeviceId $device `
+  -BundleId ohos.samples.componentcollection -AbilityName MainAbility -Module entry `
+  -FlowPath examples/component-collection/flows/04-scroll.yaml -RunTimeoutSeconds 300
+```
+
+比较 HDC 与 RPC 时使用同一台设备和同一份 Flow，分别收集后端日志、HDC 取树次数和步骤耗时。RPC 组加 `--require-layout-rpc`，出现转发不可用或 RPC 取树失败时本轮会失败。直接调用 CLI 时可用 `MAESTRO_HARMONYOS_LAYOUT_RPC_REQUIRED=true` 启用同一检查。常规模式仍支持自动回退到 HDC。
 
 ### 显式指定转发
 

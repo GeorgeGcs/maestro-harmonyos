@@ -1,0 +1,16 @@
+appId: ohos.samples.componentcollection
+name: component-collection-arkweb-css-secondary
+---
+- assertVisible: ArkWeb 双页面
+- assertVisible:
+    css: 'button#secondary-counter[type="button"]'
+    text: '计数：0'
+- assertNotVisible:
+    css: 'input#sample'
+- tapOn:
+    css: 'button#secondary-counter[type="button"]'
+    retryTapIfNoChange: false
+- assertVisible:
+    css: 'button#secondary-counter'
+    text: '计数：1'
+- takeScreenshot: arkweb-css-secondary

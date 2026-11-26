@@ -6203,10 +6203,10 @@ index 0000000..0d0dcc6
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
 new file mode 100644
-index 00000000..7c61443c
+index 0000000..d54f452
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/session/HarmonyOsSessionSupport.kt
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,268 @@
 +package maestro.cli.session
 +
 +import maestro.Maestro
@@ -6344,6 +6344,11 @@ index 00000000..7c61443c
 +                null, "", "true" -> true
 +                "false" -> false
 +                else -> throw CliError("MAESTRO_HARMONYOS_LAYOUT_RPC_AUTO must be true or false.")
++            },
++            requireLayoutRpc = when (environment["MAESTRO_HARMONYOS_LAYOUT_RPC_REQUIRED"]?.trim()) {
++                null, "", "false" -> false
++                "true" -> true
++                else -> throw CliError("MAESTRO_HARMONYOS_LAYOUT_RPC_REQUIRED must be true or false.")
 +            },
 +        )
 +
@@ -11948,8 +11953,20 @@ index 0000000..e54096b
 +            "failureFingerprint" to "bad")))).isNull()
 +    }
 +}
+diff --git a/maestro-client/src/main/java/maestro/Filters.kt b/maestro-client/src/main/java/maestro/Filters.kt
+index f3adf5f..fd4c24a 100644
+--- a/maestro-client/src/main/java/maestro/Filters.kt
++++ b/maestro-client/src/main/java/maestro/Filters.kt
+@@ -301,6 +301,7 @@ object Filters {
+             val matchingNodes = runBlocking { maestro.findElementsByOnDeviceQuery(
+                 timeoutMs = 5000,
+                 query = OnDeviceElementQuery.Css(css = cssSelector),
++                hierarchyNodes = nodes,
+             ) }?.elements?.map { it.treeNode } ?: emptyList()
+ 
+             // The on-device CSS query traverses only the matched element (no descendants),
 diff --git a/maestro-client/src/main/java/maestro/Maestro.kt b/maestro-client/src/main/java/maestro/Maestro.kt
-index ddedf173..28f4976f 100644
+index ddedf17..114b078 100644
 --- a/maestro-client/src/main/java/maestro/Maestro.kt
 +++ b/maestro-client/src/main/java/maestro/Maestro.kt
 @@ -230,11 +230,30 @@ class Maestro(
@@ -12006,7 +12023,37 @@ index ddedf173..28f4976f 100644
  
          val retries = getNumberOfRetries(retryIfNoChange)
          repeat(retries) {
-@@ -798,6 +822,44 @@ class Maestro(
+@@ -558,17 +582,25 @@ class Maestro(
+ 
+     suspend fun findElementsByOnDeviceQuery(
+         timeoutMs: Long,
+-        query: OnDeviceElementQuery
++        query: OnDeviceElementQuery,
++        hierarchyNodes: List<TreeNode> = emptyList(),
+     ): OnDeviceElementQueryResult? {
+-        return MaestroTimer.withTimeoutSuspend(timeoutMs) {
++        suspend fun queryOnce(): OnDeviceElementQueryResult? {
+             val result = runInterruptible(Dispatchers.IO) {
+-                val elements = driver.queryOnDeviceElements(query)
++                val elements = when (val currentDriver = driver) {
++                    is maestro.drivers.HarmonyOSDriver -> currentDriver.queryOnDeviceElements(query, hierarchyNodes)
++                    else -> currentDriver.queryOnDeviceElements(query)
++                }
+                 OnDeviceElementQueryResult(
+                     elements = elements.mapNotNull { it.toUiElementOrNull() },
+                 )
+             }
+-            if (result.elements.isNotEmpty()) result else null
++            return result.takeIf { it.elements.isNotEmpty() }
+         }
++        // HarmonyOS queries the verified WebView alongside each fresh hierarchy.
++        // Let the enclosing element lookup poll, so a no-match uses one DOM request.
++        if (driver is maestro.drivers.HarmonyOSDriver) return queryOnce()
++        return MaestroTimer.withTimeoutSuspend(timeoutMs) { queryOnce() }
+     }
+ 
+     suspend fun allElementsMatching(filter: ElementFilter): List<TreeNode> {
+@@ -798,6 +830,44 @@ class Maestro(
          // Mirrors IOSDriver.SCREEN_SETTLE_TIMEOUT_MS (3000ms): the element-stability wait
          // stands in for the settle confirmation the iOS driver could not give, so keep the
          // two budgets aligned when tuning either.
@@ -12187,16 +12234,17 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 00000000..6efde922
+index 0000000..16371ee
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,703 @@
 +package maestro.drivers
 +
 +import maestro.Capability
 +import maestro.DeviceInfo
 +import maestro.Driver
 +import maestro.KeyCode
++import maestro.OnDeviceElementQuery
 +import maestro.Point
 +import maestro.ScreenRecording
 +import maestro.SwipeDirection
@@ -12247,7 +12295,7 @@ index 00000000..6efde922
 +        config: HarmonyOSDriverConfig = HarmonyOSDriverConfig(),
 +    ) : this(HdcHarmonyOSDevice(deviceId, hdc, config.layoutRpcPort.also {
 +        require(it == null || deviceId == config.layoutRpcDevice) { "Layout RPC target differs from the selected device" }
-+    }, config.arkWebPort, config.arkWebBundle, config.arkWebTarget, config.automaticLayoutRpc), config)
++    }, config.arkWebPort, config.arkWebBundle, config.arkWebTarget, config.automaticLayoutRpc, config.requireLayoutRpc), config)
 +
 +    @Volatile private var opened = false
 +    private var recording: ScreenRecording? = null
@@ -12435,7 +12483,20 @@ index 00000000..6efde922
 +    override fun contentDescriptor(excludeKeyboardElements: Boolean): TreeNode {
 +        requireOpen()
 +        if (excludeKeyboardElements) unsupported("excluding keyboard elements from the hierarchy")
-+        return hierarchy().also { lastHierarchy = HierarchySample(it, System.nanoTime()) }
++        return query { device.hierarchy(config.commandTimeout).also { lastHierarchy = HierarchySample(it, System.nanoTime()) } }
++    }
++
++    override fun queryOnDeviceElements(query: OnDeviceElementQuery): List<TreeNode> =
++        queryOnDeviceElements(query, emptyList())
++
++    internal fun queryOnDeviceElements(query: OnDeviceElementQuery, hierarchyNodes: List<TreeNode>): List<TreeNode> {
++        requireOpen()
++        return when (query) {
++            is OnDeviceElementQuery.Css -> query {
++                val scope = if (lastHierarchy == null) emptyList() else hierarchyNodes
++                device.queryCss(query.css, config.commandTimeout, scope)
++            }
++        }
 +    }
 +
 +    override fun scrollVertical() = swipe(SwipeDirection.UP, 400)
@@ -12924,10 +12985,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..22ccee8
+index 0000000..22c4090
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,31 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -12952,6 +13013,8 @@ index 0000000..22ccee8
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support media import.")
 +    fun flowFaults(appId: String, startMs: Long, endMs: Long, timeout: Duration): HarmonyOSFlowFaults? = null
 +    fun hierarchy(timeout: Duration): TreeNode
++    fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<TreeNode> = emptyList()): List<TreeNode> =
++        throw UnsupportedOperationException("This HarmonyOS device backend does not support CSS selectors.")
 +    fun screenshot(timeout: Duration): ByteArray
 +    fun execute(arguments: List<String>, timeout: Duration): String
 +    fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
@@ -12959,10 +13022,10 @@ index 0000000..22ccee8
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
 new file mode 100644
-index 00000000..42e589f3
+index 0000000..b174642
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDriverConfig.kt
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,68 @@
 +package maestro.harmonyos.driver
 +
 +import java.time.Duration
@@ -12988,6 +13051,7 @@ index 00000000..42e589f3
 +    val automaticLayoutRpc: Boolean = false,
 +    val hostRecordingFfmpeg: Path? = null,
 +    val hostRecordingDeduplicateFrames: Boolean = false,
++    val requireLayoutRpc: Boolean = false,
 +) {
 +    init {
 +        require((layoutRpcPort == null) == (layoutRpcDevice == null)) { "Set both layout RPC port and target device" }
@@ -14165,10 +14229,10 @@ index 0000000..35a28d5
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 00000000..a01a50f5
+index 0000000..cc64aa0
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,520 @@
+@@ -0,0 +1,576 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -14189,6 +14253,8 @@ index 00000000..a01a50f5
 +import java.nio.file.LinkOption
 +import java.nio.file.Path
 +import java.time.Duration
++import java.util.Collections
++import java.util.IdentityHashMap
 +import java.util.UUID
 +
 +class HarmonyOSCommandException(
@@ -14211,6 +14277,7 @@ index 00000000..a01a50f5
 +    private val arkWebBundle: String? = null,
 +    private val arkWebTarget: HarmonyOSArkWebTarget? = null,
 +    private val automaticLayoutRpc: Boolean = false,
++    private val requireLayoutRpc: Boolean = false,
 +) : HarmonyOSDevice {
 +    private var layoutChannel: LoopbackLayoutChannel? = null
 +    private var layoutReason = "not_connected"
@@ -14222,12 +14289,14 @@ index 00000000..a01a50f5
 +    private var reportedArkWebSource: String? = null
 +    private val arkWeb = arkWebPort?.let { ArkWebLoopback(it, arkWebTarget) }
 +    private var arkWebWindow: String? = null
++    private var verifiedArkWebLayout: VerifiedArkWebLayout? = null
 +
 +    override fun disconnect() {
 +        layoutChannel?.close()
 +        layoutChannel = null
 +        displayRpcUnsupported = false
 +        reportedArkWebSource = null
++        verifiedArkWebLayout = null
 +        arkWeb?.close()
 +        arkWebWindow = null
 +    }
@@ -14249,6 +14318,9 @@ index 00000000..a01a50f5
 +        layoutReason = forward.reason
 +        layoutChannel = forward.port?.let(::LoopbackLayoutChannel)
 +        logLayoutBackend()
++        if (requireLayoutRpc && layoutChannel == null) {
++            throw HdcException("Required UITest layout RPC unavailable: $layoutReason")
++        }
 +    }
 +
 +    override fun isAvailable(): Boolean = deviceId in hdc.listDevices()
@@ -14417,60 +14489,12 @@ index 00000000..a01a50f5
 +        }, config, hdc.recordingResources()).start(out)
 +
 +    override fun hierarchy(timeout: Duration): TreeNode {
++        verifiedArkWebLayout = null
 +        val deadline = System.nanoTime() + timeout.toNanos()
-+        layoutChannel?.let { channel ->
-+            val rpcBudget = minOf(timeout.dividedBy(2), Duration.ofSeconds(2))
-+            if (rpcBudget >= Duration.ofMillis(1)) {
-+                try {
-+                    return enhanceArkWeb(channel.snapshot(rpcBudget), deadline, timeout)
-+                } catch (error: HdcException) {
-+                    disableLayoutRpc(channel, error)
-+                } catch (error: UitestLayoutException) {
-+                    disableLayoutRpc(channel, error)
-+                }
-+            }
-+        }
-+        val budget = remainingBudget(deadline, timeout)
-+        val nativeTree = HierarchyReader(
-+            hdc, deviceId,
-+            commandTimeout = budget,
-+            cleanupTimeout = Duration.ofSeconds(2),
-+            totalTimeout = budget,
-+        ).read()
-+        return enhanceArkWeb(nativeTree, deadline, timeout)
-+    }
-+
-+    private fun enhanceArkWeb(nativeTree: TreeNode, deadline: Long, timeout: Duration): TreeNode {
-+        val port = arkWebPort ?: return nativeTree
-+        val bundle = arkWebBundle ?: return nativeTree
-+        val webViews = mutableListOf<TreeNode>()
-+        fun findWebViews(node: TreeNode, owner: String?) {
-+            val actualOwner = node.attributes["bundleName"]?.takeIf { it.isNotBlank() } ?: owner
-+            if (node.attributes["class"] == "Web" && actualOwner == bundle &&
-+                (arkWebTarget == null || node.attributes["resource-id"] == arkWebTarget.webViewId)
-+            ) webViews += node
-+            node.children.forEach { findWebViews(it, actualOwner) }
-+        }
-+        findWebViews(nativeTree, null)
-+        val webView = webViews.singleOrNull()
-+        val bounds = webView?.attributes?.get("bounds")
-+            ?.let { Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""").matchEntire(it) }
-+            ?.groupValues?.drop(1)?.map(String::toInt)
-+        if (webView == null || bounds == null) return arkWebFallback(nativeTree)
-+        val window = webView.attributes["hostWindowId"]
-+        if (arkWebWindow != window) {
-+            arkWeb?.close()
-+            arkWebWindow = window
-+        }
-+
++        val nativeTree = nativeHierarchy(deadline, timeout)
++        val target = findArkWebTarget(nativeTree) ?: return arkWebFallback(nativeTree)
 +        val dom = try {
-+            val budget = minOf(remainingBudget(deadline, timeout), Duration.ofSeconds(3))
-+            arkWeb?.snapshot(bounds, budget) { verificationBudget ->
-+                val webDeadline = System.nanoTime() + verificationBudget.toNanos()
-+                val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, verificationBudget))
-+                pid.matches(Regex("[1-9][0-9]*")) &&
-+                    hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, verificationBudget))
-+            }
++            readArkWeb(target, deadline, timeout) { bounds, budget, verify -> snapshot(bounds, budget, verify) }
 +        } catch (error: InterruptedException) {
 +            Thread.currentThread().interrupt()
 +            throw error
@@ -14481,12 +14505,108 @@ index 00000000..a01a50f5
 +        } ?: return arkWebFallback(nativeTree)
 +
 +        reportArkWebSource("DOM")
-+        fun merge(node: TreeNode): TreeNode = if (node === webView) {
++        verifiedArkWebLayout = VerifiedArkWebLayout(target, dom)
++        fun merge(node: TreeNode): TreeNode = if (node === target.node) {
 +            node.copy(children = listOf(dom))
 +        } else {
 +            node.copy(children = node.children.map(::merge))
 +        }
 +        return merge(nativeTree)
++    }
++
++    override fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<TreeNode>): List<TreeNode> {
++        if (arkWeb == null || arkWebBundle == null) {
++            throw UnsupportedOperationException("CSS selectors require a configured ArkWeb debugging target.")
++        }
++        check(reportedArkWebSource == "DOM") { "CSS selectors require an available ArkWeb DOM hierarchy." }
++        val deadline = System.nanoTime() + timeout.toNanos()
++        val reused = verifiedArkWebLayout?.takeIf { it.matches(hierarchyNodes) }
++        val target = reused?.target ?: findArkWebTarget(nativeHierarchy(deadline, timeout))
++            ?: error("CSS query could not identify the active ArkWeb target.")
++        logger.info("HarmonyOS ArkWeb CSS native layout={}", if (reused == null) "fresh" else "reused")
++        check(arkWebWindow == target.node.attributes["hostWindowId"]) { "ArkWeb window changed during CSS lookup." }
++        return readArkWeb(target, deadline, timeout) { bounds, budget, verify ->
++            queryCss(selector, bounds, budget, verify)
++        } ?: error("CSS query could not read the verified ArkWeb page.")
++    }
++
++    private fun nativeHierarchy(deadline: Long, timeout: Duration): TreeNode {
++        layoutChannel?.let { channel ->
++            val rpcBudget = minOf(timeout.dividedBy(2), Duration.ofSeconds(2))
++            if (rpcBudget >= Duration.ofMillis(1)) {
++                try {
++                    return channel.snapshot(rpcBudget)
++                } catch (error: HdcException) {
++                    disableLayoutRpc(channel, error)
++                } catch (error: UitestLayoutException) {
++                    disableLayoutRpc(channel, error)
++                }
++            }
++        }
++        if (requireLayoutRpc) throw HdcException("Required UITest layout RPC could not read the hierarchy: $layoutReason")
++        val budget = remainingBudget(deadline, timeout)
++        return HierarchyReader(
++            hdc, deviceId,
++            commandTimeout = budget,
++            cleanupTimeout = Duration.ofSeconds(2),
++            totalTimeout = budget,
++        ).read()
++    }
++
++    private data class ArkWebView(val node: TreeNode, val bounds: List<Int>)
++
++    private class VerifiedArkWebLayout(val target: ArkWebView, dom: TreeNode) {
++        private val capturedAt = System.nanoTime()
++        // Bounds filtering keeps the original attributes map even when it copies a node.
++        private val attributes by lazy {
++            dom.aggregate().mapTo(Collections.newSetFromMap(IdentityHashMap<Map<String, String>, Boolean>())) { it.attributes }
++        }
++
++        fun matches(nodes: List<TreeNode>): Boolean = nodes.isNotEmpty() &&
++            System.nanoTime() - capturedAt <= Duration.ofMillis(250).toNanos() &&
++            nodes.any { it.attributes in attributes }
++    }
++
++    private fun findArkWebTarget(nativeTree: TreeNode): ArkWebView? {
++        if (arkWebPort == null) return null
++        val bundle = arkWebBundle ?: return null
++        val webViews = mutableListOf<TreeNode>()
++        fun findWebViews(node: TreeNode, owner: String?) {
++            val actualOwner = node.attributes["bundleName"]?.takeIf { it.isNotBlank() } ?: owner
++            if (node.attributes["class"] == "Web" && actualOwner == bundle &&
++                (arkWebTarget == null || node.attributes["resource-id"] == arkWebTarget.webViewId)
++            ) webViews += node
++            node.children.forEach { findWebViews(it, actualOwner) }
++        }
++        findWebViews(nativeTree, null)
++        val webView = webViews.singleOrNull() ?: return null
++        val bounds = webView.attributes["bounds"]
++            ?.let { Regex("""\[(-?\d+),(-?\d+)]\[(-?\d+),(-?\d+)]""").matchEntire(it) }
++            ?.groupValues?.drop(1)?.map(String::toInt) ?: return null
++        return ArkWebView(webView, bounds)
++    }
++
++    private fun <T> readArkWeb(
++        target: ArkWebView,
++        deadline: Long,
++        timeout: Duration,
++        read: ArkWebLoopback.(List<Int>, Duration, (Duration) -> Boolean) -> T?,
++    ): T? {
++        val port = checkNotNull(arkWebPort)
++        val bundle = checkNotNull(arkWebBundle)
++        val window = target.node.attributes["hostWindowId"]
++        if (arkWebWindow != window) {
++            arkWeb?.close()
++            arkWebWindow = window
++        }
++
++        val budget = minOf(remainingBudget(deadline, timeout), Duration.ofSeconds(3))
++        return checkNotNull(arkWeb).read(target.bounds, budget) { verificationBudget ->
++            val webDeadline = System.nanoTime() + verificationBudget.toNanos()
++            val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, verificationBudget))
++            pid.matches(Regex("[1-9][0-9]*")) &&
++                hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, verificationBudget))
++        }
 +    }
 +
 +    private fun arkWebFallback(nativeTree: TreeNode): TreeNode {
@@ -15161,6 +15281,58 @@ index 0000000..35e974b
 +        }
 +
 +    }
++}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
+new file mode 100644
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
+@@ -0,0 +1,47 @@
++package maestro.harmonyos.hdc
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import java.nio.file.Files
++import java.nio.file.LinkOption
++import java.nio.file.Path
++import java.security.MessageDigest
++import java.util.UUID
++import java.util.function.Supplier
++
++/** Explicit recovery of a reviewed legacy read-only diagnostic, never a normal Flow permission. */
++object HarmonyOSDiagnosticCompletionRecovery {
++    private data class Scope(val device: String, val owner: String, val operation: String, val hash: String, val host: String)
++    private val active = ThreadLocal<Scope>()
++
++    @JvmStatic fun <T> withReviewedFaultQuery(device: String, owner: String, operation: String, commandHash: String,
++        trace: Path, traceHash: String, action: Supplier<T>): T {
++        require(device.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")))
++        require(UUID.fromString(owner).toString() == owner && UUID.fromString(operation).toString() == operation)
++        require(commandHash.matches(Regex("[0-9a-f]{64}")) && traceHash.matches(Regex("[0-9a-f]{64}")))
++        val file = trace.toAbsolutePath().normalize()
++        require(file.parent.toRealPath() == file.parent && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
++        require(Files.size(file) <= 16 * 1024 * 1024)
++        val bytes = Files.readAllBytes(file)
++        val observedHash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
++        require(observedHash == traceHash) { "The reviewed diagnostic trace changed." }
++        val mapper = jacksonObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++        val events = bytes.toString(Charsets.UTF_8).lineSequence().filter { "MAESTRO_HDC_CALL " in it }
++            .map { mapper.readTree(it.substringAfter("MAESTRO_HDC_CALL ")) }
++            .filter { it["operationId"]?.asText() == operation }.toList()
++        require(events.isNotEmpty() && events.all { it["schemaVersion"]?.asInt() == 1 && it["category"]?.asText() == "FAULT_QUERY" }) {
++            "Only an archived legacy FAULT_QUERY diagnostic is supported."
++        }
++        val calls = events.map { it["callId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
++        val hosts = events.mapNotNull { it["hostCallId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
++        require(calls.size == 1 && calls.single() != null && UUID.fromString(calls.single()).toString() == calls.single())
++        require(hosts.size == 1 && UUID.fromString(hosts.single()).toString() == hosts.single())
++        require(events.all { it["hostCallId"] == null || it["hostCallId"].isNull || it["hostCallId"].isTextual })
++        check(active.get() == null) { "A reviewed recovery scope is already active." }
++        active.set(Scope(device, owner, operation, commandHash, hosts.single()))
++        return try { action.get() } finally { active.remove() }
++    }
++
++    internal fun accepts(device: String, owner: String, operation: String, hash: String, stoppedHosts: List<String> = emptyList()): Boolean =
++        active.get()?.let { it.device == device && it.owner == owner && it.operation == operation && it.hash == hash && it.host in stoppedHosts } == true
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSJournalFileWriter.kt
 new file mode 100644
@@ -17511,10 +17683,10 @@ index 0000000..a733559
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
 new file mode 100644
-index 00000000..a4d05094
+index 0000000..dafc1a1
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,209 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -17564,8 +17736,35 @@ index 00000000..a4d05094
 +        }
 +    }
 +
++    fun snapshot(bounds: List<Int>, timeout: Duration, verifyForward: (Duration) -> Boolean): TreeNode? =
++        read(bounds, timeout, "window.maestro.getContentDescription()", verifyForward)
++            ?.let { json.readValue(it, TreeNode::class.java) }
++
++    fun queryCss(
++        selector: String,
++        bounds: List<Int>,
++        timeout: Duration,
++        verifyForward: (Duration) -> Boolean,
++    ): List<TreeNode>? {
++        val argument = json.writeValueAsString(selector)
++        val operation = """(() => {
++            try { return window.maestro.queryCss($argument); }
++            catch (error) { if (error.name === 'SyntaxError') return 'invalid-css'; throw error; }
++        })()"""
++        val result = read(bounds, timeout, operation, verifyForward) ?: return null
++        val nodes = json.readTree(result)
++        require(!nodes.isTextual || nodes.textValue() != "invalid-css") { "Invalid ArkWeb CSS selector." }
++        check(nodes.isArray) { "ArkWeb returned an invalid CSS result." }
++        return nodes.filterNot { it.isNull }.map { json.treeToValue(it, TreeNode::class.java) }
++    }
++
 +    @Synchronized
-+    fun snapshot(bounds: List<Int>, timeout: Duration, verifyForward: (Duration) -> Boolean): TreeNode? {
++    private fun read(
++        bounds: List<Int>,
++        timeout: Duration,
++        operation: String,
++        verifyForward: (Duration) -> Boolean,
++    ): String? {
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        fun remaining(): Duration {
 +            val nanos = deadline - System.nanoTime()
@@ -17605,7 +17804,7 @@ index 00000000..a4d05094
 +        val (left, top, right, bottom) = bounds
 +        val capture = "$script; maestro.viewportX = $left; maestro.viewportY = $top;" +
 +            " maestro.viewportWidth = ${right - left}; maestro.viewportHeight = ${bottom - top};" +
-+            " JSON.stringify(window.maestro.getContentDescription(), window.maestro.cycleSafeReplacer());"
++            " JSON.stringify($operation, window.maestro.cycleSafeReplacer());"
 +        val expression = if (target == null) capture else {
 +            val url = json.writeValueAsString(target.pageUrl)
 +            val webViewId = json.writeValueAsString(target.webViewId)
@@ -17625,7 +17824,7 @@ index 00000000..a4d05094
 +                    logger.debug("ArkWeb page returned no verified DOM snapshot")
 +                    close()
 +                    null
-+                } else json.readValue(snapshot, TreeNode::class.java)
++                } else snapshot
 +            }
 +        } catch (error: Exception) {
 +            close()
@@ -24787,10 +24986,10 @@ index 00000000..c7f5502f
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
 new file mode 100644
-index 00000000..bea02654
+index 0000000..7c167f5
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,147 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -24801,9 +25000,50 @@ index 00000000..bea02654
 +import okhttp3.mockwebserver.MockResponse
 +import okhttp3.mockwebserver.MockWebServer
 +import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.Assertions.assertThrows
 +import java.time.Duration
 +
 +class ArkWebLoopbackTest {
++    @Test
++    fun `CSS separates matches no matches and an invalid selector from a lost target`() {
++        val json = ObjectMapper()
++        val selector = """[data-testid="submit"]"""
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            server.enqueue(MockResponse().setBody(
++                """[{"type":"page","url":"https://example.test/two","webSocketDebuggerUrl":"ws://127.0.0.1:${server.port}/devtools/page/two"}]"""
++            ))
++            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
++                override fun onMessage(webSocket: WebSocket, text: String) {
++                    val request = json.readTree(text)
++                    val expression = request.path("params").path("expression").asText()
++                    val value = when {
++                        !expression.contains("window.location.href === \"https://example.test/two\"") -> "null"
++                        expression.contains("window.maestro.queryCss(${json.writeValueAsString(selector)})") ->
++                            """[{"attributes":{"text":"Submit","bounds":"[5,5][30,30]"},"children":[]}]"""
++                        expression.contains("window.maestro.queryCss(\"[\"") -> "\"invalid-css\""
++                        else -> "[]"
++                    }
++                    webSocket.send(json.writeValueAsString(mapOf(
++                        "id" to request.path("id").asLong(),
++                        "result" to mapOf("result" to mapOf("value" to value)),
++                    )))
++                }
++            }))
++            val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++            val bounds = listOf(0, 0, 100, 100)
++            val timeout = Duration.ofSeconds(2)
++            ArkWebLoopback(server.port, target).use { browser ->
++                assertThat(browser.queryCss(selector, bounds, timeout) { true }?.single()?.attributes?.get("text"))
++                    .isEqualTo("Submit")
++                assertThat(browser.queryCss(".absent", bounds, timeout) { true }).isEmpty()
++                assertThrows(IllegalArgumentException::class.java) { browser.queryCss("[", bounds, timeout) { true } }
++                assertThat(browser.queryCss(".absent", bounds, timeout) { false }).isEmpty()
++                assertThat(browser.queryCss(".absent", bounds, timeout) { false }).isNull()
++            }
++        }
++    }
++
 +    @Test
 +    fun `an established page connection reads new snapshots without repeating forward discovery`() {
 +        val json = ObjectMapper()
@@ -25163,10 +25403,10 @@ index 0000000..503a66d
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
 new file mode 100644
-index 0000000..ce82b38
+index 0000000..30a9b24
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/LayoutBackendTest.kt
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,186 @@
 +package maestro.harmonyos.layout
 +
 +import com.google.common.truth.Truth.assertThat
@@ -25175,6 +25415,10 @@ index 0000000..ce82b38
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.harmonyos.hdc.HdcCommandResult
 +import maestro.harmonyos.hdc.HdcCommandRunner
++import maestro.harmonyos.hdc.HdcException
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.params.ParameterizedTest
++import org.junit.jupiter.params.provider.ValueSource
 +import org.junit.jupiter.api.Test
 +import java.net.InetAddress
 +import java.net.ServerSocket
@@ -25214,10 +25458,20 @@ index 0000000..ce82b38
 +    }
 +
 +    @Test
-+    fun `a failed RPC read closes the socket and falls back for the session`() {
++    fun `required RPC rejects a forward for another device without dumping layout`() {
++        val fixture = HdcFixture(12345, "OTHER-DEVICE")
++        val device = fixture.device(requireLayoutRpc = true)
++        val error = assertThrows(HdcException::class.java) { device.connect() }
++        assertThat(error).hasMessageThat().contains("explicit_forward_unavailable")
++        assertThat(fixture.dumps).isEqualTo(0)
++    }
++
++    @ParameterizedTest
++    @ValueSource(booleans = [false, true])
++    fun `a failed RPC read closes the socket and honors the fallback policy`(requireLayoutRpc: Boolean) {
 +        listener().use { server ->
 +            val fixture = HdcFixture(server.localPort)
-+            val device = fixture.device()
++            val device = fixture.device(requireLayoutRpc = requireLayoutRpc)
 +            val executor = Executors.newSingleThreadExecutor()
 +            try {
 +                val peer = executor.submit {
@@ -25231,10 +25485,16 @@ index 0000000..ce82b38
 +                    }
 +                }
 +                device.connect()
-+                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
-+                assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
++                repeat(2) {
++                    if (requireLayoutRpc) {
++                        val error = assertThrows(HdcException::class.java) { device.hierarchy(budget) }
++                        assertThat(error).hasMessageThat().contains("rpc_read_failed")
++                    } else {
++                        assertThat(device.hierarchy(budget).attributes["text"]).isEqualTo("HDC")
++                    }
++                }
 +                peer.get(5, TimeUnit.SECONDS)
-+                assertThat(fixture.dumps).isEqualTo(2)
++                assertThat(fixture.dumps).isEqualTo(if (requireLayoutRpc) 0 else 2)
 +            } finally {
 +                device.disconnect()
 +                executor.shutdownNow()
@@ -25314,7 +25574,7 @@ index 0000000..ce82b38
 +    private inner class HdcFixture(private val port: Int, private val owner: String = deviceId) {
 +        var dumps = 0
 +
-+        fun device(): HdcHarmonyOSDevice {
++        fun device(requireLayoutRpc: Boolean = false): HdcHarmonyOSDevice {
 +            val runner = HdcCommandRunner { command, _ ->
 +                val response = when {
 +                    command.drop(1) == listOf("list", "targets") -> deviceId
@@ -25329,7 +25589,7 @@ index 0000000..ce82b38
 +                }
 +                HdcCommandResult(0, response, "")
 +            }
-+            return HdcHarmonyOSDevice(deviceId, HdcClient("hdc", runner), port)
++            return HdcHarmonyOSDevice(deviceId, HdcClient("hdc", runner), port, requireLayoutRpc = requireLayoutRpc)
 +        }
 +    }
 +}
@@ -25668,7 +25928,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c3886890..1f57d034 100644
+index c388689..beae7e9 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -20,7 +20,9 @@
@@ -26423,7 +26683,40 @@ index c3886890..1f57d034 100644
      private fun resolveParentHierarchy(
          selector: ElementSelector?,
          hierarchy: ViewHierarchy,
-@@ -1822,10 +2083,17 @@ class Orchestra(
+@@ -1740,17 +2001,23 @@ class Orchestra(
+                 basicFilters += Filters.focused(it)
+             }
+ 
+-        selector.css
+-            ?.let {
+-                descriptions += "CSS: $it"
+-                basicFilters += Filters.css(maestro, it)
+-            }
++        val cssFilter = selector.css?.let {
++            descriptions += "CSS: $it"
++            Filters.css(maestro, it)
++        }
+ 
+         // Apply deepestMatchingElement only to basic filters, then intersect with relative filters
+-        val basicFilter = if (basicFilters.isNotEmpty()) {
+-            Filters.deepestMatchingElement(Filters.intersect(basicFilters))
+-        } else {
+-            { nodes -> nodes } // Identity filter if no basic filters
++        val basicFilter: ElementFilter = when {
++            cssFilter != null && maestro.driver is HarmonyOSDriver -> { nodes ->
++                // Read the verified WebView once. The deepest-element walk tests
++                // individual nodes, so it must use in-memory membership checks.
++                val cssMatches = cssFilter(nodes).toSet()
++                val matchesCss: ElementFilter = { candidates -> candidates.filter { it in cssMatches } }
++                Filters.deepestMatchingElement(Filters.intersect(basicFilters + matchesCss))(nodes)
++            }
++            cssFilter != null -> Filters.deepestMatchingElement(Filters.intersect(basicFilters + cssFilter))
++            basicFilters.isNotEmpty() -> Filters.deepestMatchingElement(Filters.intersect(basicFilters))
++            else -> { nodes -> nodes }
+         }
+         
+         val allFilters = listOf(basicFilter) + relativeFilters
+@@ -1822,10 +2089,17 @@ class Orchestra(
          return true
      }
  
@@ -26445,7 +26738,7 @@ index c3886890..1f57d034 100644
  
      private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
          val result = findElement(command.selector, optional = command.optional)
-@@ -1871,7 +2139,8 @@ class Orchestra(
+@@ -1871,7 +2145,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
@@ -27393,10 +27686,10 @@ index 0000000..75e7d2d
 +}
 diff --git a/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
 new file mode 100644
-index 00000000..381aac63
+index 0000000..100140e
 --- /dev/null
 +++ b/maestro-test/src/test/kotlin/maestro/harmonyos/HarmonyOSFlowIntegrationTest.kt
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,267 @@
 +package maestro.harmonyos
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -27407,7 +27700,9 @@ index 00000000..381aac63
 +import maestro.Point
 +import maestro.drivers.HarmonyOSDriver
 +import maestro.harmonyos.driver.HarmonyOSCommandException
++import maestro.harmonyos.driver.HarmonyOSDevice
 +import maestro.harmonyos.driver.HarmonyOSDriverConfig
++import maestro.harmonyos.driver.HdcHarmonyOSDevice
 +import maestro.harmonyos.hdc.HdcClient
 +import maestro.orchestra.MaestroCommand
 +import maestro.orchestra.Orchestra
@@ -27467,6 +27762,30 @@ index 00000000..381aac63
 +            // One read serves both scoped assertions and the plain assertion after them.
 +            assertThat(flow.device.layoutCount - before).isEqualTo(1)
 +            assertThat(flow.device.remoteFiles).isEmpty()
++        }
++    }
++
++    @Test
++    fun `CSS queries once per lookup and an unavailable page cannot pass a negative assertion`() {
++        var positiveReads = 0
++        withFlow("css-assertions.yaml", deviceBackend = { backing ->
++            object : HarmonyOSDevice by backing {
++                override fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<maestro.TreeNode>): List<maestro.TreeNode> {
++                    if (selector == ".missing") error("CSS query could not read the verified ArkWeb page.")
++                    check(selector == "#open-form")
++                    positiveReads++
++                    return hierarchyNodes
++                        .filter { it.attributes["resource-id"] == "open-form" }
++                        .map { it.copy(children = emptyList()) }
++                }
++            }
++        }) { flow ->
++            val failure = assertThrows<IllegalStateException> {
++                runBlocking { flow.orchestra.runFlow(flow.commands) }
++            }
++            assertThat(failure.message).contains("verified ArkWeb page")
++            assertThat(positiveReads).isEqualTo(1)
++            assertThat(flow.device.tapCount).isEqualTo(0)
 +        }
 +    }
 +
@@ -27579,6 +27898,7 @@ index 00000000..381aac63
 +    private fun withFlow(
 +        filename: String,
 +        device: SimulatedHarmonyOSDevice = SimulatedHarmonyOSDevice(),
++        deviceBackend: (HarmonyOSDevice) -> HarmonyOSDevice = { it },
 +        block: (FlowFixture) -> Unit,
 +    ) {
 +        TempFileHandler().use { temporary ->
@@ -27594,8 +27914,9 @@ index 00000000..381aac63
 +            val commands = YamlCommandReader.readCommands(workspace.resolve(filename), scope)
 +                .withEnv(mapOf("APP_ID" to APP_ID, "INPUT_TEXT" to INPUT_TEXT))
 +            val driver = HarmonyOSDriver(
-+                deviceId = SimulatedHarmonyOSDevice.DEVICE_ID,
-+                hdc = HdcClient(executablePath = "simulated-hdc", runner = device),
++                device = deviceBackend(HdcHarmonyOSDevice(
++                    SimulatedHarmonyOSDevice.DEVICE_ID, HdcClient(executablePath = "simulated-hdc", runner = device),
++                )),
 +                config = HarmonyOSDriverConfig(
 +                    abilityName = "EntryAbility",
 +                    commandTimeout = Duration.ofSeconds(2),
@@ -27632,6 +27953,7 @@ index 00000000..381aac63
 +            "flow.yaml", "enter-name.yaml", "assertion-failure.yaml", "remote-failure.yaml", "unsupported.yaml",
 +            "scroll-flow.yaml", "enter-scroll-name.yaml", "scroll-not-found.yaml", "sequential-flows.yaml",
 +            "scoped-assertions.yaml",
++            "css-assertions.yaml",
 +        )
 +    }
 +}
@@ -28647,6 +28969,22 @@ index 0000000..e0ca3b9
 +- assertVisible: never-present
 +- tapOn:
 +    id: open-form
+diff --git a/maestro-test/src/test/resources/harmonyos/css-assertions.yaml b/maestro-test/src/test/resources/harmonyos/css-assertions.yaml
+new file mode 100644
+index 0000000..545a2a7
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/css-assertions.yaml
+@@ -0,0 +1,10 @@
++appId: ${APP_ID}
++---
++- launchApp
++- assertVisible:
++    css: '#open-form'
++    text: 填写表单
++- assertNotVisible:
++    css: '.missing'
++- tapOn:
++    id: open-form
 diff --git a/maestro-test/src/test/resources/harmonyos/enter-name.yaml b/maestro-test/src/test/resources/harmonyos/enter-name.yaml
 new file mode 100644
 index 0000000..b5050e8
@@ -28718,6 +29056,24 @@ index 0000000..b8790d2
 +    id: open-form
 +    retryTapIfNoChange: false
 +- inputText: must-not-run
+diff --git a/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
+new file mode 100644
+index 00000000..57ae4955
+--- /dev/null
++++ b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
+@@ -0,0 +1,12 @@
++appId: ${APP_ID}
++---
++- assertVisible:
++    id: open-form
++    childOf:
++      id: fixture-root
++- assertVisible:
++    id: open-scroll-form
++    childOf:
++      id: fixture-root
++- assertVisible:
++    id: open-form
 diff --git a/maestro-test/src/test/resources/harmonyos/scroll-flow.yaml b/maestro-test/src/test/resources/harmonyos/scroll-flow.yaml
 new file mode 100644
 index 0000000..b939974
@@ -28788,24 +29144,6 @@ index 0000000..c7b0ef2
 +---
 +- runFlow: flow.yaml
 +- runFlow: scroll-flow.yaml
-diff --git a/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
-new file mode 100644
-index 00000000..57ae4955
---- /dev/null
-+++ b/maestro-test/src/test/resources/harmonyos/scoped-assertions.yaml
-@@ -0,0 +1,12 @@
-+appId: ${APP_ID}
-+---
-+- assertVisible:
-+    id: open-form
-+    childOf:
-+      id: fixture-root
-+- assertVisible:
-+    id: open-scroll-form
-+    childOf:
-+      id: fixture-root
-+- assertVisible:
-+    id: open-form
 diff --git a/maestro-test/src/test/resources/harmonyos/unsupported.yaml b/maestro-test/src/test/resources/harmonyos/unsupported.yaml
 new file mode 100644
 index 0000000..60d3752
@@ -28818,56 +29156,3 @@ index 0000000..60d3752
 +- startRecording: unsupported-recording
 +- tapOn:
 +    id: open-form
-
-diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
-new file mode 100644
---- /dev/null
-+++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HarmonyOSDiagnosticCompletionRecovery.kt
-@@ -0,0 +1,47 @@
-+package maestro.harmonyos.hdc
-+
-+import com.fasterxml.jackson.core.JsonParser
-+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-+import java.nio.file.Files
-+import java.nio.file.LinkOption
-+import java.nio.file.Path
-+import java.security.MessageDigest
-+import java.util.UUID
-+import java.util.function.Supplier
-+
-+/** Explicit recovery of a reviewed legacy read-only diagnostic, never a normal Flow permission. */
-+object HarmonyOSDiagnosticCompletionRecovery {
-+    private data class Scope(val device: String, val owner: String, val operation: String, val hash: String, val host: String)
-+    private val active = ThreadLocal<Scope>()
-+
-+    @JvmStatic fun <T> withReviewedFaultQuery(device: String, owner: String, operation: String, commandHash: String,
-+        trace: Path, traceHash: String, action: Supplier<T>): T {
-+        require(device.matches(Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")))
-+        require(UUID.fromString(owner).toString() == owner && UUID.fromString(operation).toString() == operation)
-+        require(commandHash.matches(Regex("[0-9a-f]{64}")) && traceHash.matches(Regex("[0-9a-f]{64}")))
-+        val file = trace.toAbsolutePath().normalize()
-+        require(file.parent.toRealPath() == file.parent && Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS))
-+        require(Files.size(file) <= 16 * 1024 * 1024)
-+        val bytes = Files.readAllBytes(file)
-+        val observedHash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
-+        require(observedHash == traceHash) { "The reviewed diagnostic trace changed." }
-+        val mapper = jacksonObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-+        val events = bytes.toString(Charsets.UTF_8).lineSequence().filter { "MAESTRO_HDC_CALL " in it }
-+            .map { mapper.readTree(it.substringAfter("MAESTRO_HDC_CALL ")) }
-+            .filter { it["operationId"]?.asText() == operation }.toList()
-+        require(events.isNotEmpty() && events.all { it["schemaVersion"]?.asInt() == 1 && it["category"]?.asText() == "FAULT_QUERY" }) {
-+            "Only an archived legacy FAULT_QUERY diagnostic is supported."
-+        }
-+        val calls = events.map { it["callId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
-+        val hosts = events.mapNotNull { it["hostCallId"]?.takeIf { value -> value.isTextual }?.asText() }.distinct()
-+        require(calls.size == 1 && calls.single() != null && UUID.fromString(calls.single()).toString() == calls.single())
-+        require(hosts.size == 1 && UUID.fromString(hosts.single()).toString() == hosts.single())
-+        require(events.all { it["hostCallId"] == null || it["hostCallId"].isNull || it["hostCallId"].isTextual })
-+        check(active.get() == null) { "A reviewed recovery scope is already active." }
-+        active.set(Scope(device, owner, operation, commandHash, hosts.single()))
-+        return try { action.get() } finally { active.remove() }
-+    }
-+
-+    internal fun accepts(device: String, owner: String, operation: String, hash: String, stoppedHosts: List<String> = emptyList()): Boolean =
-+        active.get()?.let { it.device == device && it.owner == owner && it.operation == operation && it.hash == hash && it.host in stoppedHosts } == true
-+}
