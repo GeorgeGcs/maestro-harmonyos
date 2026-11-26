@@ -27312,7 +27312,7 @@ index fa610d7..0f662b5 100644
 \ No newline at end of file
 +}
 diff --git a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
-index 8d7ac96..3dc1dc1 100644
+index 8d7ac96..7b01c96 100644
 --- a/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
 +++ b/maestro-orchestra/src/test/kotlin/maestro/orchestra/debug/OrchestraListenerDispatchTest.kt
 @@ -5,6 +5,8 @@ import com.google.common.truth.Truth.assertThat
@@ -27352,7 +27352,7 @@ index 8d7ac96..3dc1dc1 100644
          pressKeyThrows?.let { coEvery { pressKey(any(), any()) } throws it }
          openLinkThrows?.let { coEvery { openLink(any(), any(), any(), any()) } throws it }
      }
-@@ -94,6 +104,73 @@ class OrchestraListenerDispatchTest {
+@@ -94,6 +104,75 @@ class OrchestraListenerDispatchTest {
          }
      }
  
@@ -27394,6 +27394,7 @@ index 8d7ac96..3dc1dc1 100644
 +        val driver = mockk<HarmonyOSDriver>()
 +        val maestro = mockMaestro()
 +        every { maestro.driver } returns driver
++        every { driver.logLayoutBackend() } returns Unit
 +        every { driver.strictFaultDiagnostics } returns (scenario == "strict")
 +        every { driver.flowFaults("com.target", any(), any()) } answers {
 +            val at = secondArg<Long>()
@@ -27420,6 +27421,7 @@ index 8d7ac96..3dc1dc1 100644
 +            assertThat(tempDir.resolve("logs/${DeviceArtifactFiles.CRASH_REPORT}").toFile().readText()).contains("matched crash")
 +            assertThat(tempDir.resolve("logs/${DeviceArtifactFiles.ANR_REPORT}").toFile().readText()).contains("matched freeze")
 +        }
++        verify(exactly = 1) { driver.logLayoutBackend() }
 +        coVerify(exactly = 0) { maestro.collectCrashArtifacts(any(), any(), any()) }
 +    }
 +
