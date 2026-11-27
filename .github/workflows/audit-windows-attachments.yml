@@ -1,0 +1,128 @@
+name: Audit frozen Windows build attachments
+
+on:
+  push:
+    branches: [audit/ci-attachments-20261128]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      INPUT_REPO: GeorgeGcs/maestro-harmonyos
+      RUN_ID: '46046900722'
+      SOURCE_SHA: 539ca1d399f429864ab3c759d3dabcbd23e1e751
+      FORK_SHA: a30a99c3c4308b728fb460afab1526c5c308cf06
+      TREE_SHA: 2fa62c7f7ff29343c5ceddb7fd9412b77f4b0033
+      PATCH_SHA: 47ce0e31cf497b2895be1c5b7b58b4a60a92ebcabd91991ba1715e6748dfb954
+    steps:
+      - name: Match successful Windows run to the frozen branch and commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh api "repos/$INPUT_REPO/actions/runs/$RUN_ID" > run.json
+          jq -e --arg sha "$SOURCE_SHA" '.head_sha == $sha and .head_branch == "verify/diagnostics-hap-evidence-20261128" and .path == ".github/workflows/windows-build.yml" and .run_attempt == 1 and .conclusion == "success"' run.json
+          gh api "repos/$INPUT_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" > artifacts.json
+      - name: Match three official artifact IDs, sizes and SHA-256 digests and download the exact archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          expected = {
+              "windows-cli": (15222893380, 350977920, "48424f961c7c00d2f1ccf72183838e6dc6384132601ea63c1f0d6cfa2c8a59cd"),
+              "windows-evidence": (15223372892, 927663, "98394a73b0a232d47658dd478c6a470eec01f72a10ce0a6686cfeccfb49a4821"),
+              "windows-vsix": (15222933301, 80949, "f5cdbdc5669d008f669d204f7c79dcd34575794a1f63d6578d054e3f4e45ce04"),
+          }
+          items = json.loads(pathlib.Path("artifacts.json").read_text())["artifacts"]
+          assert len(items) == 3 and {item["name"] for item in items} == set(expected)
+          for item in items:
+              name = item["name"]
+              artifact, size, digest = expected[name]
+              assert not item["expired"] and (item["id"], item["size_in_bytes"], item["digest"]) == (artifact, size, "sha256:" + digest), name
+              archive = pathlib.Path(name + ".zip")
+              with archive.open("wb") as out:
+                  subprocess.run(["gh", "api", f"repos/{os.environ['INPUT_REPO']}/actions/artifacts/{artifact}/zip"], check=True, stdout=out)
+              assert archive.stat().st_size == size, name
+              with archive.open("rb") as f:
+                  assert hashlib.file_digest(f, "sha256").hexdigest() == digest, name
+          PY
+      - name: Verify text-only evidence, JUnit, source tree, build status and two SHA256SUMS entries
+        id: evidence
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, re, xml.etree.ElementTree as ET, zipfile
+          with zipfile.ZipFile("windows-evidence.zip") as archive:
+              entries = [i for i in archive.infolist() if not i.is_dir()]
+              names = [i.filename for i in entries]
+              assert len(names) == len(set(names))
+              assert {"SHA256SUMS","source-fork.json","host-job.json","core-test-results.json"} <= set(names)
+              assert any(n.startswith("junit/") and n.endswith(".xml") for n in names)
+              for entry in entries:
+                  name = entry.filename
+                  assert name == "SHA256SUMS" or pathlib.PurePosixPath(name).suffix.lower() in {".log",".xml",".txt",".json"}, name
+                  data = archive.read(entry)
+                  assert not data.startswith((b"PK\x03\x04", b"MZ", b"\x7fELF")), name
+                  encoding = "utf-16" if data[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+                  assert "\0" not in data.decode(encoding), name
+                  if name.startswith("junit/") and name.endswith(".xml"):
+                      suite = ET.fromstring(data)
+                      assert suite.tag == "testsuite" and int(suite.get("errors","0")) == int(suite.get("failures","0")) == 0, name
+              job = json.loads(archive.read("host-job.json"))
+              fork = json.loads(archive.read("source-fork.json"))
+              assert json.loads(archive.read("core-test-results.json"))["status"] == "passed"
+              assert job["status"] == "passed" and job["commit"] == os.environ["SOURCE_SHA"]
+              assert fork["status"] == "passed" and fork["forkCommit"] == os.environ["FORK_SHA"]
+              assert fork["sourceTree"] == os.environ["TREE_SHA"] and fork["patchSha256"] == os.environ["PATCH_SHA"]
+              sums = {}
+              for line in archive.read("SHA256SUMS").decode("utf-8-sig").splitlines():
+                  sha, leaf = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._-]+)", line).groups()
+                  assert leaf not in sums
+                  sums[leaf] = sha
+              cli, vsix = "maestro-harmonyos-cli.zip", "maestro-harmonyos-recorder-0.1.3.vsix"
+              assert set(sums) == {cli,vsix}
+              with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+                  print("cli_sha="+sums[cli], "vsix_sha="+sums[vsix], sep="\n", file=f)
+          PY
+      - name: 'Verify CLI payload SHA256 ${{ steps.evidence.outputs.cli_sha }} and bin/lib layout'
+        env:
+          EXPECTED: ${{ steps.evidence.outputs.cli_sha }}
+        run: |
+          python - <<'PY'
+          import hashlib, os, pathlib, shutil, zipfile
+          leaf = "maestro-harmonyos-cli.zip"
+          with zipfile.ZipFile("windows-cli.zip") as outer:
+              assert [i.filename for i in outer.infolist() if not i.is_dir()] == [leaf]
+              with outer.open(leaf) as src, open(leaf, "wb") as out:
+                  shutil.copyfileobj(src, out)
+          with open(leaf, "rb") as f:
+              assert hashlib.file_digest(f, "sha256").hexdigest() == os.environ["EXPECTED"]
+          with zipfile.ZipFile(leaf) as cli:
+              names = {n.replace("\\","/") for n in cli.namelist()}
+              assert {"bin/maestro", "bin/maestro.bat", "lib/maestro-client.jar"} <= names
+              assert any(n.startswith("lib/maestro-cli-") and n.endswith(".jar") for n in names)
+          PY
+      - name: 'Verify VSIX payload SHA256 ${{ steps.evidence.outputs.vsix_sha }}, extension manifests and bundled exporter'
+        env:
+          EXPECTED: ${{ steps.evidence.outputs.vsix_sha }}
+        run: |
+          python - <<'PY'
+          import hashlib, io, json, os, xml.etree.ElementTree as ET, zipfile
+          leaf = "maestro-harmonyos-recorder-0.1.3.vsix"
+          with zipfile.ZipFile("windows-vsix.zip") as outer:
+              assert [i.filename for i in outer.infolist() if not i.is_dir()] == [leaf]
+              payload = outer.read(leaf)
+          assert hashlib.sha256(payload).hexdigest() == os.environ["EXPECTED"]
+          with zipfile.ZipFile(io.BytesIO(payload)) as z:
+              m = json.loads(z.read("extension/package.json"))
+              assert (m["name"], m["publisher"], m["version"]) == ("maestro-harmonyos-recorder","HarmonyPandaWorkshop","0.1.3")
+              identity = ET.fromstring(z.read("extension.vsixmanifest")).find(".//{*}Identity")
+              assert identity is not None and identity.attrib["Version"] == m["version"] and identity.attrib["Publisher"] == m["publisher"]
+              assert "extension/" + m["main"].removeprefix("./") in z.namelist()
+              for part in ("scripts/export-run-evidence.mjs","scripts/agent-bundle-zip.ps1",
+                           "examples/agent-client/client.mjs","examples/agent-client/evidence.mjs"):
+                  assert z.getinfo("extension/dist/evidence-report/"+part).file_size > 0
+          PY
