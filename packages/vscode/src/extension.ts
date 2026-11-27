@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { BridgeClient } from './bridge';
@@ -36,6 +37,7 @@ class Recorder implements vscode.Disposable {
   private runTask?: Promise<void>;
   private evidenceLinks: ReplayEvidenceLink[] = [];
   private evidenceRequest = 0;
+  private exportingEvidence = false;
   private touch?: TouchRecording;
   private touchTask?: Promise<void>;
   private touchStopped = false;
@@ -97,7 +99,8 @@ class Recorder implements vscode.Disposable {
   private settings(uri?: vscode.Uri): ToolSettings {
     const config = vscode.workspace.getConfiguration('harmonyosRecorder', uri);
     return { cliDirectory: config.get<string>('cliDirectory', ''), javaPath: config.get<string>('javaPath', ''),
-      hdcPath: config.get<string>('hdcPath', ''), hostRecordingFfmpeg: config.get<string>('hostRecordingFfmpeg', '') };
+      hdcPath: config.get<string>('hdcPath', ''), hostRecordingFfmpeg: config.get<string>('hostRecordingFfmpeg', ''),
+      hostRecordingDeduplicateFrames: config.get<boolean | null>('hostRecordingDeduplicateFrames') ?? undefined };
   }
   async startTouch(): Promise<void> {
     if (this.busy) return;
@@ -519,6 +522,38 @@ class Recorder implements vscode.Disposable {
     this.evidenceLinks = [];
     void this.panel?.webview.postMessage({ type: 'clearEvidence' });
   }
+  private get exportableAttempt() {
+    const run = this.run;
+    if (!run || run.active || run.status === '通过') return;
+    return run.attempt;
+  }
+  private async exportEvidence(): Promise<void> {
+    const attempt = this.exportableAttempt;
+    if (!attempt || this.busy || this.exportingEvidence) return;
+    this.exportingEvidence = true;
+    this.render();
+    try {
+      if (!await localFile(attempt.attemptDir, 'agent-manifest.json')) {
+        throw new Error('本轮没有完整的证据清单，可从「打开本轮产物」查看原始日志。');
+      }
+      const destination = await vscode.window.showSaveDialog({
+        title: '导出本轮失败证据',
+        defaultUri: vscode.Uri.file(path.join(attempt.artifactsDir, `maestro-evidence-${attempt.attemptId}.html`)),
+        filters: { HTML: ['html'], ZIP: ['zip'] },
+      });
+      if (!destination) return;
+      if (destination.scheme !== 'file') throw new Error('请将证据包保存到本地文件。');
+      const file = vscode.Uri.joinPath(this.context.extensionUri,
+        'dist', 'evidence-report', 'scripts', 'export-run-evidence.mjs');
+      const { exportRunEvidence } = await import(pathToFileURL(file.fsPath).href);
+      const report = await exportRunEvidence(attempt.attemptDir, destination.fsPath);
+      this.output.appendLine(`已导出证据：${report}`);
+      void vscode.window.showInformationMessage('已导出本轮失败证据。');
+    } finally {
+      this.exportingEvidence = false;
+      this.render();
+    }
+  }
   private async openEvidence(index: unknown, request: unknown): Promise<void> {
     if (request !== this.evidenceRequest || typeof index !== 'number' || !Number.isInteger(index)) return;
     const picked = this.evidenceLinks[index];
@@ -647,6 +682,7 @@ class Recorder implements vscode.Disposable {
         return;
       }
       case 'replayFailure': await this.showReplayFailure(); return;
+      case 'exportEvidence': await this.exportEvidence(); return;
       case 'openEvidence': await this.openEvidence(message.index, message.request); return;
       case 'stop': await this.stop(); return;
       case 'clear':
@@ -663,6 +699,7 @@ class Recorder implements vscode.Disposable {
     const { replayFailure, ...state } = this.session.state;
     void this.panel?.webview.postMessage({ type: 'state', ...state, hasReplayFailure: !!replayFailure,
       busy: this.busy, yaml: this.session.yaml(),
+      canExportEvidence: !!this.exportableAttempt, exportingEvidence: this.exportingEvidence,
       touch: { active: !!this.touch, stopping: this.touchStopped, status: this.touchStatus, canReplay: !!this.touchFlow },
       run: this.run ? { status: this.run.status, active: this.run.active, canStop: this.run.status === '正在启动' || this.run.canStop,
         canPreview: this.run.canStop,
@@ -681,7 +718,7 @@ class Recorder implements vscode.Disposable {
 <section class="flow"><h2>真机触摸录制</h2><div class="row"><button id="startTouch">开始录制</button><button id="stopTouch">停止并生成 YAML</button><button id="checkTouchSyntax">检查录制 YAML</button><button id="replayTouch">回放触摸流程</button></div>
 <p id="touchStatus" role="status"></p></section>
 <section class="flow"><h2>运行与证据</h2><div class="row">
-<button id="runFile">运行 YAML 或套件</button><button id="checkSyntax" class="secondary">检查 Flow 语法</button><button id="runArtifacts" class="secondary">打开本轮产物</button><button id="rerun">重跑</button><button id="runEvidence" hidden>查看失败证据</button>
+<button id="runFile">运行 YAML 或套件</button><button id="checkSyntax" class="secondary">检查 Flow 语法</button><button id="runArtifacts" class="secondary">打开本轮产物</button><button id="rerun">重跑</button><button id="runEvidence" hidden>查看失败证据</button><button id="exportEvidence" class="secondary" hidden>导出证据包</button>
 <label><input id="runPreview" type="checkbox"> 预览设备画面</label></div>
 <p id="runStatus" role="status">尚未运行</p><p id="runReason" hidden></p><ul id="runFlows"></ul>
 <details open><summary>最近步骤</summary><ul id="runSteps"></ul></details>

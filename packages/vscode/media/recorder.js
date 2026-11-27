@@ -40,6 +40,8 @@
     element('rerun').disabled = state.busy || !state.run?.release;
     element('runPreview').disabled = !state.run?.active || !state.run.canPreview || state.run.status === '正在停止';
     element('runEvidence').hidden = !state.run?.artifacts || state.run.active || state.run.status === '通过';
+    element('exportEvidence').hidden = !state.canExportEvidence;
+    element('exportEvidence').disabled = state.busy || state.exportingEvidence;
     element('artifacts').disabled = !state.artifactsDir && !state.run?.artifacts;
   }
   function paintRun(run) {
@@ -146,6 +148,7 @@
   element('runPreview').addEventListener('change', event => send('runPreview', { enabled: event.currentTarget.checked }));
   element('runArtifacts').addEventListener('click', () => send('artifacts'));
   element('runEvidence').addEventListener('click', () => send('replayFailure'));
+  element('exportEvidence').addEventListener('click', () => send('exportEvidence'));
   element('launch').addEventListener('click', () => action({ type: 'launchApp' }));
   element('back').addEventListener('click', () => action({ type: 'back' }));
   element('tap').addEventListener('click', () => { if (selectedNode && state.snapshot) action({ type: 'tapOn', snapshotId: state.snapshot.snapshotId, nodeId: selectedNode.nodeId }); });

@@ -17,7 +17,7 @@ Maestro HarmonyOS 让电脑按照 YAML 测试脚本操作鸿蒙应用：启动�
 | 逐台验证脚本 | 在指定设备上顺序执行相同流程，按设备和轮次整理结果 |
 | CI 与固定验证计划 | 核对输入、构建文件和场景报告；需要重复统计时，另行固定轮次、必测步骤与统计口径 |
 
-适合先接入已有测试应用中的启动检查、表单输入、页面跳转和回归流程。当前不适合把一份任意 Android/iOS 用例直接当作鸿蒙兼容用例，也不提供应用构建、HAP 安装、自动登录或业务数据准备。
+适合先接入已有测试应用中的启动检查、表单输入、页面跳转和回归流程。移植 Android/iOS 用例时，需要核对鸿蒙支持的命令和选择器，并按测试现场准备签名 HAP、账号和业务数据。
 
 ## 安装方式和前置条件
 
@@ -308,13 +308,32 @@ node scripts/export-run-evidence.mjs --attempt ./artifacts/agent/runs/RUN_ID/ATT
 
 报告按步骤实例显示对应的尝试、YAML 行和上下文、截图及日志末尾，分别显示原始执行结果与设备清理状态。导出会核对运行标识、产物清单和所展示文件的 SHA-256。被截断的报告不会作为成功导出。生成物是排查入口，完整日志、录像和原生 JUnit 仍在原产物中。对外分享前核对其中的截图、日志和 YAML 是否包含测试数据。
 
+## 准备签名 HAP
+
+包含以下命令的源码构建可以在运行 Flow 前安装并核验单个 HAP。填入设备标识、预期包名和构建流程给出的 SHA-256。
+
+```powershell
+$receipt = & $maestroCli --platform harmonyos --device $deviceId harmonyos-prepare-app `
+    --hap $hapPath --bundle $bundleId --sha256 $expectedSha256
+$installExit = $LASTEXITCODE
+$receipt | Set-Content -LiteralPath './hap-preparation.json' -Encoding utf8
+$install = $receipt | ConvertFrom-Json
+if ($installExit -ne 0 -or $install.status -ne 'installed' -or $install.cleanup -ne 'complete') {
+    throw "HAP preparation failed. See hap-preparation.json."
+}
+```
+
+安装准备持有 Maestro 设备会话并在释放后输出回执。回执包含包名、版本号和 HAP 摘要。设备已有同名包时，需要明确传入 `--replace`。CI 可在同一个专用设备作业中执行这条命令并归档回执，再用同一个设备标识执行 Flow。现有提前安装的用法也可继续使用。
+
+准备命令返回非零时，先查回执中的 `error.code`、`error.message` 和 `cleanup`。例如摘要不符会返回 `HAP_INPUT_INVALID / notStarted`，表示校验阶段尚未申请设备。安装失败但会话已正常关闭时会返回 `HAP_INSTALL_FAILED / complete`。清理凭据缺失时保留 `unknown` 并停止本次作业。准备命令被外部终止或参数无法解析时，可能没有 JSON 回执，CI 也应停止。
+
 ## 当前支持范围
 
 手机完整 HMOS 场景套件和 HarmonyOS 7 平板的 v0.1.2 完整套件各有独立的 20/20 首次通过记录。平板此前停止的失败批次保留在历史记录中。v0.1.3 的最终修复在 API 22 模拟器完成回归，设备、API 和版本按各自批次登记。独立 OpenHarmony 真机仍待验证。详见[平台范围](platform-compatibility.md)、[手机记录](progress/2026-11-05-hdc-cleanup.md)和[平板记录](progress/2026-11-06-tablet-v012.md)。
 
 | 功能或命令 | 当前实现与验证情况 | 使用限制 |
 | --- | --- | --- |
-| `launchApp`、停止应用 | 已实现；默认启动含停止步骤，已有单台流程实测 | 需包名；主 Ability 可自动发现，也可显式指定。HAP 安装和权限配置在准备阶段处理。 |
+| `launchApp`、停止应用 | 已实现；默认启动含停止步骤，已有单台流程实测 | 需包名；主 Ability 可自动发现，也可显式指定。HAP 安装在准备阶段处理。 |
 | `tapOn` 的文字、ID、坐标定位 | 已实现；文字/提示定位有单台实测，ID、边界与选择器有主机/集成测试 | 取决于 UITest 提供的布局；真实控件和系统覆盖尚不完整 |
 | `inputText`、可见断言 | 中文、单双引号及录制桥接的字面 `${...}` 有实测记录 | 不保证所有输入法和字符组合；未闭合/嵌套表达式不能无损保存时，录制接口会拒绝 |
 | `back`、`swipe`、`takeScreenshot` | 已实现，单台实测通过，包含滑动后重新定位 | 返回不保证等于关闭键盘；滑动时长由速度近似换算 |
@@ -330,7 +349,9 @@ node scripts/export-run-evidence.mjs --attempt ./artifacts/agent/runs/RUN_ID/ATT
 | `setOrientation` | 实验性；API 26 手机用标准 YAML 完成竖屏 → 横屏 → 竖屏，截图尺寸随之变化 | 需已运行的 UITest RPC 后端和支持旋转的前台页面。Flow 可在结束前显式恢复原方向。 |
 | `clearState`、`launchApp.clearState` | 实验性；API 22 模拟器的普通 Stage 应用已验证清除文件和 Preferences | 仅执行包信息确认用户数据可清除的普通应用。原子化服务会被拒绝。请在测试应用重启后断言预期的初始状态。 |
 | `hideKeyboard` | 11 月 19 日源码新增；API 22 模拟器已验证键盘收起、输入保留和重复调用 | 先启动目标应用；键盘已隐藏时直接返回，未知窗口格式明确报错。现有 v0.1.3 下载包不含此功能。 |
-| HAP 安装、权限修改、位置及代理设置 | 当前不支持 | 不支持的操作会明确报错，可在独立准备步骤处理。 |
+| HAP 安装 | 新增源码构建的准备入口见[签名 HAP](#准备签名-hap) | Flow 外执行。设备需接受 HAP 的签名和分发类型。 |
+| `setPermissions`、`launchApp.permissions` | 新增源码构建支持单项 `allow`、`deny`，操作后核对权限状态 | API 26 及以上。应用需调试签名并声明对应的 `user_grant` 权限。 |
+| 位置及代理设置 | 当前不支持 | 可按测试环境能力在独立准备步骤处理。 |
 | Studio、MCP、云端运行 | Agent 接入见鸿测；本仓提供 CLI 与 VS Code | 模拟器自动启停由通用 CI 作业管理 |
 
 视频录屏支持 `host-frames` 和 `huawei-system`。主机后端把设备截图编码为无声 MP4，并与运行预览复用采集通道。系统后端独占系统录屏服务，保存导出的原件与阶段记录。录屏启用方式和成片核验分别见[环境配置](setup.md#视频录屏)和[录屏检查与恢复](recording-diagnostics.md)。

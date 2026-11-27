@@ -7,7 +7,13 @@ import { Connection } from './protocol';
 import { Launch } from './bridge';
 import { ReplayFailure } from './replay-evidence';
 
-export interface ToolSettings { cliDirectory: string; javaPath: string; hdcPath: string; hostRecordingFfmpeg?: string }
+export interface ToolSettings {
+  cliDirectory: string;
+  javaPath: string;
+  hdcPath: string;
+  hostRecordingFfmpeg?: string;
+  hostRecordingDeduplicateFrames?: boolean;
+}
 export async function javaLaunch(root: string, settings: ToolSettings, args: string[], connection?: Connection): Promise<Launch> {
   const distribution = settings.cliDirectory ? path.resolve(root, settings.cliDirectory) : path.join(root, '.upstream', 'maestro', 'maestro-cli', 'build', 'install', 'maestro');
   const libraries = await fs.readdir(path.join(distribution, 'lib')).catch(() => { throw new Error('找不到 Maestro CLI 的 lib 目录。请先构建 installDist，或设置 harmonyosRecorder.cliDirectory。'); });
@@ -76,6 +82,9 @@ export async function runFlow(root: string, settings: ToolSettings, connection: 
     }
     launch.env.MAESTRO_HARMONYOS_RECORDING = 'host-frames';
     launch.env.MAESTRO_HARMONYOS_FFMPEG = settings.hostRecordingFfmpeg;
+  }
+  if (settings.hostRecordingDeduplicateFrames !== undefined) {
+    launch.env.MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES = String(settings.hostRecordingDeduplicateFrames);
   }
   if (onAttempt) {
     launch.env.MAESTRO_HARMONYOS_INTERACTIVE = '1';

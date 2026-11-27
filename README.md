@@ -112,6 +112,19 @@ Hypium、hmdriver2 等工具提供了代码式的鸿蒙 UI 测试能力。维护
 
 本项目在 Maestro 中补充 `HarmonyOSDriver` 和 CLI 会话，沿用原有 YAML 解析、Flow 编排与报告。常见操作可以直接写成可读的测试步骤，通过子 Flow、参数、条件分支和显式 `retry` 组织用例，再从命令行或 CI 调用。跨平台可以复用用例组织方式，控件标识、应用配置及平台命令仍需按目标应用调整。
 
+## 测试 Flutter 和其他三方框架
+
+Flutter、React Native、uni-app 等框架做成鸿蒙应用后，可以共用 `HarmonyOSDriver`。启动、坐标点击、滑动和截图走鸿蒙的设备接口，无需为每种框架单独写驱动。能否按文字或 ID 定位，要看当前页面在鸿蒙控件树里暴露了哪些字段。
+
+| 页面 | 定位方式与验证情况 |
+| --- | --- |
+| Flutter | 在鸿蒙手机上用 v0.1.5 测试 My BMW 6.11.0 的「发现」页，标准 YAML 单条 Flow **1/1 通过，约 66 秒**。按文字切换「车型」和「热点」，检查「会员权益」在切换和上滑后的可见性，保存两张截图，并确认设备会话正常释放。这几个目标控件只有文字，Flutter 容器另有 ID `oh_flutter_1`。 |
+| React Native（RNOH）、uni-app x 原生页面 | 可按鸿蒙控件树中的文字或 ID 定位。React Native 的 `testID` 或框架内的组件标识能否用于 `id:`，以设备输出为准。这两个框架尚未做专项实测。 |
+| uni-app Vue 页面、其他 ArkWeb 混合页面 | 系统树能读取的节点可直接使用。测试包开启 ArkWeb 调试并完成设备转发后，也可按网页文字或 HTML ID 定位。新增源码支持在已核验的 WebView 上使用 YAML 的 `css:`，需自行构建。uni-app 应用尚未做专项实测。 [ArkWeb 样例与实测](examples/arkweb-probe/README.md) |
+| Canvas、自绘图表和 Cocos 等游戏画布 | 目标没有出现在控件树时，可按相对坐标点击或滑动、保存截图，并用后续页面中可读取的控件判断操作结果。画布里的文字需要有对应的可读取节点，才能用 `assertVisible` 断言。 |
+
+写 Flow 前，可先在 VS Code 查看控件树，或运行 `maestro --platform harmonyos hierarchy`。有唯一 ID 就用 `id:`，有稳定文字就用 `text:`。自有 Flutter 应用可给关键自绘控件补可访问性语义，再到真机确认系统树里的字段。 [控件树检查](docs/user-guide.md#跑通第一个-yaml-流程) · [Flutter 自绘语义](https://api.flutter.dev/flutter/rendering/CustomPainter/semanticsBuilder.html)
+
 ## 官方示例
 
 新增 [HMOS 代码工坊](examples/hmos-code-lab/README.md)的固定版本获取入口。它来自华为 [HarmonyOS_Samples/sample_in_harmonyos](https://atomgit.com/HarmonyOS_Samples/sample_in_harmonyos)，手机和平板使用同一个 `phone` 模块；本仓补充前台常亮和 Maestro Flow。

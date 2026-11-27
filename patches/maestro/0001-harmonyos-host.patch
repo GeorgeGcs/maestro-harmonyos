@@ -63,21 +63,22 @@ index c2ccec4..baefea6 100644
        "optional": true,
        "os": [
 diff --git a/maestro-cli/src/main/java/maestro/cli/App.kt b/maestro-cli/src/main/java/maestro/cli/App.kt
-index 8df1b2f..8ac92f1 100644
+index 8df1b2f..4ce5c19 100644
 --- a/maestro-cli/src/main/java/maestro/cli/App.kt
 +++ b/maestro-cli/src/main/java/maestro/cli/App.kt
-@@ -29,6 +29,10 @@ import maestro.cli.command.CheckSyntaxCommand
+@@ -29,6 +29,11 @@ import maestro.cli.command.CheckSyntaxCommand
  import maestro.cli.command.CloudCommand
  import maestro.cli.command.DownloadSamplesCommand
  import maestro.cli.command.DriverCommand
 +import maestro.cli.command.HarmonyOsBridgeCommand
 +import maestro.cli.command.HarmonyOsDevicePoolCommand
++import maestro.cli.command.HarmonyOsPrepareAppCommand
 +import maestro.cli.command.HarmonyOsRecoveryCommand
 +import maestro.cli.command.HarmonyOsCleanupRecoveryCommand
  import maestro.cli.command.ListCloudDevicesCommand
  import maestro.cli.command.ListDevicesCommand
  import maestro.cli.command.LoginCommand
-@@ -41,6 +45,7 @@ import maestro.cli.command.StartDeviceCommand
+@@ -41,6 +46,7 @@ import maestro.cli.command.StartDeviceCommand
  import maestro.cli.command.StudioCommand
  import maestro.cli.command.TestCommand
  import maestro.cli.insights.TestAnalysisManager
@@ -85,18 +86,19 @@ index 8df1b2f..8ac92f1 100644
  import maestro.cli.mcp.claimMcpStdout
  import maestro.cli.update.Updates
  import maestro.cli.util.ChangeLogUtils
-@@ -76,6 +81,10 @@ import kotlin.system.exitProcess
+@@ -76,6 +82,11 @@ import kotlin.system.exitProcess
          CheckSyntaxCommand::class,
          DriverCommand::class,
          McpCommand::class,
 +        HarmonyOsBridgeCommand::class,
 +        HarmonyOsDevicePoolCommand::class,
++        HarmonyOsPrepareAppCommand::class,
 +        HarmonyOsRecoveryCommand::class,
 +        HarmonyOsCleanupRecoveryCommand::class,
      ]
  )
  class App {
-@@ -88,7 +97,7 @@ class App {
+@@ -88,7 +99,7 @@ class App {
      @Option(names = ["-v", "--version"], versionHelp = true, description = ["Display CLI version"])
      var requestedVersion: Boolean? = false
  
@@ -105,14 +107,30 @@ index 8df1b2f..8ac92f1 100644
      var platform: String? = null
  
      @Option(names = ["--host"], hidden = true)
-@@ -123,6 +132,7 @@ fun main(args: Array<String>) {
+@@ -123,6 +134,9 @@ fun main(args: Array<String>) {
      // kotlin-logging's first-load message will otherwise land on the MCP JSON-RPC
      // channel and break the handshake for strict clients like Claude Desktop.
      if (args.firstOrNull() == "mcp") claimMcpStdout()
-+    if (args.any { it == "harmonyos-bridge" || it == "harmonyos-device-pool" }) HarmonyOsBridgeStdout.claim()
++    if (args.any { it in setOf("harmonyos-bridge", "harmonyos-device-pool", "harmonyos-prepare-app") }) {
++        HarmonyOsBridgeStdout.claim()
++    }
  
      // Establish a consistent logging baseline for every command before any init
      // logging fires. Without this, commands that don't call TestDebugReporter.install()
+diff --git a/maestro-cli/src/main/java/maestro/cli/analytics/CommandArgsSanitizer.kt b/maestro-cli/src/main/java/maestro/cli/analytics/CommandArgsSanitizer.kt
+index 7a8cd5c..ba990f7 100644
+--- a/maestro-cli/src/main/java/maestro/cli/analytics/CommandArgsSanitizer.kt
++++ b/maestro-cli/src/main/java/maestro/cli/analytics/CommandArgsSanitizer.kt
+@@ -30,6 +30,9 @@ object CommandArgsSanitizer {
+         "--apiKey",
+         "-e",
+         "--env",
++        "--hap",
++        "--bundle",
++        "--sha256",
+     )
+ 
+     private val PATH_LIKE_EXTENSIONS: Set<String> = setOf(
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsBridgeCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsBridgeCommand.kt
 new file mode 100644
 index 0000000..a7b39b1
@@ -268,6 +286,95 @@ index 0000000..7d33fb0
 +        HarmonyOsBridgeStdout.output.write('\n'.code)
 +        HarmonyOsBridgeStdout.output.flush()
 +        return exit
++    }
++}
+diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsPrepareAppCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsPrepareAppCommand.kt
+new file mode 100644
+index 0000000..d159e90
+--- /dev/null
++++ b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsPrepareAppCommand.kt
+@@ -0,0 +1,83 @@
++package maestro.cli.command
++
++import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.cli.App
++import maestro.cli.CliError
++import maestro.cli.harmonyos.HarmonyOsBridgeStdout
++import maestro.cli.session.HarmonyOsSessionSupport
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.driver.HarmonyOSHap
++import maestro.harmonyos.hdc.HdcClient
++import picocli.CommandLine
++import java.nio.file.Files
++import java.nio.file.Path
++import java.util.concurrent.Callable
++
++@CommandLine.Command(
++    name = "harmonyos-prepare-app",
++    mixinStandardHelpOptions = true,
++    description = ["Install and verify a pinned HAP before running a HarmonyOS Flow"],
++)
++class HarmonyOsPrepareAppCommand : Callable<Int> {
++    @CommandLine.ParentCommand private var parent: App? = null
++    @CommandLine.Option(names = ["--hap"], required = true) private lateinit var file: Path
++    @CommandLine.Option(names = ["--bundle"], required = true) private lateinit var bundle: String
++    @CommandLine.Option(names = ["--sha256"], required = true) private lateinit var sha256: String
++    @CommandLine.Option(names = ["--replace"]) private var replace: Boolean = false
++
++    override fun call(): Int {
++        val receipt = mutableMapOf<String, Any>(
++            "protocol" to "maestro.harmonyos.app-preparation", "schemaVersion" to 1,
++            "status" to "failed", "cleanup" to "notStarted",
++        )
++        var code = "HAP_INPUT_INVALID"
++        var installationError: Exception? = null
++        try {
++            if (parent?.platform != "harmonyos") throw CliError("Use --platform harmonyos with harmonyos-prepare-app.")
++            val requestedDevice = parent?.deviceId ?: throw CliError("Select an explicit --device before installing a HAP.")
++            HarmonyOsSessionSupport.validateOptions(host = parent?.host, port = parent?.port, driverHostPort = parent?.driverHostPort)
++            val staging = Files.createTempDirectory("maestro-harmonyos-hap-")
++            val stagedFile = staging.resolve("application.hap")
++            try {
++                val hap = HarmonyOSHap.stage(file, stagedFile, bundle, sha256)
++                receipt.putAll(mapOf("bundleId" to hap.bundleId, "versionCode" to hap.versionCode, "sha256" to hap.sha256))
++                code = "DEVICE_SELECTION_FAILED"
++                val hdc = HdcClient()
++                val device = HarmonyOsSessionSupport.selectDevice(requestedDevice, hdc)
++                code = "SESSION_OPEN_FAILED"
++                receipt["cleanup"] = "unknown"
++                HarmonyOsSessionSupport.withSession(device, hdc = hdc) { session ->
++                    try {
++                        (session.maestro.driver as HarmonyOSDriver).installHap(hap, replace)
++                    } catch (error: Exception) {
++                        // Report the install outcome separately from the lease's cleanup outcome.
++                        installationError = error
++                    }
++                    code = "SESSION_CLEANUP_FAILED"
++                }
++                receipt["cleanup"] = "complete"
++                installationError?.let {
++                    code = "HAP_INSTALL_FAILED"
++                    throw it
++                }
++                code = "HAP_STAGING_CLEANUP_FAILED"
++            } finally {
++                Files.deleteIfExists(stagedFile)
++                Files.deleteIfExists(staging)
++            }
++            receipt["status"] = "installed"
++        } catch (error: Exception) {
++            if (code == "SESSION_CLEANUP_FAILED") {
++                installationError?.let {
++                    receipt["installationError"] = mapOf("code" to "HAP_INSTALL_FAILED", "message" to it.message.orEmpty())
++                }
++            }
++            receipt["error"] = mapOf("code" to code, "message" to (error.message ?: error.javaClass.simpleName))
++        }
++        val output = HarmonyOsBridgeStdout.output
++        output.write(jacksonObjectMapper().writeValueAsBytes(receipt))
++        output.write('\n'.code)
++        output.flush()
++        return if (receipt["status"] == "installed") 0 else 1
 +    }
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt b/maestro-cli/src/main/java/maestro/cli/command/HarmonyOsRecoveryCommand.kt
@@ -1333,10 +1440,10 @@ new file mode 100644
 +}
 diff --git a/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
 new file mode 100644
-index 00000000..e6b3a36f
+index 0000000..26c52cd
 --- /dev/null
 +++ b/maestro-cli/src/main/java/maestro/cli/harmonyos/HarmonyOsAgentCapabilities.kt
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,285 @@
 +package maestro.cli.harmonyos
 +
 +import com.fasterxml.jackson.databind.JsonNode
@@ -1384,6 +1491,7 @@ index 00000000..e6b3a36f
 +                    if (command.name == "launchApp") add("ability_configured")
 +                    if (command.name == "setOrientation") add("uitest_rpc_available")
 +                    if (command.name == "addMedia") add("gallery_import_available")
++                    if (command.name == "setPermissions") add("api_26_debug_app_permission")
 +                    if (command.recording) {
 +                        add("recording_enabled")
 +                        if (hostRecordingSelected) add("host_encoder_available") else {
@@ -1480,6 +1588,19 @@ index 00000000..e6b3a36f
 +                if (available) "GALLERY_TOOL_DISCOVERED" else "PRECONDITION_UNKNOWN",
 +                "Media tool discovery does not establish Gallery write access.")
 +        }
++        if ("setPermissions" in requested) {
++            val api = read(listOf("param", "get", "const.ohos.apiversion"))?.toIntOrNull()
++            val atm = read(listOf("which", "atm"))
++            when {
++                api != null && api < 26 -> check("permissionBackend", "failed", "PERMISSION_API_UNSUPPORTED",
++                    "Changing a debug application's permissions requires API 26 or later.")
++                api != null && atm?.matches(Regex("/[^\\r\\n]+/atm")) == true ->
++                    check("permissionBackend", "passed", "PERMISSION_TOOL_DISCOVERED",
++                        "The device reports API 26 or later and atm. The declared permission is checked at execution.")
++                else -> check("permissionBackend", "unknown", "PRECONDITION_UNKNOWN",
++                    "Could not confirm both the API level and the permission tool.")
++            }
++        }
 +
 +        if (selected.any { it?.screen == true && it.implementation != "unsupported" }) {
 +            check("screenUnlocked", "unknown", "PRECONDITION_UNKNOWN",
@@ -1491,6 +1612,18 @@ index 00000000..e6b3a36f
 +            val confirmed = app != null
 +            if (confirmed) check("application", "passed", "APP_DISCOVERED", "The bundle query identifies the requested application.")
 +            else check("application", "unknown", "PRECONDITION_UNKNOWN", "The application query did not confirm the requested bundle; absence was not inferred.")
++            if ("setPermissions" in requested) {
++                val info = app?.get("applicationInfo") ?: app?.get("appInfo")
++                val provision = info?.path("appProvisionType")?.textValue()
++                val debug = info?.path("debug")?.takeIf { it.isBoolean }?.booleanValue()
++                when {
++                    provision == "debug" && debug == true -> check("permissionTarget", "passed", "DEBUG_BUNDLE_CONFIRMED",
++                        "The package is debug signed.")
++                    (provision != null && provision != "debug") || debug == false ->
++                        check("permissionTarget", "failed", "DEBUG_BUNDLE_REQUIRED", "The package must be debug signed.")
++                    else -> check("permissionTarget", "unknown", "PRECONDITION_UNKNOWN", "The package signing type could not be confirmed.")
++                }
++            }
 +
 +            if ("clearState" in requested) {
 +                when (HarmonyOSBundleMetadata.dataClearSupport(app)) {
@@ -1592,7 +1725,7 @@ index 00000000..e6b3a36f
 +            Command("hideKeyboard", "supported", application = true),
 +            Command("openLink", "supported"), Command("addMedia", "experimental", screen = false),
 +            Command("setLocation", "unsupported"), Command("setOrientation", "experimental"),
-+            Command("setPermissions", "unsupported"), Command("installApp", "unsupported"),
++            Command("setPermissions", "experimental", screen = false, application = true), Command("installApp", "unsupported"),
 +        )
 +    }
 +}
@@ -12234,10 +12367,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..16371ee
+index 0000000..82c7b83
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,703 @@
+@@ -0,0 +1,717 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -12258,6 +12391,7 @@ index 0000000..16371ee
 +import maestro.harmonyos.driver.HarmonyOSDevice
 +import maestro.harmonyos.driver.HarmonyOSDriverConfig
 +import maestro.harmonyos.driver.HarmonyOSFlowFaults
++import maestro.harmonyos.driver.HarmonyOSHap
 +import maestro.harmonyos.driver.HarmonyOSHostFrameRecording
 +import maestro.harmonyos.driver.HarmonyOSScreenFrame
 +import maestro.harmonyos.driver.HdcHarmonyOSDevice
@@ -12319,7 +12453,7 @@ index 0000000..16371ee
 +
 +    fun flowFaults(appId: String, startMs: Long, endMs: Long): HarmonyOSFlowFaults? = transport.withLock {
 +        if (!opened || queryFailure != null) null else
-+            device.flowFaults(appId, startMs, endMs, minOf(config.commandTimeout, Duration.ofSeconds(6)))
++            device.flowFaults(appId, startMs, endMs, minOf(config.commandTimeout, Duration.ofSeconds(15)))
 +    }
 +
 +    @Synchronized
@@ -12499,6 +12633,11 @@ index 0000000..16371ee
 +        }
 +    }
 +
++    fun installHap(hap: HarmonyOSHap, replace: Boolean) {
++        requireOpen()
++        query { device.installHap(hap, replace, config.commandTimeout) }
++    }
++
 +    override fun scrollVertical() = swipe(SwipeDirection.UP, 400)
 +
 +    override fun swipe(start: Point, end: Point, durationMs: Long) {
@@ -12621,7 +12760,15 @@ index 0000000..16371ee
 +
 +    override fun setPermissions(appId: String, permissions: Map<String, String>) {
 +        requireOpen()
-+        if (permissions.isNotEmpty()) unsupported("setting app permissions")
++        if (permissions.isEmpty()) return
++        requireIdentifier(appId, "Bundle name")
++        val permission = permissions.entries.singleOrNull()
++            ?: unsupported("changing multiple permissions at once")
++        if (!permission.key.matches(Regex("ohos\\.permission\\.[A-Z][A-Z0-9_]*")) ||
++            permission.value !in setOf("allow", "deny")) {
++            unsupported("permissions other than an explicit HarmonyOS permission with allow or deny")
++        }
++        query { device.setAppPermission(appId, permission.key, permission.value == "allow", config.commandTimeout) }
 +    }
 +
 +    override fun clearAppState(appId: String) {
@@ -12985,10 +13132,10 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..22c4090
+index 0000000..a95a8c2
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,35 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -13015,6 +13162,10 @@ index 0000000..22c4090
 +    fun hierarchy(timeout: Duration): TreeNode
 +    fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<TreeNode> = emptyList()): List<TreeNode> =
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support CSS selectors.")
++    fun installHap(hap: HarmonyOSHap, replace: Boolean, timeout: Duration): Unit =
++        throw UnsupportedOperationException("This HarmonyOS device backend does not support HAP installation.")
++    fun setAppPermission(appId: String, permission: String, allow: Boolean, timeout: Duration): Unit =
++        throw UnsupportedOperationException("This HarmonyOS device backend does not support app permissions.")
 +    fun screenshot(timeout: Duration): ByteArray
 +    fun execute(arguments: List<String>, timeout: Duration): String
 +    fun startScreenRecording(out: Sink, config: HarmonyOSDriverConfig): ScreenRecording =
@@ -13096,13 +13247,17 @@ index 0000000..b174642
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt
 new file mode 100644
-index 0000000..38d2f7d
+index 0000000..881a400
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSFlowFaults.kt
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,86 @@
 +package maestro.harmonyos.driver
 +
++import com.fasterxml.jackson.core.JsonProcessingException
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.JsonNode
 +import com.fasterxml.jackson.databind.ObjectMapper
++import maestro.harmonyos.hdc.HdcException
 +
 +data class HarmonyOSFlowFault(
 +    val event: String,
@@ -13134,18 +13289,29 @@ index 0000000..38d2f7d
 +    val clock: HarmonyOSFaultClock? = null,
 +)
 +
-+private val mapper = ObjectMapper()
++private val mapper = ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 +private val crashEvents = setOf("CPP_CRASH", "JS_ERROR", "RUST_PANIC", "CJ_ERROR", "APP_CRASH")
 +private val bundleFields = listOf("PACKAGE_NAME", "MODULE", "PROCESS_NAME", "PNAME", "bundle_name")
 +// The event schema includes file paths for separate device logs. Keep only the inline diagnostics.
 +private val diagnosticFields = listOf("PID", "SUB_EVENT_TYPE", "FINGERPRINT", "DIAG_INFO", "STACK",
 +    "FIRST_FRAME", "SECOND_FRAME", "LAST_FRAME", "SUMMARY", "MSG")
 +
++internal fun readFaultHistory(output: String, limit: Int): List<JsonNode> {
++    val events = output.lineSequence().filterNot(String::isBlank).map { line ->
++        val event = try { mapper.readTree(line) } catch (_: JsonProcessingException) { null }
++        if (event == null || !event.path("name_").isTextual || event.path("name_").asText().isBlank()) {
++            throw HdcException("hisysevent returned an invalid fault history record.")
++        }
++        event
++    }.toList()
++    if (events.size > limit) throw HdcException("hisysevent exceeded the requested fault history limit.")
++    return events
++}
++
 +internal fun parseFlowFaults(
-+    output: String, appId: String, startMs: Long, endMs: Long, clock: HarmonyOSFaultClock? = null,
++    events: List<JsonNode>, appId: String, startMs: Long, endMs: Long, clock: HarmonyOSFaultClock? = null,
 +): HarmonyOSFlowFaults {
-+    val faults = output.lineSequence().filter { it.trimStart().startsWith("{") }.mapNotNull { line ->
-+        val event = runCatching { mapper.readTree(line) }.getOrNull() ?: return@mapNotNull null
++    val faults = events.asSequence().mapNotNull { event ->
 +        val name = event.path("name_").asText()
 +        if (name !in crashEvents && name != "APP_FREEZE") return@mapNotNull null
 +        val bundle = event.path("PACKAGE_NAME").asText().ifBlank { event.path("bundle_name").asText() }
@@ -13171,12 +13337,71 @@ index 0000000..38d2f7d
 +    val recent = (faults.takeLast(16) + listOfNotNull(crash, freeze)).distinct().sortedBy { it.timeMs }
 +    return HarmonyOSFlowFaults(crash, freeze, recent, clock)
 +}
+diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHap.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHap.kt
+new file mode 100644
+index 0000000..efbe1dd
+--- /dev/null
++++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHap.kt
+@@ -0,0 +1,53 @@
++package maestro.harmonyos.driver
++
++import com.fasterxml.jackson.core.JsonParser
++import com.fasterxml.jackson.databind.DeserializationFeature
++import com.fasterxml.jackson.databind.ObjectMapper
++import java.nio.file.Files
++import java.nio.file.Path
++import java.security.DigestInputStream
++import java.security.MessageDigest
++import java.util.HexFormat
++import java.util.zip.ZipFile
++
++class HarmonyOSHap private constructor(
++    val path: Path,
++    val bundleId: String,
++    val versionCode: Long,
++    val sha256: String,
++) {
++    companion object {
++        private const val MAX_MANIFEST_BYTES = 1024 * 1024
++        private val mapper = ObjectMapper()
++            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
++            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
++
++        fun stage(source: Path, destination: Path, bundleId: String, sha256: String): HarmonyOSHap {
++            requireIdentifier(bundleId, "Bundle name")
++            require(sha256.matches(Regex("[0-9a-fA-F]{64}"))) { "A SHA-256 digest is required." }
++            require(Files.isRegularFile(source) && source.fileName.toString().endsWith(".hap", ignoreCase = true)) {
++                "A local HAP file is required."
++            }
++            val checksum = MessageDigest.getInstance("SHA-256")
++            DigestInputStream(Files.newInputStream(source), checksum).use { Files.copy(it, destination) }
++            val actualHash = HexFormat.of().formatHex(checksum.digest())
++            require(actualHash.equals(sha256, ignoreCase = true)) { "HAP SHA-256 does not match." }
++            val manifest = ZipFile(destination.toFile()).use { archive ->
++                val entry = archive.getEntry("module.json") ?: error("HAP is missing module.json.")
++                require(archive.stream().filter { it.name == "module.json" }.count() == 1L) {
++                    "HAP has multiple module.json entries."
++                }
++                archive.getInputStream(entry).use { it.readNBytes(MAX_MANIFEST_BYTES + 1) }.also {
++                    require(it.size <= MAX_MANIFEST_BYTES) { "HAP module.json exceeds the size limit." }
++                }
++            }
++            val application = mapper.readTree(manifest)?.path("app") ?: error("HAP application metadata is missing.")
++            require(application.path("bundleName").textValue() == bundleId) { "HAP bundle name does not match." }
++            val version = application.path("versionCode")
++            require(version.isIntegralNumber && version.canConvertToLong() && version.longValue() > 0) {
++                "HAP versionCode is missing or invalid."
++            }
++            return HarmonyOSHap(destination, bundleId, version.longValue(), actualHash)
++        }
++    }
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt
 new file mode 100644
-index 00000000..e92fcfbf
+index 0000000..17c611b
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSHostFrameRecording.kt
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,166 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.ScreenRecording
@@ -13309,12 +13534,7 @@ index 00000000..e92fcfbf
 +        val canvasWidth = ((width * ratio).toInt() / 2 * 2).coerceAtLeast(2)
 +        val canvasHeight = ((height * ratio).toInt() / 2 * 2).coerceAtLeast(2)
 +        val errors = directory.resolve("ffmpeg.log")
-+        val encoder = ProcessBuilder(ffmpeg.toString(), "-hide_banner", "-nostdin", "-loglevel", "error", "-xerror",
-+            "-f", "concat", "-safe", "1", "-i", manifest.toString(), "-an", "-vf",
-+            "scale=$canvasWidth:$canvasHeight:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=$canvasWidth:$canvasHeight:(ow-iw)/2:(oh-ih)/2",
-+            "-fps_mode", "vfr", "-c:v", "libx264", "-preset", "veryfast", "-threads", "2",
-+            "-maxrate", "4M", "-bufsize", "8M", "-pix_fmt", "yuv420p",
-+            "-movflags", "+faststart", output.toString()).redirectError(errors.toFile())
++        val encoder = hostFrameEncoder(ffmpeg, manifest, output, canvasWidth, canvasHeight).redirectError(errors.toFile())
 +            .redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
 +        try {
 +            if (!encoder.waitFor((deadline - System.nanoTime()).coerceAtLeast(0), TimeUnit.NANOSECONDS)) {
@@ -13336,12 +13556,24 @@ index 00000000..e92fcfbf
 +        val logger = LoggerFactory.getLogger(HarmonyOSHostFrameRecording::class.java)
 +    }
 +}
++
++internal fun hostFrameEncoder(ffmpeg: Path, manifest: Path, output: Path, canvasWidth: Int, canvasHeight: Int): ProcessBuilder {
++    val directory = manifest.toAbsolutePath().normalize().parent
++    require(output.toAbsolutePath().normalize().parent == directory)
++    // The concat demuxer resolves entries as URLs. A '#' in an absolute manifest path changes their base.
++    return ProcessBuilder(ffmpeg.toString(), "-hide_banner", "-nostdin", "-loglevel", "error", "-xerror",
++        "-f", "concat", "-safe", "1", "-i", manifest.fileName.toString(), "-an", "-vf",
++        "scale=$canvasWidth:$canvasHeight:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=$canvasWidth:$canvasHeight:(ow-iw)/2:(oh-ih)/2",
++        "-fps_mode", "vfr", "-c:v", "libx264", "-preset", "veryfast", "-threads", "2",
++        "-maxrate", "4M", "-bufsize", "8M", "-pix_fmt", "yuv420p",
++        "-movflags", "+faststart", output.fileName.toString()).directory(directory.toFile())
++}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSLaunchTarget.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSLaunchTarget.kt
 new file mode 100644
-index 0000000..c41256d
+index 0000000..0d7c813
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSLaunchTarget.kt
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,81 @@
 +package maestro.harmonyos.driver
 +
 +import com.fasterxml.jackson.core.JsonProcessingException
@@ -13354,24 +13586,47 @@ index 0000000..c41256d
 +
 +object HarmonyOSBundleMetadata {
 +    enum class DataClearSupport { SUPPORTED, UNSUPPORTED, UNKNOWN }
++    internal data class DebugPermission(val tokenId: Long, val granted: Boolean)
 +
 +    private val mapper = ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 +        .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
 +    private val identifier = Regex("[A-Za-z0-9_][A-Za-z0-9_.$]*")
 +
 +    fun parse(output: String, appId: String): JsonNode? {
-+        val start = output.indexOf('{')
-+        if (start < 0) return null
-+        val bundle = try {
-+            mapper.readTree(output.substring(start))
-+        } catch (_: JsonProcessingException) {
-+            return null
-+        }
-+        if (!bundle.isObject) return null
++        val bundle = parseObject(output) ?: return null
 +        val names = listOf(bundle.get("name"), bundle.get("bundleName"), bundle.path("appInfo").get("bundleName"),
 +            bundle.path("applicationInfo").get("bundleName")).mapNotNull { it?.textValue() }
 +        return bundle.takeIf { appId in names && names.all { it == appId } }
 +    }
++
++    private fun parseObject(output: String): JsonNode? {
++        val start = output.indexOf('{')
++        if (start < 0) return null
++        return try {
++            mapper.readTree(output.substring(start))
++        } catch (_: JsonProcessingException) {
++            return null
++        }?.takeIf(JsonNode::isObject)
++    }
++
++    internal fun debugPermission(bundle: JsonNode?, permission: String): DebugPermission? {
++        if (bundle == null) return null
++        val app = bundle.get("applicationInfo") ?: bundle.get("appInfo") ?: return null
++        if (app.path("appProvisionType").textValue() != "debug" || !app.path("debug").booleanValue()) return null
++        val token = app.path("accessTokenId")
++        if (!token.isIntegralNumber || !token.canConvertToLong() || token.longValue() !in 1..0xFFFF_FFFFL) return null
++        val permissions = bundle.path("reqPermissions").takeIf(JsonNode::isArray) ?: return null
++        val states = bundle.path("reqPermissionStates")
++        if (!states.isArray || states.size() != permissions.size()) return null
++        val index = (0 until permissions.size()).singleOrNull { permissions[it].textValue() == permission } ?: return null
++        val state = states[index]
++        if (!state.isIntegralNumber || !state.canConvertToInt() || state.intValue() !in -1..0) return null
++        return DebugPermission(token.longValue(), state.intValue() == 0)
++    }
++
++    internal fun isUserGrant(output: String, permission: String): Boolean =
++        parseObject(output)?.let { it.path("permissionName").textValue() == permission &&
++            it.path("grantMode").textValue() == "USER_GRANT" } == true
 +
 +    fun dataClearSupport(bundle: JsonNode?): DataClearSupport {
 +        val application = bundle?.get("applicationInfo") ?: bundle?.get("appInfo") ?: return DataClearSupport.UNKNOWN
@@ -14229,10 +14484,10 @@ index 0000000..35a28d5
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..cc64aa0
+index 0000000..358267e
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,576 @@
+@@ -0,0 +1,623 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
@@ -14356,11 +14611,20 @@ index 0000000..cc64aa0
 +        // Broaden the device-side query for the offset interval. The parser admits only events provably in the Flow window.
 +        val deviceStart = startMs - (clock?.maximumOffsetMs ?: 0)
 +        val deviceEnd = endMs - (clock?.minimumOffsetMs ?: 0)
-+        val output = diagnostic(
-+            listOf("hisysevent", "-l", "-s", deviceStart.toString(), "-e", deviceEnd.toString(), "-g", "FAULT", "-m", "256"),
-+            remainingBudget(deadline, timeout),
-+        )
-+        return parseFlowFaults(output, appId, startMs, endMs, clock)
++        // Shell event visibility may be applied after the store reads a page. A smaller page or
++        // a single publisher domain can hide a target crash that the original query would return.
++        val queryStarted = System.nanoTime()
++        val limit = 256
++        val output = try {
++            diagnostic(
++                listOf("hisysevent", "-l", "-s", deviceStart.toString(), "-e", deviceEnd.toString(), "-g", "FAULT", "-m", limit.toString()),
++                remainingBudget(deadline, timeout),
++            )
++        } finally {
++            logger.info("HarmonyOS fault history clockMs={} queryMs={}",
++                elapsed, Duration.ofNanos(System.nanoTime() - queryStarted).toMillis())
++        }
++        return parseFlowFaults(readFaultHistory(output, limit), appId, startMs, endMs, clock)
 +    }
 +
 +    override fun displaySize(timeout: Duration): Pair<Int, Int>? {
@@ -14530,6 +14794,42 @@ index 0000000..cc64aa0
 +        } ?: error("CSS query could not read the verified ArkWeb page.")
 +    }
 +
++    override fun installHap(hap: HarmonyOSHap, replace: Boolean, timeout: Duration) {
++        val lines = execute(listOf("bm", "dump", "-a"), timeout).lineSequence()
++            .map(String::trim).filter(String::isNotEmpty).toList()
++        val header = lines.firstOrNull().orEmpty()
++        check((header == "All bundle names:" || header.matches(Regex("ID: [0-9]+:"))) && lines.drop(1).all {
++            it.matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.]*"))
++        }) { "Could not confirm which bundles are installed." }
++        check(replace || hap.bundleId !in lines.drop(1)) { "The target bundle is already installed. An explicit --replace is required." }
++        hdc.installHap(deviceId, hap.path, replace, Duration.ofSeconds(120))
++        val metadata = execute(listOf("bm", "dump", "-n", hap.bundleId), timeout)
++        val version = HarmonyOSBundleMetadata.parse(metadata, hap.bundleId)?.path("versionCode")
++        check(version != null && version.isIntegralNumber && version.canConvertToLong() && version.longValue() == hap.versionCode) {
++            "HAP installation was acknowledged, but the installed bundle or version could not be verified."
++        }
++    }
++
++    override fun setAppPermission(appId: String, permission: String, allow: Boolean, timeout: Duration) {
++        val api = diagnostic(listOf("param", "get", "const.ohos.apiversion"), timeout).trim().toIntOrNull()
++        if (api == null || api < 26) throw UnsupportedOperationException("App permissions require HarmonyOS API 26 or later.")
++        fun readPermission(): HarmonyOSBundleMetadata.DebugPermission? {
++            val output = execute(listOf("bm", "dump", "-n", appId), timeout)
++            return HarmonyOSBundleMetadata.debugPermission(HarmonyOSBundleMetadata.parse(output, appId), permission)
++        }
++        val definition = diagnostic(listOf("atm", "dump", "-d", "-p", permission), timeout)
++        if (!HarmonyOSBundleMetadata.isUserGrant(definition, permission)) {
++            throw UnsupportedOperationException("Only a user_grant permission can be changed.")
++        }
++        val existing = readPermission()
++            ?: throw UnsupportedOperationException("A debug-signed bundle must declare the requested permission.")
++        val flag = if (allow) "-g" else "-c"
++        val result = execute(listOf("atm", "perm", flag, "-i", existing.tokenId.toString(), "-p", permission), timeout)
++        check(result.trim() == "Success") { "The device did not confirm the permission operation." }
++        val current = readPermission()
++        check(current == existing.copy(granted = allow)) { "The device did not verify the requested permission state." }
++    }
++
 +    private fun nativeHierarchy(deadline: Long, timeout: Duration): TreeNode {
 +        layoutChannel?.let { channel ->
 +            val rpcBudget = minOf(timeout.dividedBy(2), Duration.ofSeconds(2))
@@ -14674,7 +14974,9 @@ index 0000000..cc64aa0
 +        if (status != 0) {
 +            throw HarmonyOSCommandException("Device command failed (exit $status)", output, result.stderr, status, transportFailure)
 +        }
-+        if (DEVICE_FAILURE.containsMatchIn(output) || DEVICE_FAILURE.containsMatchIn(result.stderr)) {
++        if (DEVICE_FAILURE.containsMatchIn(output) || DEVICE_FAILURE.containsMatchIn(result.stderr) ||
++            (arguments.first() == "hisysevent" && result.stderr.isNotBlank())
++        ) {
 +            throw HarmonyOSCommandException("Device command reported a failure", output, result.stderr, status, transportFailure)
 +        }
 +        // ui_input.cpp returns EXIT_SUCCESS even for an ApiCallErr. Its successful message is
@@ -16790,7 +17092,7 @@ index 0000000..c460847
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 new file mode 100644
-index 0000000..e0f1924
+index 0000000..8621fca
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcCallDiagnostics.kt
 @@ -0,0 +1,153 @@
@@ -16809,7 +17111,7 @@ index 0000000..e0f1924
 +/** Categories are selected before shell wrapping. Never derive log fields from arbitrary argv. */
 +internal enum class HdcCommandCategory {
 +    LIST_TARGETS, LAYOUT_FORWARD_LIST, LAYOUT_FORWARD_CREATE, LAYOUT_FORWARD_REMOVE, DUMP_LAYOUT, SCREEN_CAPTURE, INPUT_TAP, INPUT_SWIPE, INPUT_TEXT, INPUT_KEY,
-+    INPUT_OTHER, FILE_RECEIVE, FILE_SEND, REMOVE_FILE, APP_START, APP_STOP, PROCESS_QUERY, SERVICE_QUERY,
++    INPUT_OTHER, FILE_RECEIVE, FILE_SEND, REMOVE_FILE, APP_START, APP_STOP, APP_INSTALL, PROCESS_QUERY, SERVICE_QUERY,
 +    MEDIA_QUERY, MEDIA_RECEIVE, MEDIA_DELETE, FILE_STAT, FILE_TEST, FAULT_QUERY, SHELL_SCRIPT, SHELL_OTHER, UNKNOWN;
 +
 +    companion object {
@@ -16949,10 +17251,10 @@ index 0000000..e0f1924
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
 new file mode 100644
-index 00000000..4e4759ac
+index 0000000..5f7d63d
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/hdc/HdcClient.kt
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,412 @@
 +package maestro.harmonyos.hdc
 +
 +import java.nio.file.Path
@@ -17197,6 +17499,31 @@ index 00000000..4e4759ac
 +    internal fun <T> externalMutation(arguments: List<String>, dispatch: () -> T): T =
 +        if (recoveryJournal == null) dispatch() else recoveryJournal.externalMutation(arguments, dispatch)
 +
++    internal fun installHap(deviceId: String, hap: Path, replace: Boolean, timeout: Duration) {
++        validateDeviceId(deviceId)
++        recoveryJournal?.let { require(it.deviceId == deviceId) { "Recovery journal belongs to another target." } }
++        val arguments = listOf("-t", deviceId, "install") + (if (replace) listOf("-r") else emptyList()) +
++            hap.toAbsolutePath().toString()
++        val failureCode = externalMutation(arguments) {
++            val result = try {
++                execute(arguments, timeout, recoveryJournal != null, category = HdcCommandCategory.APP_INSTALL)
++            } catch (error: HdcCommandException) {
++                error.result
++            }
++            val status = result.stdout.lineSequence().map(String::trim).toList()
++            val success = status.count { it.endsWith("msg:install bundle successfully.") ||
++                it.endsWith("msg:install bundle successfully") } == 1
++            val failure = status.mapNotNull { Regex("msg:error: failed to install bundle\\. code:([0-9]+)(?: .*|$)")
++                .find(it)?.groupValues?.get(1) }.singleOrNull()
++            check(status.count { it == "AppMod finish" } == 1 && result.stderr.isBlank() &&
++                ((result.exitCode == 0 && success && failure == null) || (!success && failure != null))) {
++                "HDC did not confirm the outcome of the HAP installation."
++            }
++            failure
++        }
++        if (failureCode != null) throw HdcException("The device rejected the HAP (system code $failureCode).")
++    }
++
 +    internal fun sendGalleryFile(deviceId: String, local: Path, remote: String, bytes: Long, timeout: Duration) {
 +        validateDeviceId(deviceId)
 +        require(remote.matches(Regex("/mnt/data/[0-9]+/media_fuse/Photo/[A-Za-z0-9][A-Za-z0-9_.-]{0,180}")))
@@ -17283,6 +17610,10 @@ index 00000000..4e4759ac
 +                    arguments[3].matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.]*"))) ||
 +                (arguments.size == 5 && arguments.take(4) == listOf("bm", "clean", "-d", "-n") &&
 +                    arguments[4].matches(Regex("[A-Za-z0-9_][A-Za-z0-9_.]*"))) ||
++                (arguments.size == 7 && arguments.take(2) == listOf("atm", "perm") &&
++                    arguments[2] in setOf("-g", "-c") && arguments[3] == "-i" &&
++                    (arguments[4].toLongOrNull() ?: 0L) in 1L..0xFFFF_FFFFL && arguments[5] == "-p" &&
++                    arguments[6].matches(Regex("ohos\\.permission\\.[A-Z][A-Z0-9_]*"))) ||
 +                (arguments.take(3) == listOf("stat", "-c", "%s") && arguments.size == 4 && recordingScratch(arguments[3])) ||
 +                (arguments.size == 3 && arguments[0] == "test" && arguments[1] in setOf("-L", "-e", "-f") && recordingScratch(arguments[2])) ||
 +                (arguments.take(2) == listOf("mediatool", "query") && arguments.size == 4 &&
@@ -19319,7 +19650,7 @@ index 00000000..1f28adc7
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt
 new file mode 100644
-index 0000000..6bfb068
+index 0000000..0bcda3c
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSFlowFaultsTest.kt
 @@ -0,0 +1,36 @@
@@ -19340,7 +19671,7 @@ index 0000000..6bfb068
 +            {"name_":"CPP_CRASH","MODULE":"demo.target","time_":210,"SUMMARY":"after"}
 +            {"name_":"USER_ACTION","MODULE":"demo.target","time_":170}
 +        """.trimIndent()
-+        val report = parseFlowFaults(output, "demo.target", 100, 200)
++        val report = parseFlowFaults(readFaultHistory(output, 256), "demo.target", 100, 200)
 +        assertThat(report.crash).isEqualTo(HarmonyOSFlowFault("JS_ERROR", 160, "latest crash"))
 +        assertThat(report.freeze).isEqualTo(HarmonyOSFlowFault("APP_FREEZE", 155, "main thread", occurredAt = true))
 +        assertThat(report.events.map { it.timeMs }).containsExactly(140L, 155L, 160L).inOrder()
@@ -19353,7 +19684,7 @@ index 0000000..6bfb068
 +            {"name_":"JS_ERROR","PACKAGE_NAME":"demo.target","HAPPEN_TIME":141,"REASON":"uncertain boundary"}
 +            {"name_":"JS_ERROR","PACKAGE_NAME":"demo.target","HAPPEN_TIME":160,"PID":1234,"REASON":"threw","STACK":"details","LOG_PATH":"/an/untrusted/path"}
 +        """.trimIndent()
-+        val report = parseFlowFaults(output, "demo.target", 150, 200, HarmonyOSFaultClock(3, 10))
++        val report = parseFlowFaults(readFaultHistory(output, 256), "demo.target", 150, 200, HarmonyOSFaultClock(3, 10))
 +        assertThat(report.events).containsExactly(
 +            HarmonyOSFlowFault("JS_ERROR", 160, "threw", mapOf("PID" to "1234", "STACK" to "details"), true),
 +        )
@@ -21111,10 +21442,10 @@ index 0000000..ba4499a
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
 new file mode 100644
-index 0000000..e4947ec
+index 0000000..2a27d1d
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HdcHarmonyOSDeviceTest.kt
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,480 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -21130,10 +21461,107 @@ index 0000000..e4947ec
 +import org.junit.jupiter.api.Test
 +import java.nio.file.Files
 +import java.nio.file.Path
++import java.security.MessageDigest
 +import java.time.Duration
++import java.util.HexFormat
 +import java.util.UUID
++import java.util.zip.ZipEntry
++import java.util.zip.ZipOutputStream
 +
 +class HdcHarmonyOSDeviceTest {
++    @Test
++    fun `permissions require API 26 a debug bundle a user grant and explicit state readback`() {
++        val permission = "ohos.permission.CAMERA"
++        var api = "25"
++        var debug = false
++        var grantMode = "USER_GRANT"
++        var state = -1
++        var writes = 0
++        var changeReported = true
++        val device = device { args, _ ->
++            val input = args.last()
++            val output = when {
++                "const.ohos.apiversion" in input -> api
++                "atm" in input && "dump" in input -> """{"permissionName":"$permission","grantMode":"$grantMode"}"""
++                "bm" in input && "dump" in input -> """
++                    {"name":"org.example.demo","applicationInfo":{"appProvisionType":"${if (debug) "debug" else "release"}",
++                    "debug":$debug,"accessTokenId":4000000000},"reqPermissions":["$permission"],"reqPermissionStates":[$state]}
++                """.trimIndent()
++                else -> {
++                    assertThat(input).contains("atm")
++                    assertThat(input).contains("perm")
++                    assertThat(input).contains("4000000000")
++                    assertThat(input).contains(permission)
++                    writes++
++                    if (changeReported) state = if ("-g" in input) 0 else -1
++                    "Success"
++                }
++            }
++            HdcCommandResult(0, "$output\n${marker(args)}0\n", "")
++        }
++        fun change(allow: Boolean) = device.setAppPermission("org.example.demo", permission, allow, TIMEOUT)
++        assertThrows(UnsupportedOperationException::class.java) { change(true) }
++        api = "26"
++        assertThrows(UnsupportedOperationException::class.java) { change(true) }
++        debug = true
++        grantMode = "SYSTEM_GRANT"
++        assertThrows(UnsupportedOperationException::class.java) { change(true) }
++        assertThat(writes).isEqualTo(0)
++        grantMode = "USER_GRANT"
++        change(true)
++        change(false)
++        assertThat(state).isEqualTo(-1)
++        changeReported = false
++        assertThrows(IllegalStateException::class.java) { change(true) }
++    }
++
++    @Test
++    fun `preparing a pinned HAP verifies the bundle and version and requires opt in to replace`() {
++        TempFileHandler().use { files ->
++            val dir = files.createTempDirectory("maestro-hap-test").toPath()
++            val source = dir.resolve("fixture.hap")
++            val bundle = "org.example.demo"
++            ZipOutputStream(Files.newOutputStream(source)).use { archive ->
++                archive.putNextEntry(ZipEntry("module.json"))
++                archive.write("""{"app":{"bundleName":"$bundle","versionCode":7}}""".toByteArray())
++                archive.closeEntry()
++            }
++            val digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(source)))
++            assertThrows(IllegalArgumentException::class.java) {
++                HarmonyOSHap.stage(source, dir.resolve("rejected.hap"), bundle, "0".repeat(64))
++            }
++            val hap = HarmonyOSHap.stage(source, dir.resolve("staged.hap"), bundle, digest)
++            var installed = false
++            var installs = 0
++            var reject = false
++            val device = device { args, _ ->
++                if (args.getOrNull(3) == "install") {
++                    assertThat(args.last()).isEqualTo(hap.path.toAbsolutePath().toString())
++                    assertThat("-r" in args).isEqualTo(installed)
++                    installs++
++                    if (reject) {
++                        HdcCommandResult(1, "[Info]App install path:fixture msg:error: failed to install bundle. code:9568322 test\nAppMod finish\n", "")
++                    } else {
++                        installed = true
++                        HdcCommandResult(0, "[Info]App install path:fixture msg:install bundle successfully.\nAppMod finish\n", "")
++                    }
++                } else {
++                    val output = if ("'-a'" in args.last()) {
++                        if (installed) "ID: 100:\n$bundle" else "ID: 100:\n"
++                    } else """{"name":"$bundle","versionCode":7}"""
++                    HdcCommandResult(0, "$output\n${marker(args)}0\n", "")
++                }
++            }
++            device.installHap(hap, false, TIMEOUT)
++            assertThrows(IllegalStateException::class.java) { device.installHap(hap, false, TIMEOUT) }
++            assertThat(installs).isEqualTo(1)
++            device.installHap(hap, true, TIMEOUT)
++            reject = true
++            val failure = assertThrows(HdcException::class.java) { device.installHap(hap, true, TIMEOUT) }
++            assertThat(failure.message).contains("9568322")
++        }
++    }
++
 +    @Test
 +    fun `preview requests bounded pixels and explicit screenshots keep the original backend`() {
 +        val commands = mutableListOf<String>()
@@ -21182,6 +21610,60 @@ index 0000000..e4947ec
 +        focus = 68
 +        assertThat(device.hasAppFocus("org.example.demo", TIMEOUT)).isTrue()
 +        assertThat(device.hasAppFocus("org.example", TIMEOUT)).isFalse()
++    }
++
++    @Test
++    fun `empty and populated fault windows each use one all-domain read with the full limit`() {
++        val names = listOf("CPP_CRASH", "JS_ERROR", "RUST_PANIC", "CJ_ERROR", "APP_CRASH", "APP_FREEZE")
++        val rows = names.mapIndexed { index, name ->
++            """{"domain_":"SOURCE_$index","name_":"$name","PACKAGE_NAME":"demo.target","time_":${100 + index}}"""
++        }
++        val other = """{"name_":"CPP_CRASH","PACKAGE_NAME":"another.app","time_":103}"""
++        var populated = false
++        val limits = mutableListOf<Int>()
++        val budgets = mutableListOf<Duration>()
++        val device = device { args, timeout ->
++            val command = args.last().replace("'\"'\"'", "'")
++            val output = if ("hisysevent" in command) {
++                assertThat(command).contains("'-l' '-s' '90' '-e' '110' '-g' 'FAULT'")
++                assertThat(command).doesNotContain("'-o'")
++                val limit = Regex("""'-m' '(\d+)'""").find(command)!!.groupValues[1].toInt()
++                limits += limit
++                budgets += timeout
++                if (populated) (rows + other).joinToString("\n") else ""
++            } else ""
++            HdcCommandResult(0, "$output\n${marker(args)}0\n", "")
++        }
++        assertThat(device.flowFaults("demo.target", 90, 110, TIMEOUT).events).isEmpty()
++        assertThat(limits).containsExactly(256)
++        limits.clear()
++        budgets.clear()
++        populated = true
++        val report = device.flowFaults("demo.target", 90, 110, TIMEOUT)
++        assertThat(limits).containsExactly(256)
++        assertThat(budgets.single()).isAtMost(TIMEOUT)
++        assertThat(report.events.map { it.event }).containsExactlyElementsIn(names).inOrder()
++    }
++
++    @Test
++    fun `fault query diagnostics never report invalid output or missing receipts as an empty history`() {
++        val row = """{"name_":"JS_ERROR","PACKAGE_NAME":"demo.target","time_":100}"""
++        fun read(output: String, stderr: String = "", receipt: Boolean = true) {
++            val device = device { args, _ ->
++                val isHistory = "hisysevent" in args.last()
++                val body = if (isHistory) output else ""
++                val status = if (!isHistory || receipt) "\n${marker(args)}0\n" else ""
++                HdcCommandResult(0, body + status, if (isHistory) stderr else "")
++            }
++            assertThrows(HdcException::class.java) { device.flowFaults("demo.target", 90, 110, TIMEOUT) }
++        }
++        read("failed to query system event: permission denied")
++        read("", stderr = "permission denied")
++        read("", receipt = false)
++        read("{broken")
++        read("{}")
++        read("$row garbage")
++        read(List(257) { row }.joinToString("\n"))
 +    }
 +
 +    @Test
@@ -29158,3 +29640,38 @@ index 0000000..60d3752
 +- startRecording: unsupported-recording
 +- tapOn:
 +    id: open-form
+diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSHostFrameRecordingTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSHostFrameRecordingTest.kt
+new file mode 100644
+index 0000000..c15989c
+--- /dev/null
++++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSHostFrameRecordingTest.kt
+@@ -0,0 +1,29 @@
++package maestro.harmonyos.driver
++
++import org.junit.jupiter.api.Assertions.assertEquals
++import org.junit.jupiter.api.Assertions.assertThrows
++import org.junit.jupiter.api.Test
++import org.junit.jupiter.api.io.TempDir
++import java.nio.file.Files
++import java.nio.file.Path
++
++class HarmonyOSHostFrameRecordingTest {
++    @TempDir lateinit var temp: Path
++
++    @Test
++    fun `concat resolves frames inside a recording directory containing spaces and a hash`() {
++        val directory = Files.createDirectory(temp.resolve("recording #1"))
++        val ffmpeg = temp.resolve("encoder tools").resolve("ffmpeg")
++        val manifest = directory.resolve("frames.ffconcat")
++        val output = directory.resolve("recording.mp4")
++        val process = hostFrameEncoder(ffmpeg, manifest, output, 32, 32)
++        val args = process.command()
++        assertEquals(directory, process.directory().toPath())
++        assertEquals(ffmpeg.toString(), args.first())
++        assertEquals("frames.ffconcat", args[args.indexOf("-i") + 1])
++        assertEquals("recording.mp4", args.last())
++        assertThrows(IllegalArgumentException::class.java) {
++            hostFrameEncoder(ffmpeg, manifest, temp.resolve("recording.mp4"), 32, 32)
++        }
++    }
++}

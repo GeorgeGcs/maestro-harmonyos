@@ -247,7 +247,9 @@ HDC 进程退出 0 仅表示传输层结果，不能据此确认设备动作成�
 | `clearState`、`launchApp.clearState` | 条件支持。先核对包类型，再通过 `bm clean -d -n` | 只接受可清除用户数据的普通应用 | API 22 模拟器验证文件和 Preferences 清理 |
 | `setOrientation` | 条件支持。经过兼容的 UITest RPC 设置方向 | RPC 已就绪，应用和设备允许旋转 | API 26 手机验证竖屏、横屏和恢复竖屏 |
 | `addMedia` | 条件支持。限指定格式、文件数量和体积的导入 | HDC 文件传输、图库和 `mediatool` 可用 | API 22 模拟器验证 PNG 导入、回读摘要和同名拒绝 |
-| Flow 内安装 HAP、`setPermissions`、`setLocation`、代理、飞行模式、深色模式 | 当前未接入。CI 可在 Flow 前独立准备包 | 安装前核对签名、目标设备和包摘要。其他能力分别取决于系统开放接口 | 固定签名 HAP 已在 API 22 模拟器前置安装并完成 Flow |
+| HAP 安装 | 源码版通过 `harmonyos-prepare-app` 在 Flow 外安装 | 显式设备、包名及 HAP 摘要。同包覆盖需指定 `--replace` | API 22 模拟器核对包名、版本、安装回执和会话释放 |
+| `setPermissions`、`launchApp.permissions` | 源码版通过 `atm perm` 修改单个应用权限 | API 26 及以上，调试签名应用已声明用户授权权限。支持 `allow` 和 `deny` | API 26 手机已执行两条 `setPermissions` 步骤，授权、撤销及会话释放均通过 |
+| `setLocation`、代理、飞行模式、深色模式 | 当前未接入 | 能力取决于系统公开接口 | 待验证 |
 
 详细条件与适用范围见[使用指南](user-guide.md#当前支持范围)。
 
@@ -263,7 +265,9 @@ HDC 进程退出 0 仅表示传输层结果，不能据此确认设备动作成�
 
 API 26 手机的 `uitest help` 提供了按包 `-b`、窗口 `-w` 缩小布局范围的参数，没有提供按控件 ID 直接查询的命令。官方 TestKit 的 `Driver.findComponent` 可以按 ID 查找，但需要受支持的测试端环境。兼容主机当前的 HDC/UITest 入口时，先使用完整树与已有选择器。按窗口取树适合做单窗口实验，启用前要验证弹窗、输入法和跨窗口定位。[官方 UITest 接口](https://github.com/openharmony/docs/blob/master/zh-cn/application-dev/application-test/uitest-guidelines.md)
 
-HarmonyOS 的 Flow 失败或记录到设备错误时，会在收尾查询一次目标应用的系统故障事件。查询时间窗覆盖本次 Flow，总预算最多 6 秒。事件按应用和时间筛选，崩溃归因和归档的故障摘要使用同一结果。取消或设备命令超时后会跳过查询，避免给未确认的设备会话增加命令。需要检查成功 Flow 时，可设置 `MAESTRO_HARMONYOS_STRICT_FAULT_DIAGNOSTICS=true`。该模式把查到的应用崩溃计为失败。查询不可用时保留原结果，在日志记录诊断受限。
+HarmonyOS 的 Flow 失败或记录到设备错误时，驱动在收尾校准设备时钟，向 HiSysEvent 跨域查询一次本轮时间窗内的 FAULT，最多读取 256 条，再按应用和发生时间筛选。设备校时和查询共用一个截止时间，取配置的命令超时与 15 秒中的较小值。日志分别记录校时和查询耗时。崩溃归因和故障附件共用筛选结果。
+
+普通成功 Flow 会跳过故障查询。设置 `MAESTRO_HARMONYOS_STRICT_FAULT_DIAGNOSTICS=true` 后，成功路径也会检查，并将实测到的应用崩溃记为失败。取消或未确认的设备命令超时会跳过查询。诊断本身超时、响应异常或设备拒绝读取时，保留原 Flow 结果，并在故障附件中标明诊断状态。
 
 采样返回后再次检查截止时间；超过窗口的结果不能判为稳定。最后一次采样可能超过窗口，仍受单次查询预算及已有进程终止、清理预算约束；窗口不是整个调用的硬实时上限。0 毫秒窗口不发送查询，调用方传入的旧布局不能替代两个新采样。
 
@@ -277,7 +281,7 @@ HarmonyOS 的 Flow 失败或记录到设备错误时，会在收尾查询一次�
 
 通用 CI 已在独立的 API 22 模拟器上安装固定签名的 HAP，核对安装回执后执行 Flow。流程编排中的 `launchApp` 对应应用启动。现有 Maestro YAML 模型没有安装 HAP 的命令；加入安装步骤需要新增语法，或新增直接受控的准备入口。安装超时、任务取消或异常退出后还需核对包和版本，不能只凭 HDC 进程退出认定设备状态已恢复。
 
-建议先提取主机安装入口供 CI 和本地准备复用。输入为显式设备、普通文件路径、预期包名、版本和 SHA-256，安装前校验文件及设备租约。安装完成需同时确认 HDC 回执和 `bm dump` 中的包信息。覆盖安装由调用方显式选择，失败或超时后按既有会话规则阻止接管并核对实际安装状态。常规 YAML 继续直接启动已准备的应用。[官方 HAP 安装说明](https://github.com/openharmony/docs/blob/master/en/application-dev/quick-start/hap-package.md)
+CLI 与 CI 可在运行前共用 `harmonyos-prepare-app`。命令复制并校验本地 HAP，读取其中的版本，取得设备会话后再调用 HDC。确认 HDC 回执及 `bm dump` 中的包名和版本后，随设备会话释放结果输出回执。覆盖安装由调用方显式选择。安装结果未知时保留会话的恢复记录。 [调用示例](user-guide.md#准备签名-hap) · [官方 HAP 安装说明](https://github.com/openharmony/docs/blob/master/en/application-dev/quick-start/hap-package.md)
 
 ## 8. 录制桥接与 YAML 生成
 

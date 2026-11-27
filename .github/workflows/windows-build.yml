@@ -61,9 +61,26 @@ jobs:
             $escaped = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error::$escaped"
           }
-      - name: Upload build evidence
+      - name: Upload Windows build evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-build
-          path: artifacts/ci-host/
+          name: windows-evidence
+          path: |
+            artifacts/ci-host/
+            !artifacts/ci-host/maestro-harmonyos-cli.zip
+            !artifacts/ci-host/*.vsix
+      - name: Upload Windows CLI
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-cli
+          path: artifacts/ci-host/maestro-harmonyos-cli.zip
+          compression-level: 0
+          if-no-files-found: error
+      - name: Upload VS Code extension
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-vsix
+          path: artifacts/ci-host/*.vsix
+          compression-level: 0
+          if-no-files-found: error

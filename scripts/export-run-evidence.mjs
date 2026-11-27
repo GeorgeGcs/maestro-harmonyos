@@ -178,14 +178,12 @@ export async function buildEvidenceReport(attempt) {
   <main><h2>步骤与证据</h2>${parts.join('') || '<p>本次运行没有步骤证据。</p>'}</main></html>`;
 }
 
-async function main() {
-  const { values } = parseArgs({ options: { attempt: { type: 'string' }, output: { type: 'string' }, help: { type: 'boolean' } } });
-  if (values.help) return console.log('Usage: node scripts/export-run-evidence.mjs --attempt <runs/runId/attemptId> --output <report.html|report.zip>');
-  if (!values.attempt || !values.output || !/\.(?:html|zip)$/i.test(values.output)) {
-    throw new Error('Pass --attempt and a new --output ending in .html or .zip.');
+export async function exportRunEvidence(attempt, destination) {
+  if (!attempt || !destination || !/\.(?:html|zip)$/i.test(destination)) {
+    throw new Error('Choose an attempt and a new output ending in .html or .zip.');
   }
-  const output = path.resolve(values.output);
-  const html = await buildEvidenceReport(values.attempt);
+  const output = path.resolve(destination);
+  const html = await buildEvidenceReport(attempt);
   const folder = await fs.mkdtemp(path.join(path.dirname(output), '.maestro-run-report-'));
   try {
     const content = path.join(folder, 'content');
@@ -203,7 +201,13 @@ async function main() {
     // Delete only the fresh scratch tree allocated by mkdtemp above.
     await fs.rm(folder, { recursive: true, force: true });
   }
-  console.log(output);
+  return output;
+}
+
+async function main() {
+  const { values } = parseArgs({ options: { attempt: { type: 'string' }, output: { type: 'string' }, help: { type: 'boolean' } } });
+  if (values.help) return console.log('Usage: node scripts/export-run-evidence.mjs --attempt <runs/runId/attemptId> --output <report.html|report.zip>');
+  console.log(await exportRunEvidence(values.attempt, values.output));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

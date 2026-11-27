@@ -77,6 +77,7 @@ try {
     Invoke-BuildStep build-cli { & (Join-Path $upstream 'gradlew.bat') -p $upstream :maestro-cli:installDist --no-daemon --console=plain }
     $cli = Join-Path $upstream 'maestro-cli/build/install/maestro'
     Invoke-BuildStep cli-version { & (Join-Path $cli 'bin/maestro.bat') --version }
+    Invoke-BuildStep hap-preparation { & (Join-Path $root 'scripts/tests/test-hap-preparation.ps1') -CliDir $cli }
     Invoke-BuildStep build-snapshot { & node (Join-Path $root 'scripts/ci/snapshot-build.mjs') (Join-Path $output 'build-observed.json') $root }
 
     $report.stage = 'extension'

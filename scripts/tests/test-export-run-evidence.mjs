@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { buildEvidenceReport } from '../export-run-evidence.mjs';
+import { buildEvidenceReport, exportRunEvidence } from '../export-run-evidence.mjs';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -70,4 +70,16 @@ test('rejects altered attachment and foreign trace even when copied into the att
   await assert.rejects(buildEvidenceReport(attempt), /Evidence hash differs/);
   const foreign = await fixture(t, true);
   await assert.rejects(buildEvidenceReport(foreign.attempt), /trace is not a version 2 trace for this attempt/);
+});
+
+test('exporting from the recorder writes a new offline report and preserves an existing destination', async t => {
+  const { attempt } = await fixture(t);
+  const directory = path.dirname(attempt);
+  const output = path.join(directory, 'review.html');
+  assert.equal(await exportRunEvidence(attempt, output), output);
+  assert.equal(await fs.readFile(output, 'utf8'), await buildEvidenceReport(attempt));
+  await fs.writeFile(output, 'existing report');
+  await assert.rejects(exportRunEvidence(attempt, output), { code: 'EEXIST' });
+  assert.equal(await fs.readFile(output, 'utf8'), 'existing report');
+  assert.ok(!(await fs.readdir(directory)).some(name => name.startsWith('.maestro-run-report-')));
 });

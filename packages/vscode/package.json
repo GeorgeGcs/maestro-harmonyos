@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://gitcode.com/HarmonyPandaWorkshop/maestro-harmonyos.git"
+    "url": "https://atomgit.com/HarmonyPandaWorkshop/maestro-harmonyos.git"
   },
   "engines": {
     "vscode": "^1.95.0"
@@ -21,6 +21,7 @@
   ],
   "files": [
     "dist/src/*.js",
+    "dist/evidence-report/**/*",
     "media/*.js",
     "media/*.css",
     "snippets/*.json",
@@ -104,6 +105,14 @@
           "default": "",
           "description": "Absolute FFmpeg executable for host-side recording of startRecording/stopRecording steps. Empty uses the CLI environment."
         },
+        "harmonyosRecorder.hostRecordingDeduplicateFrames": {
+          "type": ["boolean", "null"],
+          "scope": "machine",
+          "enum": [null, true, false],
+          "enumItemLabels": ["Inherit CLI environment", "Skip identical frames", "Keep every frame"],
+          "default": null,
+          "description": "Skip consecutive byte-identical frames in host recordings while keeping the original display time. By default the CLI environment controls this setting."
+        },
         "harmonyosRecorder.checkSyntaxOnSave": {
           "type": "boolean",
           "default": false,
@@ -142,7 +151,7 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p .",
+    "compile": "tsc -p . && node copy-evidence-exporter.mjs",
     "test": "npm run compile && node --test dist/test/*.test.js",
     "test:extension": "npm run compile && node dist/test/runExtension.js",
     "vscode:prepublish": "npm run compile",

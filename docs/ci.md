@@ -7,7 +7,7 @@
 模拟器作业按以下顺序执行。CI 平台负责触发、提供 runner 和保存产物。选用同一个 Windows 执行账号，提前准备官方 API 22 镜像、独立模拟器实例、HDC、签名 HAP、JDK、Node.js 和固定版本的构建依赖。干净源码构建从新检出开始，可以复用已校验的依赖缓存。
 
 1. 从新目录检出固定版本源码，校验上游提交与补丁，构建 CLI，并记录实际产物哈希。构建过程见[构建复现](build-reproducibility.md)。
-2. 启动专用 API 22 模拟器，等待系统启动完成并通过 HDC 确认目标。安装哈希已校验的 HAP。
+2. 启动专用 API 22 模拟器，等待系统启动完成并通过 HDC 确认目标。安装哈希已校验的 HAP。使用包含 `harmonyos-prepare-app` 的 CLI 时，按[签名 HAP 准备示例](user-guide.md#准备签名-hap)运行并归档安装回执。
 3. 用本次构建的 CLI 调用 `run-device-suite.ps1` 运行固定的 Flow。
 4. 用 `collect-artifacts.mjs` 收集本次 JUnit、截图和作业结果。核对 `state=released` 与 `resolution.releaseConfirmed=true`，再关闭专用模拟器，确认实例、HDC 端口和目标均已退出。作业取消或超时时，按[平台联调检查](#移植到其他-ci-平台)核对持久设备状态。
 
@@ -35,13 +35,23 @@ node scripts/verify-source-fork.mjs --repository ./path/to/source-fork --output 
 
 [Windows 主机构建](../.github/workflows/windows-build.yml)已在 GitHub 托管 runner 上通过。作业执行 JVM 和插件测试，从固定 Maestro 上游构建 CLI 和 VSIX，并上传日志、JUnit 和校验值。该次作业的 CLI 与 VSIX 下载后已在本机平板通过冒烟，验证了失败 YAML 行、截图与控制台日志的跳转，以及设备释放。[构建记录](https://github.com/GeorgeGcs/maestro-harmonyos/actions/runs/43389838412)
 
+在作业摘要的 **Artifacts** 区按需下载附件。
+
+| 附件 | 内容 |
+| --- | --- |
+| `windows-evidence` | 构建提交、源码摘要、日志、JUnit 和成功构建的 `SHA256SUMS`。构建失败时也归档已有的诊断文件。 |
+| `windows-cli` | Windows CLI ZIP。 |
+| `windows-vsix` | VS Code 插件安装文件。 |
+
+解开 GitHub 提供的外层压缩包，再用同一次作业的 `SHA256SUMS` 核对 CLI ZIP 或 VSIX。较早的作业将三项内容合并归档为 `windows-build`。
+
 [真机冒烟工作流](../.github/workflows/windows-device-smoke.yml)由维护者在私有 CI 仓库的 main 分支手动派发。专用 Windows runner 通过 USB 连接设备，使用下文的工具、套件及设备变量。启用仓库变量 `MAESTRO_WINDOWS_DEVICE_CI_ENABLED` 后，工作流复用相同的设备入口并上传作业摘要。首次接入按下文验证成功、预期失败和取消三种状态。当前远端真机运行待验证。
 
 ## 在 AtomGit Action 上运行
 
 工作流位于 [`.gitcode/workflows`](../.gitcode/workflows/)。需要仓库开通 Action，并在仓库的 Runner 列表确认所用 Windows 标签可调度。下面两份配置仍需用实际远端作业验证。
 
-**主机构建**在 Windows runner 上以 JDK 17 和 Node 22 执行，可手动运行，也会响应 `main` 和 `feat/ci-*` 的推送。入口从新检出回放固定补丁，跑鸿蒙 JVM 测试，构建并启动 CLI，执行插件测试并打包 VSIX。制品 `windows-build` 包含提交、上游及补丁摘要、日志、JUnit、CLI、VSIX 和包校验值。若仓库的托管资源池没有 Windows，可将主机 job 的标签指向已注册的 Windows runner，使用同一个 PowerShell 入口。
+**主机构建**在 Windows runner 上以 JDK 17 和 Node 22 执行，可手动运行，也会响应 `main` 和 `feat/ci-*` 的推送。入口从新检出回放固定补丁，跑鸿蒙 JVM 测试，构建并启动 CLI，执行插件测试并打包 VSIX。AtomGit 工作流将所有产物归档为 `windows-build`。若仓库的托管资源池没有 Windows，可将主机 job 的标签指向已注册的 Windows runner，使用同一个 PowerShell 入口。
 
 **设备冒烟**由维护者手动派发。使用能够连接 HDC 的专用 Windows runner，标签包含 `self-hosted`、`Windows` 和 `maestro-harmonyos-device`，仅运行可信提交。确认已准备专用设备和套件后，将仓库变量 `MAESTRO_WINDOWS_DEVICE_CI_ENABLED` 设为 `true`。Runner 进程应使用同一 Windows 账户，并为每次构建提供干净的 checkout。安装 JDK 17、Node 22.12+、PowerShell 7 和 HDC，在 runner 账户环境中设置以下变量。
 
