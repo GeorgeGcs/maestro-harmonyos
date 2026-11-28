@@ -12099,14 +12099,33 @@ index f3adf5f..fd4c24a 100644
  
              // The on-device CSS query traverses only the matched element (no descendants),
 diff --git a/maestro-client/src/main/java/maestro/Maestro.kt b/maestro-client/src/main/java/maestro/Maestro.kt
-index ddedf17..114b078 100644
+index ddedf17..86797d6 100644
 --- a/maestro-client/src/main/java/maestro/Maestro.kt
 +++ b/maestro-client/src/main/java/maestro/Maestro.kt
-@@ -230,11 +230,30 @@ class Maestro(
+@@ -226,15 +226,48 @@ class Maestro(
+         longPress: Boolean = false,
+         appId: String? = null,
+         tapRepeat: TapRepeat? = null,
+-        waitToSettleTimeoutMs: Int? = null
++        waitToSettleTimeoutMs: Int? = null,
++        cssSelector: String? = null,
++        relativeTapPoint: Point? = null,
      ) {
          LOGGER.info("Tapping on element: ${tapRepeat ?: ""} $element")
  
 -        val settledHierarchy = waitForAppToSettle(initialHierarchy, appId, waitToSettleTimeoutMs)
++        val checkedTap: ((Point, Boolean) -> Unit)? = if (cssSelector != null && driver is maestro.drivers.HarmonyOSDriver) {
++            val nodeId = checkNotNull(element.treeNode.attributes["arkweb-node-id"]) {
++                "Cannot verify the ArkWeb target for CSS selector $cssSelector."
++            }
++            fun(point: Point, hold: Boolean) { driver.tapArkWebTarget(cssSelector, nodeId, point, hold) }
++        } else null
++        if (relativeTapPoint != null) {
++            performTap(relativeTapPoint.x, relativeTapPoint.y, retryIfNoChange, longPress,
++                tapRepeat = tapRepeat, waitToSettleTimeoutMs = waitToSettleTimeoutMs, checkedTap = checkedTap)
++            return
++        }
++
 +        var settleFrom = initialHierarchy
 +        val confirmedTarget = if (driver is maestro.drivers.HarmonyOSDriver &&
 +            !retryIfNoChange && !waitUntilVisible && !longPress && tapRepeat == null && waitToSettleTimeoutMs == null &&
@@ -12135,19 +12154,79 @@ index ddedf17..114b078 100644
              LOGGER.info("Tap aimed via stabilised hierarchy (null settle after a scroll)")
              refreshElementUntilStable(element, initialHierarchy)
          } else {
-@@ -391,6 +410,11 @@ class Maestro(
+@@ -256,7 +289,8 @@ class Maestro(
+             longPress = longPress,
+             initialHierarchy = hierarchyBeforeTap,
+             tapRepeat = tapRepeat,
+-            waitToSettleTimeoutMs = waitToSettleTimeoutMs
++            waitToSettleTimeoutMs = waitToSettleTimeoutMs,
++            checkedTap = checkedTap,
+         )
+ 
+         if (waitUntilVisible) {
+@@ -275,7 +309,8 @@ class Maestro(
+                     retryIfNoChange = false,
+                     waitUntilVisible = false,
+                     longPress = longPress,
+-                    tapRepeat = tapRepeat
++                    tapRepeat = tapRepeat,
++                    cssSelector = cssSelector,
+                 )
+             }
+         }
+@@ -387,16 +422,39 @@ class Maestro(
+         longPress: Boolean = false,
+         initialHierarchy: ViewHierarchy? = null,
+         tapRepeat: TapRepeat? = null,
+-        waitToSettleTimeoutMs: Int? = null
++        waitToSettleTimeoutMs: Int? = null,
++        checkedTap: ((Point, Boolean) -> Unit)? = null,
      ) {
          recentScroll = false // consume the scroll hint (MA-4135)
  
++        val point = Point(x, y)
++        val dispatch: suspend () -> Unit = {
++            val repeats = if (longPress) 1 else tapRepeat?.repeat ?: 1
++            repeat(repeats) {
++                val duration = measureTimeMillis {
++                    runInterruptible(Dispatchers.IO) {
++                        when {
++                            checkedTap != null -> checkedTap(point, longPress)
++                            longPress -> driver.longPress(point)
++                            else -> driver.tap(point)
++                        }
++                    }
++                }
++                if (repeats > 1 && tapRepeat != null) delay((tapRepeat.delay - duration).coerceAtLeast(0))
++            }
++        }
++
 +        if (driver is maestro.drivers.HarmonyOSDriver && !retryIfNoChange) {
-+            hierarchyBasedTap(x, y, false, longPress, initialHierarchy, tapRepeat, waitToSettleTimeoutMs)
++            hierarchyBasedTap(x, y, false, initialHierarchy, waitToSettleTimeoutMs, dispatch)
 +            return
 +        }
 +
          val capabilities = runInterruptible(Dispatchers.IO) { driver.capabilities() }
  
          if (Capability.FAST_HIERARCHY in capabilities) {
-@@ -411,7 +435,7 @@ class Maestro(
+-            hierarchyBasedTap(x, y, retryIfNoChange, longPress, initialHierarchy, tapRepeat, waitToSettleTimeoutMs)
++            hierarchyBasedTap(x, y, retryIfNoChange, initialHierarchy, waitToSettleTimeoutMs, dispatch)
+         } else {
+-            screenshotBasedTap(x, y, retryIfNoChange, longPress, initialHierarchy, tapRepeat, waitToSettleTimeoutMs)
++            screenshotBasedTap(x, y, retryIfNoChange, initialHierarchy, waitToSettleTimeoutMs, dispatch)
+         }
+     }
+ 
+@@ -404,33 +462,17 @@ class Maestro(
+         x: Int,
+         y: Int,
+         retryIfNoChange: Boolean = false,
+-        longPress: Boolean = false,
+         initialHierarchy: ViewHierarchy? = null,
+-        tapRepeat: TapRepeat? = null,
+-        waitToSettleTimeoutMs: Int? = null
++        waitToSettleTimeoutMs: Int? = null,
++        dispatch: suspend () -> Unit,
      ) {
          LOGGER.info("Tapping at ($x, $y) using hierarchy based logic for wait")
  
@@ -12156,7 +12235,64 @@ index ddedf17..114b078 100644
  
          val retries = getNumberOfRetries(retryIfNoChange)
          repeat(retries) {
-@@ -558,17 +582,25 @@ class Maestro(
+-            if (longPress) {
+-                runInterruptible(Dispatchers.IO) { driver.longPress(Point(x, y)) }
+-            } else if (tapRepeat != null) {
+-                for (i in 0 until tapRepeat.repeat) {
+-
+-                    // subtract execution duration from tap delay
+-                    val duration = measureTimeMillis {
+-                        runInterruptible(Dispatchers.IO) { driver.tap(Point(x, y)) }
+-                    }
+-                    val tapDelay = if (duration >= tapRepeat.delay) 0 else tapRepeat.delay - duration
+-
+-                    if (tapRepeat.repeat > 1) delay(tapDelay) // do not wait for single taps
+-                }
+-            } else {
+-                runInterruptible(Dispatchers.IO) { driver.tap(Point(x, y)) }
+-            }
++            dispatch()
+             val hierarchyAfterTap = waitForAppToSettle(waitToSettleTimeoutMs = waitToSettleTimeoutMs)
+ 
+             if (hierarchyAfterTap == null || hierarchyBeforeTap != hierarchyAfterTap) {
+@@ -444,10 +486,9 @@ class Maestro(
+         x: Int,
+         y: Int,
+         retryIfNoChange: Boolean = false,
+-        longPress: Boolean = false,
+         initialHierarchy: ViewHierarchy? = null,
+-        tapRepeat: TapRepeat? = null,
+-        waitToSettleTimeoutMs: Int? = null
++        waitToSettleTimeoutMs: Int? = null,
++        dispatch: suspend () -> Unit,
+     ) {
+         LOGGER.info("Try tapping at ($x, $y) using hierarchy based logic for wait")
+ 
+@@ -456,22 +497,7 @@ class Maestro(
+ 
+         val retries = getNumberOfRetries(retryIfNoChange)
+         repeat(retries) {
+-            if (longPress) {
+-                runInterruptible(Dispatchers.IO) { driver.longPress(Point(x, y)) }
+-            } else if (tapRepeat != null) {
+-                for (i in 0 until tapRepeat.repeat) {
+-
+-                    // subtract execution duration from tap delay
+-                    val duration = measureTimeMillis {
+-                        runInterruptible(Dispatchers.IO) { driver.tap(Point(x, y)) }
+-                    }
+-                    val tapDelay = if (duration >= tapRepeat.delay) 0 else tapRepeat.delay - duration
+-
+-                    if (tapRepeat.repeat > 1) delay(tapDelay) // do not wait for single taps
+-                }
+-            } else {
+-                runInterruptible(Dispatchers.IO) { driver.tap(Point(x, y)) }
+-            }
++            dispatch()
+             val hierarchyAfterTap = waitForAppToSettle(waitToSettleTimeoutMs = waitToSettleTimeoutMs)
+ 
+             if (hierarchyBeforeTap != hierarchyAfterTap) {
+@@ -558,17 +584,25 @@ class Maestro(
  
      suspend fun findElementsByOnDeviceQuery(
          timeoutMs: Long,
@@ -12186,7 +12322,7 @@ index ddedf17..114b078 100644
      }
  
      suspend fun allElementsMatching(filter: ElementFilter): List<TreeNode> {
-@@ -798,6 +830,44 @@ class Maestro(
+@@ -798,6 +832,44 @@ class Maestro(
          // Mirrors IOSDriver.SCREEN_SETTLE_TIMEOUT_MS (3000ms): the element-stability wait
          // stands in for the settle confirmation the iOS driver could not give, so keep the
          // two budgets aligned when tuning either.
@@ -12367,10 +12503,10 @@ index b2465ec..be6ffe2 100644
  
 diff --git a/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
 new file mode 100644
-index 0000000..82c7b83
+index 0000000..10a576d
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/drivers/HarmonyOSDriver.kt
-@@ -0,0 +1,717 @@
+@@ -0,0 +1,726 @@
 +package maestro.drivers
 +
 +import maestro.Capability
@@ -12595,6 +12731,15 @@ index 0000000..82c7b83
 +    override fun longPress(point: Point) {
 +        validatePoint(point, deviceInfo())
 +        input("longClick", point.x.toString(), point.y.toString())
++    }
++
++    internal fun tapArkWebTarget(selector: String, nodeId: String, point: Point, longPress: Boolean) {
++        requireOpen()
++        validatePoint(point, deviceInfo())
++        query {
++            device.awaitCssTapHit(selector, nodeId, point, config.commandTimeout)
++            input(if (longPress) "longClick" else "click", point.x.toString(), point.y.toString())
++        }
 +    }
 +
 +    override fun pressKey(code: KeyCode) {
@@ -13132,13 +13277,14 @@ index 0000000..d740aef
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
 new file mode 100644
-index 0000000..a95a8c2
+index 0000000..9e6f7af
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HarmonyOSDevice.kt
-@@ -0,0 +1,35 @@
+@@ -0,0 +1,38 @@
 +package maestro.harmonyos.driver
 +
 +import maestro.TreeNode
++import maestro.Point
 +import maestro.ScreenRecording
 +import okio.Sink
 +import java.nio.file.Path
@@ -13162,6 +13308,8 @@ index 0000000..a95a8c2
 +    fun hierarchy(timeout: Duration): TreeNode
 +    fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<TreeNode> = emptyList()): List<TreeNode> =
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support CSS selectors.")
++    fun awaitCssTapHit(selector: String, nodeId: String, point: Point, timeout: Duration): Unit =
++        throw UnsupportedOperationException("This HarmonyOS device backend cannot verify the ArkWeb CSS tap on '$selector'.")
 +    fun installHap(hap: HarmonyOSHap, replace: Boolean, timeout: Duration): Unit =
 +        throw UnsupportedOperationException("This HarmonyOS device backend does not support HAP installation.")
 +    fun setAppPermission(appId: String, permission: String, allow: Boolean, timeout: Duration): Unit =
@@ -14484,12 +14632,13 @@ index 0000000..35a28d5
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..358267e
+index 0000000..0bee6e2
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
-@@ -0,0 +1,623 @@
+@@ -0,0 +1,673 @@
 +package maestro.harmonyos.driver
 +
++import maestro.Point
 +import maestro.TreeNode
 +import maestro.ScreenRecording
 +import okio.Sink
@@ -14756,6 +14905,7 @@ index 0000000..358267e
 +        verifiedArkWebLayout = null
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        val nativeTree = nativeHierarchy(deadline, timeout)
++        val nativeReadAt = System.nanoTime()
 +        val target = findArkWebTarget(nativeTree) ?: return arkWebFallback(nativeTree)
 +        val dom = try {
 +            readArkWeb(target, deadline, timeout) { bounds, budget, verify -> snapshot(bounds, budget, verify) }
@@ -14769,7 +14919,7 @@ index 0000000..358267e
 +        } ?: return arkWebFallback(nativeTree)
 +
 +        reportArkWebSource("DOM")
-+        verifiedArkWebLayout = VerifiedArkWebLayout(target, dom)
++        verifiedArkWebLayout = VerifiedArkWebLayout(target, dom, nativeReadAt)
 +        fun merge(node: TreeNode): TreeNode = if (node === target.node) {
 +            node.copy(children = listOf(dom))
 +        } else {
@@ -14792,6 +14942,50 @@ index 0000000..358267e
 +        return readArkWeb(target, deadline, timeout) { bounds, budget, verify ->
 +            queryCss(selector, bounds, budget, verify)
 +        } ?: error("CSS query could not read the verified ArkWeb page.")
++    }
++
++    override fun awaitCssTapHit(selector: String, nodeId: String, point: Point, timeout: Duration) {
++        val label = "ArkWeb CSS tap on '$selector'"
++        val window = arkWebWindow?.takeIf { it.isNotBlank() } ?: error("$label: verified WebView window unavailable.")
++        val deadline = System.nanoTime() + timeout.toNanos()
++        fun currentTarget(): ArkWebView =
++            findArkWebTarget(nativeHierarchy(deadline, remainingBudget(deadline, timeout)))
++                ?: error("$label: native WebView unavailable.")
++        fun checkPoint(target: ArkWebView): String {
++            check(target.node.attributes["hostWindowId"] == window) { "$label: native WebView window changed." }
++            val (left, top, right, bottom) = target.bounds
++            check(point.x in left until right && point.y in top until bottom) { "$label: requested point outside native WebView." }
++            return readArkWeb(target, deadline, timeout) { bounds, remaining, verify ->
++                tapHit(selector, nodeId, point, bounds, remaining, verify)
++            } ?: error("$label: page or hit target unavailable.")
++        }
++        var target = verifiedArkWebLayout?.freshNativeTarget() ?: currentTarget()
++        var pollUntil = deadline
++        var obstruction: String? = null
++        while (true) {
++            checkInterrupted()
++            if (System.nanoTime() >= pollUntil) error("$label: ${obstruction ?: "hit check timed out"}.")
++            var hit = checkPoint(target)
++            if (hit == "hit" && obstruction != null) {
++                // DOM polling doesn't need another native dump. Refresh the coordinate mapping once
++                // the obstruction lifts, then recheck the point before allowing a physical tap.
++                target = currentTarget()
++                hit = checkPoint(target)
++            }
++            checkInterrupted()
++            if (hit == "hit") {
++                check(System.nanoTime() < deadline) { "$label: hit check timed out." }
++                return
++            }
++            check(hit.startsWith("blocked by ") || hit == "no element at tap point") { "$label: $hit." }
++            if (obstruction == null) {
++                logger.info("{}: {}", label, hit)
++                pollUntil = minOf(deadline, System.nanoTime() + Duration.ofSeconds(3).toNanos())
++            }
++            obstruction = hit
++            val pause = minOf(Duration.ofMillis(100).toNanos(), pollUntil - System.nanoTime())
++            if (pause > 0) java.util.concurrent.TimeUnit.NANOSECONDS.sleep(pause)
++        }
 +    }
 +
 +    override fun installHap(hap: HarmonyOSHap, replace: Boolean, timeout: Duration) {
@@ -14855,7 +15049,7 @@ index 0000000..358267e
 +
 +    private data class ArkWebView(val node: TreeNode, val bounds: List<Int>)
 +
-+    private class VerifiedArkWebLayout(val target: ArkWebView, dom: TreeNode) {
++    private class VerifiedArkWebLayout(val target: ArkWebView, dom: TreeNode, private val nativeReadAt: Long) {
 +        private val capturedAt = System.nanoTime()
 +        // Bounds filtering keeps the original attributes map even when it copies a node.
 +        private val attributes by lazy {
@@ -14865,6 +15059,10 @@ index 0000000..358267e
 +        fun matches(nodes: List<TreeNode>): Boolean = nodes.isNotEmpty() &&
 +            System.nanoTime() - capturedAt <= Duration.ofMillis(250).toNanos() &&
 +            nodes.any { it.attributes in attributes }
++
++        fun freshNativeTarget(): ArkWebView? = target.takeIf {
++            System.nanoTime() - nativeReadAt <= Duration.ofMillis(250).toNanos()
++        }
 +    }
 +
 +    private fun findArkWebTarget(nativeTree: TreeNode): ArkWebView? {
@@ -18014,13 +18212,14 @@ index 0000000..a733559
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
 new file mode 100644
-index 0000000..dafc1a1
+index 0000000..573429c
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,224 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import maestro.Point
 +import maestro.TreeNode
 +import maestro.harmonyos.driver.HarmonyOSArkWebTarget
 +import okhttp3.OkHttpClient
@@ -18089,6 +18288,20 @@ index 0000000..dafc1a1
 +        return nodes.filterNot { it.isNull }.map { json.treeToValue(it, TreeNode::class.java) }
 +    }
 +
++    fun tapHit(
++        selector: String,
++        nodeId: String,
++        point: Point,
++        bounds: List<Int>,
++        timeout: Duration,
++        verifyForward: (Duration) -> Boolean,
++    ): String? {
++        val operation = "window.maestro.arkWebTapHit(${json.writeValueAsString(selector)}, " +
++            "${json.writeValueAsString(nodeId)}, ${point.x}, ${point.y})"
++        val reply = read(bounds, timeout, operation, verifyForward) ?: return null
++        return json.readTree(reply)?.textValue()?.takeIf { it.isNotBlank() }
++    }
++
 +    @Synchronized
 +    private fun read(
 +        bounds: List<Int>,
@@ -18133,7 +18346,7 @@ index 0000000..dafc1a1
 +            connection = active
 +        }
 +        val (left, top, right, bottom) = bounds
-+        val capture = "$script; maestro.viewportX = $left; maestro.viewportY = $top;" +
++        val capture = "$script; window.maestro.arkWebTapIdentityEnabled = true; maestro.viewportX = $left; maestro.viewportY = $top;" +
 +            " maestro.viewportWidth = ${right - left}; maestro.viewportHeight = ${bottom - top};" +
 +            " JSON.stringify($operation, window.maestro.cycleSafeReplacer());"
 +        val expression = if (target == null) capture else {
@@ -18796,10 +19009,10 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 00000000..1f28adc7
+index 0000000..97e2f7e
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,848 @@
+@@ -0,0 +1,877 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
@@ -18827,6 +19040,32 @@ index 00000000..1f28adc7
 +import javax.imageio.ImageIO
 +
 +class HarmonyOSDriverTest {
++    @Test fun `CSS repeat checks the original target before each physical dispatch`() {
++        val device = Device()
++        val driver = driver(device)
++        val point = Point(9, 16)
++        val node = TreeNode(mutableMapOf("arkweb-node-id" to "doc-7", "bounds" to "[0,0][20,20]"))
++        var checks = 0
++        device.cssHit = { selector, nodeId, actual ->
++            assertThat(selector).isEqualTo(".action")
++            assertThat(nodeId).isEqualTo("doc-7")
++            assertThat(actual).isEqualTo(point)
++            if (++checks == 2) error("blocked by dialog")
++        }
++        driver.open()
++        try {
++            val failure = assertThrows(IllegalStateException::class.java) {
++                runBlocking { Maestro(driver).tap(node.toUiElement(), ViewHierarchy(node), cssSelector = ".action",
++                    relativeTapPoint = point, tapRepeat = maestro.TapRepeat(2, 0)) }
++            }
++            assertThat(failure.message).contains("blocked by dialog")
++            assertThat(checks).isEqualTo(2)
++            assertThat(device.commands).containsExactly(listOf("uitest", "uiInput", "click", "9", "16"))
++        } finally {
++            driver.close()
++        }
++    }
++
 +    @Test fun `tap target must remain unique visible enabled and in the same window`() {
 +        val child = TreeNode(mutableMapOf("hostWindowId" to "1", "bounds" to "[5,5][15,15]"))
 +        val target = TreeNode(mutableMapOf(
@@ -19587,6 +19826,9 @@ index 00000000..1f28adc7
 +        var focused: () -> Boolean = { true }
 +        var focusSamples = 0
 +        var keyboard: () -> Boolean = { false }
++        var cssHit: (String, String, Point) -> Unit = { _, _, _ -> error("Unexpected CSS hit test") }
++        override fun awaitCssTapHit(selector: String, nodeId: String, point: Point, timeout: Duration) =
++            cssHit(selector, nodeId, point)
 +        override fun keyboardVisible(timeout: Duration): Boolean = keyboard()
 +        override fun hasAppFocus(appId: String, timeout: Duration): Boolean {
 +            focusSamples++
@@ -25468,14 +25710,15 @@ index 00000000..c7f5502f
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
 new file mode 100644
-index 0000000..7c167f5
+index 0000000..611cc8f
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,190 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
 +import com.google.common.truth.Truth.assertThat
++import maestro.Point
 +import maestro.harmonyos.driver.HarmonyOSArkWebTarget
 +import okhttp3.WebSocket
 +import okhttp3.WebSocketListener
@@ -25486,6 +25729,48 @@ index 0000000..7c167f5
 +import java.time.Duration
 +
 +class ArkWebLoopbackTest {
++    @Test
++    fun `tap hit carries the original node and tap coordinates to the verified page`() {
++        val json = ObjectMapper()
++        val selector = """[data-name="first"]"""
++        val nodeId = "doc-1"
++        val operation = "window.maestro.arkWebTapHit(${json.writeValueAsString(selector)}, \"doc-1\", 79, 131)"
++        val expressions = java.util.concurrent.CopyOnWriteArrayList<String>()
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            server.enqueue(MockResponse().setBody(
++                """[{"type":"page","url":"https://example.test/two","webSocketDebuggerUrl":"ws://127.0.0.1:${server.port}/devtools/page/two"}]"""
++            ))
++            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
++                override fun onMessage(webSocket: WebSocket, text: String) {
++                    val request = json.readTree(text)
++                    expressions += request.path("params").path("expression").asText()
++                    val reply = if (expressions.size == 1) "blocked by div#overlay" else "hit"
++                    webSocket.send(json.writeValueAsString(mapOf(
++                        "id" to request.path("id").asLong(),
++                        "result" to mapOf("result" to mapOf("value" to json.writeValueAsString(reply))),
++                    )))
++                }
++            }))
++            val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++            ArkWebLoopback(server.port, target).use { browser ->
++                fun hit(forward: Boolean) = browser.tapHit(selector, nodeId, Point(79, 131),
++                    listOf(5, 30, 105, 230), Duration.ofSeconds(2)) { forward }
++                assertThat(hit(true)).isEqualTo("blocked by div#overlay")
++                assertThat(hit(true)).isEqualTo("hit")
++                assertThat(hit(false)).isNull()
++                assertThat(expressions).hasSize(2)
++                for (expression in expressions) {
++                    assertThat(expression).contains("window.location.href === \"https://example.test/two\"")
++                    assertThat(expression).contains("?.content === \"probe-secondary\"")
++                    assertThat(expression).contains("window.maestro.arkWebTapIdentityEnabled = true")
++                    assertThat(expression).contains("maestro.viewportX = 5; maestro.viewportY = 30;")
++                    assertThat(expression).contains(operation)
++                }
++            }
++        }
++    }
++
 +    @Test
 +    fun `CSS separates matches no matches and an invalid selector from a lost target`() {
 +        val json = ObjectMapper()
@@ -26410,7 +26695,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..beae7e9 100644
+index c388689..9d71186 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -20,7 +20,9 @@
@@ -27108,7 +27393,52 @@ index c388689..beae7e9 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1482,6 +1729,8 @@ class Orchestra(
+@@ -1392,32 +1639,18 @@ class Orchestra(
+         val result = findElement(command.selector, optional = command.optional)
+ 
+ 
+-        // Handle element-relative tap if specified
+-        val relativePoint = command.relativePoint
+-        if (relativePoint != null) {
+-            val tapPoint = calculateElementRelativePoint(result.element, relativePoint)      
+-                  
+-            maestro.tap(
+-                x = tapPoint.x,
+-                y = tapPoint.y,
+-                retryIfNoChange = retryIfNoChange,
+-                longPress = command.longPress ?: false,
+-                tapRepeat = command.repeat,
+-                waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
+-            )
+-        } else {
+-            // Default behavior: tap at element center
+-            maestro.tap(
+-                element = result.element,
+-                initialHierarchy = result.hierarchy,
+-                retryIfNoChange = retryIfNoChange,
+-                waitUntilVisible = waitUntilVisible,
+-                longPress = command.longPress ?: false,
+-                appId = config?.appId,
+-                tapRepeat = command.repeat,
+-                waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
+-            )
+-        }
++        maestro.tap(
++            element = result.element,
++            initialHierarchy = result.hierarchy,
++            retryIfNoChange = retryIfNoChange,
++            waitUntilVisible = waitUntilVisible,
++            longPress = command.longPress ?: false,
++            appId = config?.appId,
++            tapRepeat = command.repeat,
++            waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
++            cssSelector = command.selector.css,
++            relativeTapPoint = command.relativePoint?.let { calculateElementRelativePoint(result.element, it) },
++        )
+ 
+         return true
+     }
+@@ -1482,6 +1715,8 @@ class Orchestra(
          selector: ElementSelector,
          optional: Boolean,
          timeoutMs: Long? = null,
@@ -27117,7 +27447,7 @@ index c388689..beae7e9 100644
      ): FindElementResult {
          val timeout =
              timeoutMs ?: adjustedToLatestInteraction(
-@@ -1496,8 +1745,7 @@ class Orchestra(
+@@ -1496,8 +1731,7 @@ class Orchestra(
              var fullHierarchy = ViewHierarchy(TreeNode())
              val found = MaestroTimer.withTimeoutSuspend(timeout) {
                  fullHierarchy = maestro.viewHierarchy()
@@ -27127,7 +27457,7 @@ index c388689..beae7e9 100644
              }
              if (found == null) {
                  // Both "parent never matched" and "parent matched but child isn't in it" leave `found`
-@@ -1535,7 +1783,7 @@ class Orchestra(
+@@ -1535,7 +1769,7 @@ class Orchestra(
                      debugMessage = childOfDebugMessage
                  )
              }
@@ -27136,7 +27466,7 @@ index c388689..beae7e9 100644
          }
  
  
-@@ -1552,7 +1800,7 @@ class Orchestra(
+@@ -1552,7 +1786,7 @@ class Orchestra(
              filter = filterFunc
          ) ?: throw MaestroException.ElementNotFound(
              "Element not found: $description",
@@ -27145,7 +27475,7 @@ index c388689..beae7e9 100644
              debugMessage = exceptionDebugMessage
          )
      }
-@@ -1605,6 +1853,19 @@ class Orchestra(
+@@ -1605,6 +1839,19 @@ class Orchestra(
          return listOfNotNull(whatFailed, elsewhere).joinToString(" ") + "\n\nPossible causes:\n" + causes
      }
  
@@ -27165,7 +27495,7 @@ index c388689..beae7e9 100644
      private fun resolveParentHierarchy(
          selector: ElementSelector?,
          hierarchy: ViewHierarchy,
-@@ -1740,17 +2001,23 @@ class Orchestra(
+@@ -1740,17 +1987,23 @@ class Orchestra(
                  basicFilters += Filters.focused(it)
              }
  
@@ -27198,7 +27528,7 @@ index c388689..beae7e9 100644
          }
          
          val allFilters = listOf(basicFilter) + relativeFilters
-@@ -1822,10 +2089,17 @@ class Orchestra(
+@@ -1822,10 +2075,17 @@ class Orchestra(
          return true
      }
  
@@ -27220,7 +27550,7 @@ index c388689..beae7e9 100644
  
      private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
          val result = findElement(command.selector, optional = command.optional)
-@@ -1871,7 +2145,8 @@ class Orchestra(
+@@ -1871,7 +2131,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
@@ -29675,3 +30005,179 @@ index 0000000..c15989c
 +        }
 +    }
 +}
+diff --git a/maestro-client/src/main/resources/maestro-web.js b/maestro-client/src/main/resources/maestro-web.js
+index 6dc68a9..a479de1 100644
+--- a/maestro-client/src/main/resources/maestro-web.js
++++ b/maestro-client/src/main/resources/maestro-web.js
+@@ -89,6 +89,24 @@
+         return typeof attribute === 'string' && attribute !== '' ? attribute : null
+     }
+ 
++    // ArkWeb reinjects this script for every read. Keep identity across reads without retaining detached nodes.
++    const arkWebNodeId = (node) => {
++        if (!maestro.arkWebNodeIds) {
++            maestro.arkWebNodeIds = {
++                nodes: new WeakMap(),
++                prefix: crypto.getRandomValues(new Uint32Array(4)).join('-'),
++                next: 0,
++            }
++        }
++        const state = maestro.arkWebNodeIds
++        let id = state.nodes.get(node)
++        if (!id) {
++            id = state.prefix + '-' + (++state.next)
++            state.nodes.set(node, id)
++        }
++        return id
++    }
++
+     const traverse = (node, includeChildren = true, iframeOffsetX = 0, iframeOffsetY = 0) => {
+       if (!node || isInvalidTag(node)) return null
+ 
+@@ -129,6 +147,9 @@
+           text: getNodeText(node),
+           bounds: getNodeBounds(node, iframeOffsetX, iframeOffsetY),
+       }
++      if (maestro.arkWebTapIdentityEnabled) {
++          attributes['arkweb-node-id'] = arkWebNodeId(node)
++      }
+ 
+       // If this is an <option> element, we only want to include it if the parent <select> element is focused.
+       if (node.tagName.toLowerCase() === 'option' && !node.parentElement.matches(':focus-within')) {
+@@ -195,6 +216,27 @@
+         });
+     }
+ 
++    maestro.arkWebTapHit = (selector, nodeId, physicalX, physicalY) => {
++        if (!maestro.arkWebTapIdentityEnabled || !nodeId) return 'target identity unavailable'
++        const nodes = maestro.arkWebNodeIds?.nodes
++        const target = Array.from(document.querySelectorAll(selector)).find(node => nodes?.get(node) === nodeId)
++        if (!target) return 'target changed or no longer matches'
++
++        const width = maestro.viewportWidth || window.innerWidth
++        const height = maestro.viewportHeight || window.innerHeight
++        const x = (physicalX - maestro.viewportX) * window.innerWidth / width
++        const y = (physicalY - maestro.viewportY) * window.innerHeight / height
++        if (!(x >= 0 && x < window.innerWidth && y >= 0 && y < window.innerHeight)) {
++            return 'tap point outside WebView'
++        }
++        const receiver = document.elementFromPoint(x, y)
++        if (!receiver) return 'no element at tap point'
++        if (Node.prototype.contains.call(target, receiver)) return 'hit'
++        const tag = receiver.localName.slice(0, 32)
++        const id = Element.prototype.getAttribute.call(receiver, 'id') || ''
++        return 'blocked by ' + tag + (id ? '#' + id.slice(0, 64).replace(/[^a-zA-Z0-9_-]/g, '_') : '')
++    }
++
+     maestro.tapOnSyntheticElement = (x, y) => {
+         // This function is used to tap on synthetic elements like <option> that do not have a visual representation.
+         // It will return the bounds of the synthetic element in a special coordinate space.
+diff --git a/maestro-client/src/test/js/arkweb-tap-hit.test.cjs b/maestro-client/src/test/js/arkweb-tap-hit.test.cjs
+new file mode 100644
+index 0000000..90acae8
+--- /dev/null
++++ b/maestro-client/src/test/js/arkweb-tap-hit.test.cjs
+@@ -0,0 +1,103 @@
++const { test } = require('node:test');
++const assert = require('node:assert/strict');
++const { webcrypto } = require('node:crypto');
++const { readFileSync } = require('node:fs');
++const path = require('node:path');
++const vm = require('node:vm');
++
++const script = readFileSync(path.resolve(__dirname, '../../main/resources/maestro-web.js'), 'utf8');
++const selector = '.action';
++
++class Element {
++    constructor(tag, id = '', children = []) {
++        this.localName = tag;
++        this.tagName = tag.toUpperCase();
++        this.id = id;
++        this.attributes = {};
++        this.children = children;
++    }
++    getAttribute(name) { return name === 'id' ? this.id : null; }
++    getBoundingClientRect() { return { x: 10, y: 20, width: 40, height: 40 }; }
++    contains(other) { return this === other || this.children.some(child => child.contains(other)); }
++}
++
++function page() {
++    const label = new Element('span');
++    const button = new Element('button', '', [label]);
++    const sibling = new Element('button');
++    const overlay = new Element('div', 'cover');
++    const body = new Element('body', '', [sibling, button, overlay]);
++    const hits = { receiver: label, points: [], matches: [sibling, button] };
++    const document = {
++        body,
++        readyState: 'complete',
++        querySelectorAll(css) { return css === selector ? hits.matches : []; },
++        elementFromPoint(x, y) { hits.points.push([x, y]); return hits.receiver; },
++    };
++    const window = { innerWidth: 200, innerHeight: 100 };
++    function inject(arkWeb = true) {
++        vm.runInNewContext(script, { window, document, Node: Element, Element, crypto: webcrypto });
++        Object.assign(window.maestro, { viewportX: 30, viewportY: 400, viewportWidth: 600, viewportHeight: 200 });
++        window.maestro.arkWebTapIdentityEnabled = arkWeb;
++        return window.maestro;
++    }
++    return { window, inject, hits, button, sibling, overlay };
++}
++
++test('only ArkWeb opts into stable DOM identity across queries and reinjection', () => {
++    const { inject } = page();
++    const first = inject(false).queryCss(selector);
++    assert.equal(first[1].attributes['arkweb-node-id'], undefined);
++    const web = inject();
++    const id = web.queryCss(selector)[1].attributes['arkweb-node-id'];
++    assert.ok(id);
++    assert.equal(inject().getContentDescription().children[1].attributes['arkweb-node-id'], id);
++    assert.notEqual(web.queryCss(selector)[0].attributes['arkweb-node-id'], id);
++});
++
++test('checks the actual physical tap point, including offsets and independent viewport scales', () => {
++    const { inject, hits, button } = page();
++    const web = inject();
++    const match = web.queryCss(selector)[1].attributes;
++    assert.equal(match.bounds, '[60,440][180,520]');
++    assert.equal(web.arkWebTapHit(selector, match['arkweb-node-id'], 120, 480), 'hit'); // label inside the button
++    hits.receiver = button;
++    assert.equal(web.arkWebTapHit(selector, match['arkweb-node-id'], 90, 450), 'hit');
++    assert.deepEqual(hits.points, [[30, 40], [20, 25]]);
++});
++
++test('overlays and another match under the pointer block the originally selected button', () => {
++    const { inject, hits, overlay, sibling } = page();
++    const web = inject();
++    const id = web.queryCss(selector)[1].attributes['arkweb-node-id'];
++    hits.receiver = overlay;
++    assert.equal(web.arkWebTapHit(selector, id, 120, 480), 'blocked by div#cover');
++    hits.receiver = sibling;
++    assert.equal(web.arkWebTapHit(selector, id, 120, 480), 'blocked by button');
++});
++
++test('a replacement or a new page at the same location cannot inherit the target identity', () => {
++    const { window, inject, hits } = page();
++    const web = inject();
++    const id = web.queryCss(selector)[1].attributes['arkweb-node-id'];
++    hits.matches[1] = new Element('button');
++    hits.receiver = hits.matches[1];
++    assert.equal(web.arkWebTapHit(selector, id, 120, 480), 'target changed or no longer matches');
++    delete window.maestro;
++    const newPage = inject();
++    newPage.queryCss(selector);
++    assert.equal(newPage.arkWebTapHit(selector, id, 120, 480), 'target changed or no longer matches');
++});
++
++test('out-of-bounds points and missing receivers never pass the hit check', () => {
++    const { inject, hits } = page();
++    const web = inject();
++    const id = web.queryCss(selector)[1].attributes['arkweb-node-id'];
++    for (const [x, y] of [[29, 480], [630, 480], [120, 399], [120, 600], [NaN, 480]]) {
++        assert.equal(web.arkWebTapHit(selector, id, x, y), 'tap point outside WebView');
++    }
++    assert.equal(hits.points.length, 0);
++    hits.receiver = null;
++    assert.equal(web.arkWebTapHit(selector, id, 120, 480), 'no element at tap point');
++    assert.equal(web.arkWebTapHit(selector, '', 120, 480), 'target identity unavailable');
++});

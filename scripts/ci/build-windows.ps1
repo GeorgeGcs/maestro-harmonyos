@@ -59,6 +59,7 @@ try {
         & node (Join-Path $root 'scripts/verify-source-fork.mjs') --repository $upstream --output (Join-Path $output 'source-fork.json')
     }
     $report.stage = 'host-tests'
+    Invoke-BuildStep arkweb-hit-tests { & node --test (Join-Path $upstream 'maestro-client/src/test/js/arkweb-tap-hit.test.cjs') }
     Invoke-BuildStep host-tests { & (Join-Path $root 'scripts/test-host.ps1') }
     $report.stage = 'driver-orchestration-tests'
     Invoke-BuildStep driver-orchestration-tests { & (Join-Path $root 'scripts/test-host.ps1') -FullUpstream -Orchestration }
