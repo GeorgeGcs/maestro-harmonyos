@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "branch": "fix/arkweb-covered-css-tap",
+  "branch": "harmonyos/stable",
   "repository": "https://github.com/GeorgeGcs/Maestro-fork.git",
   "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
   "commit": "dd8c8db6fadfbf0422cc6a23f8956e97d543edc7"
