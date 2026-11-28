@@ -12087,11 +12087,31 @@ index 0000000..e54096b
 +    }
 +}
 diff --git a/maestro-client/src/main/java/maestro/Filters.kt b/maestro-client/src/main/java/maestro/Filters.kt
-index f3adf5f..fd4c24a 100644
+index f3adf5f..a4e2ca0 100644
 --- a/maestro-client/src/main/java/maestro/Filters.kt
 +++ b/maestro-client/src/main/java/maestro/Filters.kt
-@@ -301,6 +301,7 @@ object Filters {
-             val matchingNodes = runBlocking { maestro.findElementsByOnDeviceQuery(
+@@ -19,9 +19,12 @@
+ 
+ package maestro
+ 
++import kotlinx.coroutines.asContextElement
+ import kotlinx.coroutines.runBlocking
+ import maestro.UiElement.Companion.toUiElement
+ import maestro.UiElement.Companion.toUiElementOrNull
++import maestro.harmonyos.layout.ArkWebLoopback
++import kotlin.coroutines.EmptyCoroutineContext
+ import kotlin.math.abs
+ 
+ typealias ElementFilter = (List<TreeNode>) -> List<TreeNode>
+@@ -298,9 +301,13 @@ object Filters {
+ 
+     fun css(maestro: Maestro, cssSelector: String): ElementFilter {
+         return { nodes ->
+-            val matchingNodes = runBlocking { maestro.findElementsByOnDeviceQuery(
++            // The synchronous selector starts another coroutine before dispatching the lookup to IO.
++            val tapScope = ArkWebLoopback.cssTapScope
++            val lookupContext = tapScope.get()?.let { tapScope.asContextElement(it) } ?: EmptyCoroutineContext
++            val matchingNodes = runBlocking(lookupContext) { maestro.findElementsByOnDeviceQuery(
                  timeoutMs = 5000,
                  query = OnDeviceElementQuery.Css(css = cssSelector),
 +                hierarchyNodes = nodes,
@@ -12099,10 +12119,43 @@ index f3adf5f..fd4c24a 100644
  
              // The on-device CSS query traverses only the matched element (no descendants),
 diff --git a/maestro-client/src/main/java/maestro/Maestro.kt b/maestro-client/src/main/java/maestro/Maestro.kt
-index ddedf17..86797d6 100644
+index ddedf17..de4009f 100644
 --- a/maestro-client/src/main/java/maestro/Maestro.kt
 +++ b/maestro-client/src/main/java/maestro/Maestro.kt
-@@ -226,15 +226,48 @@ class Maestro(
+@@ -25,6 +25,8 @@ import maestro.device.AppCrashReport
+ import maestro.device.CapturedDeviceArtifact
+ import maestro.device.DeviceOrientation
+ import maestro.drivers.CdpWebDriver
++import maestro.drivers.HarmonyOSDriver
++import maestro.harmonyos.layout.ArkWebLoopback
+ import maestro.utils.MaestroTimer
+ import maestro.utils.ScreenshotUtils
+ import maestro.utils.SocketUtils
+@@ -40,8 +42,10 @@ import java.time.Instant
+ import javax.imageio.ImageIO
+ import kotlinx.coroutines.CancellationException
+ import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.asContextElement
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.runInterruptible
++import kotlinx.coroutines.withContext
+ import kotlinx.coroutines.yield
+ import kotlin.system.measureTimeMillis
+ 
+@@ -218,6 +222,12 @@ class Maestro(
+         waitForAppToSettle()
+     }
+ 
++    /** Keep the checked forward local to this CSS step, including lookups dispatched to IO threads. */
++    suspend fun <T> withCssTapScope(selector: String?, action: suspend () -> T): T {
++        if (selector == null || driver !is HarmonyOSDriver) return action()
++        return withContext(ArkWebLoopback.cssTapScope.asContextElement(Any())) { action() }
++    }
++
+     suspend fun tap(
+         element: UiElement,
+         initialHierarchy: ViewHierarchy,
+@@ -226,15 +236,48 @@ class Maestro(
          longPress: Boolean = false,
          appId: String? = null,
          tapRepeat: TapRepeat? = null,
@@ -12154,7 +12207,7 @@ index ddedf17..86797d6 100644
              LOGGER.info("Tap aimed via stabilised hierarchy (null settle after a scroll)")
              refreshElementUntilStable(element, initialHierarchy)
          } else {
-@@ -256,7 +289,8 @@ class Maestro(
+@@ -256,7 +299,8 @@ class Maestro(
              longPress = longPress,
              initialHierarchy = hierarchyBeforeTap,
              tapRepeat = tapRepeat,
@@ -12164,7 +12217,7 @@ index ddedf17..86797d6 100644
          )
  
          if (waitUntilVisible) {
-@@ -275,7 +309,8 @@ class Maestro(
+@@ -275,7 +319,8 @@ class Maestro(
                      retryIfNoChange = false,
                      waitUntilVisible = false,
                      longPress = longPress,
@@ -12174,7 +12227,7 @@ index ddedf17..86797d6 100644
                  )
              }
          }
-@@ -387,16 +422,39 @@ class Maestro(
+@@ -387,16 +432,39 @@ class Maestro(
          longPress: Boolean = false,
          initialHierarchy: ViewHierarchy? = null,
          tapRepeat: TapRepeat? = null,
@@ -12217,7 +12270,7 @@ index ddedf17..86797d6 100644
          }
      }
  
-@@ -404,33 +462,17 @@ class Maestro(
+@@ -404,33 +472,17 @@ class Maestro(
          x: Int,
          y: Int,
          retryIfNoChange: Boolean = false,
@@ -12255,7 +12308,7 @@ index ddedf17..86797d6 100644
              val hierarchyAfterTap = waitForAppToSettle(waitToSettleTimeoutMs = waitToSettleTimeoutMs)
  
              if (hierarchyAfterTap == null || hierarchyBeforeTap != hierarchyAfterTap) {
-@@ -444,10 +486,9 @@ class Maestro(
+@@ -444,10 +496,9 @@ class Maestro(
          x: Int,
          y: Int,
          retryIfNoChange: Boolean = false,
@@ -12268,7 +12321,7 @@ index ddedf17..86797d6 100644
      ) {
          LOGGER.info("Try tapping at ($x, $y) using hierarchy based logic for wait")
  
-@@ -456,22 +497,7 @@ class Maestro(
+@@ -456,22 +507,7 @@ class Maestro(
  
          val retries = getNumberOfRetries(retryIfNoChange)
          repeat(retries) {
@@ -12292,7 +12345,7 @@ index ddedf17..86797d6 100644
              val hierarchyAfterTap = waitForAppToSettle(waitToSettleTimeoutMs = waitToSettleTimeoutMs)
  
              if (hierarchyBeforeTap != hierarchyAfterTap) {
-@@ -558,17 +584,25 @@ class Maestro(
+@@ -558,17 +594,25 @@ class Maestro(
  
      suspend fun findElementsByOnDeviceQuery(
          timeoutMs: Long,
@@ -12322,7 +12375,7 @@ index ddedf17..86797d6 100644
      }
  
      suspend fun allElementsMatching(filter: ElementFilter): List<TreeNode> {
-@@ -798,6 +832,44 @@ class Maestro(
+@@ -798,6 +842,44 @@ class Maestro(
          // Mirrors IOSDriver.SCREEN_SETTLE_TIMEOUT_MS (3000ms): the element-stability wait
          // stands in for the settle confirmation the iOS driver could not give, so keep the
          // two budgets aligned when tuning either.
@@ -14632,7 +14685,7 @@ index 0000000..35a28d5
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 new file mode 100644
-index 0000000..0bee6e2
+index 0000000..d5db855
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/driver/HdcHarmonyOSDevice.kt
 @@ -0,0 +1,673 @@
@@ -14951,12 +15004,12 @@ index 0000000..0bee6e2
 +        fun currentTarget(): ArkWebView =
 +            findArkWebTarget(nativeHierarchy(deadline, remainingBudget(deadline, timeout)))
 +                ?: error("$label: native WebView unavailable.")
-+        fun checkPoint(target: ArkWebView): String {
++        fun checkPoint(target: ArkWebView, forceVerification: Boolean): String {
 +            check(target.node.attributes["hostWindowId"] == window) { "$label: native WebView window changed." }
 +            val (left, top, right, bottom) = target.bounds
 +            check(point.x in left until right && point.y in top until bottom) { "$label: requested point outside native WebView." }
 +            return readArkWeb(target, deadline, timeout) { bounds, remaining, verify ->
-+                tapHit(selector, nodeId, point, bounds, remaining, verify)
++                tapHit(selector, nodeId, point, bounds, remaining, forceVerification, verify)
 +            } ?: error("$label: page or hit target unavailable.")
 +        }
 +        var target = verifiedArkWebLayout?.freshNativeTarget() ?: currentTarget()
@@ -14965,12 +15018,12 @@ index 0000000..0bee6e2
 +        while (true) {
 +            checkInterrupted()
 +            if (System.nanoTime() >= pollUntil) error("$label: ${obstruction ?: "hit check timed out"}.")
-+            var hit = checkPoint(target)
++            var hit = checkPoint(target, forceVerification = obstruction == null)
 +            if (hit == "hit" && obstruction != null) {
 +                // DOM polling doesn't need another native dump. Refresh the coordinate mapping once
 +                // the obstruction lifts, then recheck the point before allowing a physical tap.
 +                target = currentTarget()
-+                hit = checkPoint(target)
++                hit = checkPoint(target, forceVerification = true)
 +            }
 +            checkInterrupted()
 +            if (hit == "hit") {
@@ -15088,7 +15141,7 @@ index 0000000..0bee6e2
 +        target: ArkWebView,
 +        deadline: Long,
 +        timeout: Duration,
-+        read: ArkWebLoopback.(List<Int>, Duration, (Duration) -> Boolean) -> T?,
++        read: ArkWebLoopback.(List<Int>, Duration, (Duration) -> String?) -> T?,
 +    ): T? {
 +        val port = checkNotNull(arkWebPort)
 +        val bundle = checkNotNull(arkWebBundle)
@@ -15102,8 +15155,8 @@ index 0000000..0bee6e2
 +        return checkNotNull(arkWeb).read(target.bounds, budget) { verificationBudget ->
 +            val webDeadline = System.nanoTime() + verificationBudget.toNanos()
 +            val pid = execute(listOf("pidof", bundle), remainingBudget(webDeadline, verificationBudget))
-+            pid.matches(Regex("[1-9][0-9]*")) &&
-+                hdc.hasArkWebForward(deviceId, port, pid, remainingBudget(webDeadline, verificationBudget))
++            pid.takeIf { it.matches(Regex("[1-9][0-9]*")) &&
++                hdc.hasArkWebForward(deviceId, port, it, remainingBudget(webDeadline, verificationBudget)) }
 +        }
 +    }
 +
@@ -18212,10 +18265,10 @@ index 0000000..a733559
 +}
 diff --git a/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
 new file mode 100644
-index 0000000..573429c
+index 0000000..8e918a7
 --- /dev/null
 +++ b/maestro-client/src/main/java/maestro/harmonyos/layout/ArkWebLoopback.kt
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,257 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -18231,6 +18284,7 @@ index 0000000..573429c
 +import java.net.Proxy
 +import java.net.URI
 +import java.time.Duration
++import java.util.UUID
 +import java.util.concurrent.CompletableFuture
 +import java.util.concurrent.TimeUnit
 +import java.util.concurrent.atomic.AtomicReference
@@ -18266,7 +18320,7 @@ index 0000000..573429c
 +        }
 +    }
 +
-+    fun snapshot(bounds: List<Int>, timeout: Duration, verifyForward: (Duration) -> Boolean): TreeNode? =
++    fun snapshot(bounds: List<Int>, timeout: Duration, verifyForward: (Duration) -> String?): TreeNode? =
 +        read(bounds, timeout, "window.maestro.getContentDescription()", verifyForward)
 +            ?.let { json.readValue(it, TreeNode::class.java) }
 +
@@ -18274,7 +18328,7 @@ index 0000000..573429c
 +        selector: String,
 +        bounds: List<Int>,
 +        timeout: Duration,
-+        verifyForward: (Duration) -> Boolean,
++        verifyForward: (Duration) -> String?,
 +    ): List<TreeNode>? {
 +        val argument = json.writeValueAsString(selector)
 +        val operation = """(() => {
@@ -18294,11 +18348,12 @@ index 0000000..573429c
 +        point: Point,
 +        bounds: List<Int>,
 +        timeout: Duration,
-+        verifyForward: (Duration) -> Boolean,
++        forceVerification: Boolean,
++        verifyForward: (Duration) -> String?,
 +    ): String? {
 +        val operation = "window.maestro.arkWebTapHit(${json.writeValueAsString(selector)}, " +
 +            "${json.writeValueAsString(nodeId)}, ${point.x}, ${point.y})"
-+        val reply = read(bounds, timeout, operation, verifyForward) ?: return null
++        val reply = read(bounds, timeout, operation, verifyForward, forceVerification) ?: return null
 +        return json.readTree(reply)?.textValue()?.takeIf { it.isNotBlank() }
 +    }
 +
@@ -18307,7 +18362,8 @@ index 0000000..573429c
 +        bounds: List<Int>,
 +        timeout: Duration,
 +        operation: String,
-+        verifyForward: (Duration) -> Boolean,
++        verifyForward: (Duration) -> String?,
++        forceVerification: Boolean = false,
 +    ): String? {
 +        val deadline = System.nanoTime() + timeout.toNanos()
 +        fun remaining(): Duration {
@@ -18315,36 +18371,53 @@ index 0000000..573429c
 +            if (nanos <= 0) throw java.util.concurrent.TimeoutException("ArkWeb snapshot deadline expired")
 +            return Duration.ofNanos(nanos)
 +        }
++        val scope = if (target == null) null else cssTapScope.get()
++        val verifyForDispatch = forceVerification && scope != null
 +        var active = connection?.takeIf { !it.failed && nowNanos() - it.openedAt < FORWARD_TTL_NANOS }
-+        val needsVerification = active == null || (target != null &&
-+            (active.reusedVerification || nowNanos() - active.verifiedAt >= EXPLICIT_FORWARD_REUSE_NANOS))
-+        var verifiedAt = active?.verifiedAt ?: 0L
++        val needsVerification = verifyForDispatch || active == null || (target != null && (
++            active.verifiedScope !== scope || nowNanos() - active.verifiedAt >= EXPLICIT_FORWARD_REUSE_NANOS ||
++                (scope == null && active.reusedVerification)))
 +        if (needsVerification) {
-+            if (!measurePhase("device-forward") { verifyForward(remaining()) }) {
++            val pid = try {
++                measurePhase("device-forward") { verifyForward(remaining()) }
++            } catch (error: Exception) {
++                close()
++                throw error
++            }
++            if (pid == null || (connection != null && connection?.pid != pid)) {
 +                logger.debug("ArkWeb device forward not verified")
 +                close()
 +                return null
 +            }
-+            verifiedAt = nowNanos()
-+            active?.apply {
-+                this.verifiedAt = verifiedAt
-+                reusedVerification = false
-+            }
-+        } else if (target != null) {
-+            checkNotNull(active).reusedVerification = true
-+            logger.info("HarmonyOS ArkWeb phase=device-forward-reused elapsedMs=0")
-+        }
-+        if (active == null) {
-+            close()
-+            val path = measurePhase("page-discovery") { discoverPage(remaining()) }
-+            if (path == null) {
-+                logger.debug("ArkWeb page discovery did not confirm a unique loopback target")
++            val verifiedAt = nowNanos()
++            // Keep the freshly verified binding usable for post-tap reads. If the socket will
++            // expire first, rediscover the same page now and require its existing document token.
++            val renewFrom = connection?.takeIf { verifyForDispatch &&
++                FORWARD_TTL_NANOS - (verifiedAt - it.openedAt) < EXPLICIT_FORWARD_REUSE_NANOS }
++            if (renewFrom != null && (renewFrom.failed || renewFrom.documentScope !== scope || renewFrom.documentToken == null)) {
++                close()
 +                return null
 +            }
-+            active = Connection(nowNanos(), verifiedAt)
-+            active.socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), active)
-+            connection = active
++            if (active == null || renewFrom != null) {
++                close()
++                val path = measurePhase("page-discovery") { discoverPage(remaining()) } ?: return null
++                if (renewFrom != null && renewFrom.path != path) return null
++                active = Connection(nowNanos(), pid, verifiedAt, path)
++                if (renewFrom != null) {
++                    active.documentScope = scope
++                    active.documentToken = renewFrom.documentToken
++                }
++                active.socket = client.newWebSocket(Request.Builder().url("ws://$endpoint$path").build(), active)
++                connection = active
++            }
++            active.verifiedAt = verifiedAt
++            active.verifiedScope = scope
++            active.reusedVerification = false
++        } else if (target != null) {
++            if (scope == null) checkNotNull(active).reusedVerification = true
++            logger.info("HarmonyOS ArkWeb phase=device-forward-reused elapsedMs=0")
 +        }
++        checkNotNull(active)
 +        val (left, top, right, bottom) = bounds
 +        val capture = "$script; window.maestro.arkWebTapIdentityEnabled = true; maestro.viewportX = $left; maestro.viewportY = $top;" +
 +            " maestro.viewportWidth = ${right - left}; maestro.viewportHeight = ${bottom - top};" +
@@ -18352,8 +18425,19 @@ index 0000000..573429c
 +        val expression = if (target == null) capture else {
 +            val url = json.writeValueAsString(target.pageUrl)
 +            val webViewId = json.writeValueAsString(target.webViewId)
++            // A same-URL reload keeps the socket and marker, but replaces the document.
++            val documentGuard = if (scope == null) "" else {
++                val key = "document[Symbol.for('maestro.arkWebDocument')]"
++                val bind = active.documentScope !== scope
++                if (bind) {
++                    active.documentScope = scope
++                    active.documentToken = UUID.randomUUID().toString()
++                }
++                val token = json.writeValueAsString(active.documentToken)
++                if (bind) " && ($key = $token) === $token" else " && $key === $token"
++            }
 +            "if (window.location.href === $url && " +
-+                "document.querySelector('meta[name=maestro-webview-id]')?.content === $webViewId) { $capture } else { null; }"
++                "document.querySelector('meta[name=maestro-webview-id]')?.content === $webViewId$documentGuard) { $capture } else { null; }"
 +        }
 +        val id = ++sequence
 +        val payload = json.writeValueAsString(mapOf("id" to id, "method" to "Runtime.evaluate",
@@ -18396,8 +18480,11 @@ index 0000000..573429c
 +
 +    private data class Pending(val id: Long, val result: CompletableFuture<String>)
 +
-+    private class Connection(val openedAt: Long, var verifiedAt: Long) : WebSocketListener() {
++    private class Connection(val openedAt: Long, val pid: String, var verifiedAt: Long, val path: String) : WebSocketListener() {
 +        lateinit var socket: WebSocket
++        var verifiedScope: Any? = null
++        var documentScope: Any? = null
++        var documentToken: String? = null
 +        var reusedVerification = false
 +        val pending = AtomicReference<Pending?>()
 +        @Volatile var failed = false
@@ -18427,15 +18514,14 @@ index 0000000..573429c
 +        }
 +    }
 +
-+    private companion object {
-+        val FORWARD_TTL_NANOS = TimeUnit.SECONDS.toNanos(5)
-+        // Only the next read on an already verified socket can reuse the proof.
-+        // URL and WebView marker are still checked for every DOM read.
-+        val EXPLICIT_FORWARD_REUSE_NANOS = TimeUnit.SECONDS.toNanos(2)
-+        const val MAX_JSON_BYTES = 4L * 1024 * 1024
-+        val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).build()
-+        val json = jacksonObjectMapper()
-+        val script: String by lazy {
++    companion object {
++        val cssTapScope = ThreadLocal<Any?>()
++        private val FORWARD_TTL_NANOS = TimeUnit.SECONDS.toNanos(5)
++        private val EXPLICIT_FORWARD_REUSE_NANOS = TimeUnit.SECONDS.toNanos(2)
++        private const val MAX_JSON_BYTES = 4L * 1024 * 1024
++        private val client = OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).build()
++        private val json = jacksonObjectMapper()
++        private val script: String by lazy {
 +            requireNotNull(ArkWebLoopback::class.java.getResourceAsStream("/maestro-web.js")).bufferedReader().use { it.readText() }
 +        }
 +    }
@@ -19009,14 +19095,18 @@ index 0000000..7785dcd
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
 new file mode 100644
-index 0000000..97e2f7e
+index 0000000..5ad91c4
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/driver/HarmonyOSDriverTest.kt
-@@ -0,0 +1,877 @@
+@@ -0,0 +1,912 @@
 +package maestro.harmonyos.driver
 +
 +import com.google.common.truth.Truth.assertThat
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
 +import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withContext
++import maestro.Filters
 +import maestro.KeyCode
 +import maestro.Maestro
 +import maestro.Point
@@ -19029,6 +19119,7 @@ index 0000000..97e2f7e
 +import maestro.drivers.HarmonyOSDriver
 +import maestro.harmonyos.hdc.HdcException
 +import maestro.harmonyos.hdc.HdcTimeoutException
++import maestro.harmonyos.layout.ArkWebLoopback
 +import okio.Buffer
 +import okio.Sink
 +import org.junit.jupiter.api.Assertions.assertThrows
@@ -19040,6 +19131,31 @@ index 0000000..97e2f7e
 +import javax.imageio.ImageIO
 +
 +class HarmonyOSDriverTest {
++    @Test fun `CSS tap scope follows IO lookups and ends on cancellation`() = runBlocking {
++        val device = Device()
++        val driver = driver(device)
++        val maestro = Maestro(driver)
++        val scope = ArkWebLoopback.cssTapScope
++        driver.open()
++        val first = maestro.withCssTapScope(".action") {
++            val step = checkNotNull(scope.get())
++            assertThat(withContext(Dispatchers.IO) { scope.get() }).isSameInstanceAs(step)
++            device.onCssQuery = { assertThat(scope.get()).isSameInstanceAs(step) }
++            Filters.css(maestro, ".action")(emptyList())
++            step
++        }
++        try {
++            maestro.withCssTapScope(".action") {
++                assertThat(checkNotNull(scope.get())).isNotSameInstanceAs(first)
++                throw CancellationException("stop this step")
++            }
++        } catch (_: CancellationException) {
++            assertThat(scope.get()).isNull()
++        }
++        maestro.withCssTapScope(null) { assertThat(scope.get()).isNull() }
++        driver.close()
++    }
++
 +    @Test fun `CSS repeat checks the original target before each physical dispatch`() {
 +        val device = Device()
 +        val driver = driver(device)
@@ -19804,6 +19920,11 @@ index 0000000..97e2f7e
 +    )
 +
 +    private class Device : HarmonyOSDevice {
++        var onCssQuery: () -> Unit = {}
++        override fun queryCss(selector: String, timeout: Duration, hierarchyNodes: List<TreeNode>): List<TreeNode> {
++            onCssQuery()
++            return emptyList()
++        }
 +        var connections = 0
 +        var layoutReads = 0
 +        var screenshots = 0
@@ -25710,10 +25831,10 @@ index 00000000..c7f5502f
 +}
 diff --git a/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
 new file mode 100644
-index 0000000..611cc8f
+index 0000000..67b53ef
 --- /dev/null
 +++ b/maestro-client/src/test/kotlin/maestro/harmonyos/layout/ArkWebLoopbackTest.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,395 @@
 +package maestro.harmonyos.layout
 +
 +import com.fasterxml.jackson.databind.ObjectMapper
@@ -25754,11 +25875,11 @@ index 0000000..611cc8f
 +            }))
 +            val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
 +            ArkWebLoopback(server.port, target).use { browser ->
-+                fun hit(forward: Boolean) = browser.tapHit(selector, nodeId, Point(79, 131),
-+                    listOf(5, 30, 105, 230), Duration.ofSeconds(2)) { forward }
-+                assertThat(hit(true)).isEqualTo("blocked by div#overlay")
-+                assertThat(hit(true)).isEqualTo("hit")
-+                assertThat(hit(false)).isNull()
++                fun hit(pid: String?) = browser.tapHit(selector, nodeId, Point(79, 131),
++                    listOf(5, 30, 105, 230), Duration.ofSeconds(2), forceVerification = true) { pid }
++                assertThat(hit("16")).isEqualTo("blocked by div#overlay")
++                assertThat(hit("16")).isEqualTo("hit")
++                assertThat(hit(null)).isNull()
 +                assertThat(expressions).hasSize(2)
 +                for (expression in expressions) {
 +                    assertThat(expression).contains("window.location.href === \"https://example.test/two\"")
@@ -25801,12 +25922,12 @@ index 0000000..611cc8f
 +            val bounds = listOf(0, 0, 100, 100)
 +            val timeout = Duration.ofSeconds(2)
 +            ArkWebLoopback(server.port, target).use { browser ->
-+                assertThat(browser.queryCss(selector, bounds, timeout) { true }?.single()?.attributes?.get("text"))
++                assertThat(browser.queryCss(selector, bounds, timeout) { "16" }?.single()?.attributes?.get("text"))
 +                    .isEqualTo("Submit")
-+                assertThat(browser.queryCss(".absent", bounds, timeout) { true }).isEmpty()
-+                assertThrows(IllegalArgumentException::class.java) { browser.queryCss("[", bounds, timeout) { true } }
-+                assertThat(browser.queryCss(".absent", bounds, timeout) { false }).isEmpty()
-+                assertThat(browser.queryCss(".absent", bounds, timeout) { false }).isNull()
++                assertThat(browser.queryCss(".absent", bounds, timeout) { "16" }).isEmpty()
++                assertThrows(IllegalArgumentException::class.java) { browser.queryCss("[", bounds, timeout) { "16" } }
++                assertThat(browser.queryCss(".absent", bounds, timeout) { null }).isEmpty()
++                assertThat(browser.queryCss(".absent", bounds, timeout) { null }).isNull()
 +            }
 +        }
 +    }
@@ -25821,10 +25942,13 @@ index 0000000..611cc8f
 +            ))
 +            server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
 +                override fun onMessage(webSocket: WebSocket, text: String) {
-+                    val id = json.readTree(text).path("id").asLong()
-+                    val tree = """{"attributes":{"text":"snapshot $id"},"children":[]}"""
++                    val request = json.readTree(text)
++                    val id = request.path("id").asLong()
++                    val expression = request.path("params").path("expression").asText()
++                    val value = if (expression.contains("JSON.stringify(window.maestro.arkWebTapHit(")) "\"hit\"" else
++                        """{"attributes":{"text":"snapshot $id"},"children":[]}"""
 +                    webSocket.send(json.writeValueAsString(mapOf(
-+                        "id" to id, "result" to mapOf("result" to mapOf("value" to tree))
++                        "id" to id, "result" to mapOf("result" to mapOf("value" to value))
 +                    )))
 +                }
 +            }))
@@ -25832,10 +25956,13 @@ index 0000000..611cc8f
 +                var verifications = 0
 +                fun snapshot() = browser.snapshot(listOf(0, 0, 100, 100), Duration.ofSeconds(2)) {
 +                    verifications++
-+                    true
++                    "16"
 +                }
 +                assertThat(snapshot()?.attributes?.get("text")).isEqualTo("snapshot 1")
 +                assertThat(snapshot()?.attributes?.get("text")).isEqualTo("snapshot 2")
++                assertThat(browser.tapHit("button", "original", Point(1, 1), listOf(0, 0, 100, 100),
++                    Duration.ofSeconds(2), forceVerification = true) { error("Unexpected extra forward verification") })
++                    .isEqualTo("hit")
 +                assertThat(verifications).isEqualTo(1)
 +                assertThat(server.requestCount).isEqualTo(2)
 +            }
@@ -25869,7 +25996,7 @@ index 0000000..611cc8f
 +            ArkWebLoopback(server.port, target, nowNanos = { now }).use { browser ->
 +                val bounds = listOf(0, 0, 100, 100)
 +                val timeout = Duration.ofSeconds(2)
-+                assertThat(browser.snapshot(bounds, timeout) { true }?.attributes?.get("text")).isEqualTo("page two")
++                assertThat(browser.snapshot(bounds, timeout) { "16" }?.attributes?.get("text")).isEqualTo("page two")
 +                assertThat(server.takeRequest().path).isEqualTo("/json/list")
 +                assertThat(server.takeRequest().path).isEqualTo("/devtools/page/two")
 +                now += Duration.ofMillis(10).toNanos()
@@ -25878,14 +26005,213 @@ index 0000000..611cc8f
 +                var rechecked = false
 +                assertThat(browser.snapshot(bounds, timeout) {
 +                    rechecked = true
-+                    true
++                    "16"
 +                }?.attributes?.get("text")).isEqualTo("page two")
 +                assertThat(rechecked).isTrue()
 +                now += Duration.ofSeconds(2).toNanos()
-+                assertThat(browser.snapshot(bounds, timeout) { false }).isNull()
++                assertThat(browser.snapshot(bounds, timeout) { null }).isNull()
 +                assertThat(server.requestCount).isEqualTo(2)
 +            }
 +        }
++    }
++
++    @Test
++    fun `CSS tap scope reuses the binding but reads fresh DOM and verifies every actual dispatch`() {
++        val expressions = java.util.concurrent.CopyOnWriteArrayList<String>()
++        val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            enqueuePage(server) { expression ->
++                expressions += expression
++                if (expression.contains("JSON.stringify(window.maestro.arkWebTapHit(")) "\"hit\"" else
++                    """{"attributes":{"text":"read ${expressions.size}"},"children":[]}"""
++            }
++            var now = 0L
++            var checks = 0
++            var pid = "16"
++            val bounds = listOf(0, 0, 100, 100)
++            val timeout = Duration.ofSeconds(2)
++            ArkWebLoopback(server.port, target) { now }.use { browser ->
++                fun proof(remaining: Duration): String {
++                    assertThat(remaining.isZero).isFalse()
++                    checks++
++                    return pid
++                }
++                fun snapshot() = browser.snapshot(bounds, timeout, ::proof)?.attributes?.get("text")
++                fun hit() = browser.tapHit("button", "node", Point(1, 1), bounds, timeout, true, ::proof)
++                try {
++                    ArkWebLoopback.cssTapScope.set(Any())
++                    assertThat(snapshot()).isEqualTo("read 1")
++                    now = Duration.ofSeconds(1).toNanos()
++                    assertThat(snapshot()).isEqualTo("read 2")
++                    now = Duration.ofMillis(1999).toNanos()
++                    assertThat(snapshot()).isEqualTo("read 3")
++                    assertThat(checks).isEqualTo(1)
++                    now = Duration.ofSeconds(2).toNanos()
++                    assertThat(snapshot()).isEqualTo("read 4")
++                    assertThat(checks).isEqualTo(2)
++                    assertThat(hit()).isEqualTo("hit")
++                    assertThat(snapshot()).isEqualTo("read 6")
++                    assertThat(checks).isEqualTo(3)
++                    ArkWebLoopback.cssTapScope.remove()
++                    assertThat(snapshot()).isEqualTo("read 7")
++                    ArkWebLoopback.cssTapScope.set(Any())
++                    assertThat(snapshot()).isEqualTo("read 8")
++                    assertThat(checks).isEqualTo(5)
++                    // Both PIDs have valid forwards. The old socket is still alive and must not be used.
++                    pid = "17"
++                    assertThat(hit()).isNull()
++                    assertThat(checks).isEqualTo(6)
++                    assertThat(expressions).hasSize(8)
++                    assertThat(expressions.first()).contains("document[Symbol.for('maestro.arkWebDocument')] = ")
++                    assertThat(expressions[1]).contains("document[Symbol.for('maestro.arkWebDocument')] === ")
++                    assertThat(expressions[6]).doesNotContain("maestro.arkWebDocument")
++                } finally {
++                    ArkWebLoopback.cssTapScope.remove()
++                }
++            }
++        }
++    }
++
++    @Test
++    fun `same URL reload is allowed between steps but invalidates the hit in the current step`() {
++        val bounds = listOf(0, 0, 100, 100)
++        val timeout = Duration.ofSeconds(2)
++        val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            val documentKey = "document[Symbol.for('maestro.arkWebDocument')]"
++            val bindings = java.util.concurrent.CopyOnWriteArrayList<String>()
++            repeat(2) {
++                enqueuePage(server) { expression ->
++                    when {
++                        expression.contains("($documentKey = ") -> {
++                            bindings += expression.substringAfter("($documentKey = ").substringBefore(")")
++                            """{"attributes":{"text":"current"},"children":[]}"""
++                        }
++                        expression.contains("$documentKey === ") -> "null" // the new document has no old marker
++                        else -> "\"hit\""
++                    }
++                }
++            }
++            ArkWebLoopback(server.port, target).use { browser ->
++                var checks = 0
++                fun proof(remaining: Duration): String {
++                    assertThat(remaining.isNegative).isFalse()
++                    checks++
++                    return "16"
++                }
++                try {
++                    ArkWebLoopback.cssTapScope.set(Any())
++                    assertThat(browser.snapshot(bounds, timeout, ::proof)).isNotNull()
++                    // The next step starts after a reload on the same live socket.
++                    ArkWebLoopback.cssTapScope.set(Any())
++                    assertThat(browser.snapshot(bounds, timeout, ::proof)).isNotNull()
++                    assertThat(checks).isEqualTo(2)
++                    assertThat(server.requestCount).isEqualTo(2)
++                    // Another reload during that step replaces the document that supplied the target.
++                    assertThat(browser.tapHit("button", "old-node", Point(1, 1), bounds, timeout, true, ::proof)).isNull()
++                    assertThat(browser.snapshot(bounds, timeout, ::proof)).isNotNull()
++                    assertThat(checks).isEqualTo(4)
++                    assertThat(bindings.toSet()).hasSize(3)
++                    assertThat(server.requestCount).isEqualTo(4)
++                } finally {
++                    ArkWebLoopback.cssTapScope.remove()
++                }
++            }
++        }
++    }
++
++    @Test
++    fun `dispatch renews the same page when less than two seconds of socket life remain after verification`() {
++        checkDispatchRenewal(3001L)
++    }
++
++    @Test
++    fun `a live socket at its five second hard limit can only renew the same document`() {
++        checkDispatchRenewal(5000L)
++    }
++
++    @Test
++    fun `dispatch rejects a different page path or a replaced document when renewing`() {
++        checkDispatchRenewal(3001L, nextPage = "changed")
++        checkDispatchRenewal(5000L, sameDocument = false)
++    }
++
++    private fun checkDispatchRenewal(atMs: Long, nextPage: String = "two", sameDocument: Boolean = true) {
++        val bounds = listOf(0, 0, 100, 100)
++        val timeout = Duration.ofSeconds(2)
++        val target = HarmonyOSArkWebTarget("probe-secondary", "https://example.test/two")
++        val key = "document[Symbol.for('maestro.arkWebDocument')]"
++        val token = java.util.concurrent.atomic.AtomicReference<String>()
++        val renewed = java.util.concurrent.CopyOnWriteArrayList<String>()
++        val tree = """{"attributes":{"text":"current"},"children":[]}"""
++        MockWebServer().use { server ->
++            server.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
++            enqueuePage(server) { expression ->
++                if (expression.contains("($key = ")) {
++                    token.set(expression.substringAfter("($key = ").substringBefore(")"))
++                    tree
++                } else "\"hit\""
++            }
++            enqueuePage(server, nextPage) { expression ->
++                renewed += expression
++                when {
++                    !sameDocument || !expression.contains("$key === ${token.get()}") -> "null"
++                    expression.contains("JSON.stringify(window.maestro.arkWebTapHit(") -> "\"hit\""
++                    else -> tree
++                }
++            }
++            var now = 0L
++            var checks = 0
++            ArkWebLoopback(server.port, target) { now }.use { browser ->
++                fun read() = browser.snapshot(bounds, timeout) { checks++; "16" }
++                fun hit(proofFinishedMs: Long) = browser.tapHit("button", "original", Point(1, 1), bounds, timeout, true) {
++                    checks++
++                    now = Duration.ofMillis(proofFinishedMs).toNanos()
++                    "16"
++                }
++                try {
++                    ArkWebLoopback.cssTapScope.set(Any())
++                    assertThat(read()).isNotNull()
++                    assertThat(hit(3000)).isEqualTo("hit") // Exactly two seconds remain.
++                    assertThat(server.requestCount).isEqualTo(2)
++                    if (atMs >= 5000) now = Duration.ofMillis(atMs).toNanos()
++                    val result = hit(atMs)
++                    assertThat(checks).isEqualTo(3)
++                    if (nextPage != "two" || !sameDocument) {
++                        assertThat(result).isNull()
++                        assertThat(renewed).hasSize(if (nextPage != "two") 0 else 1)
++                    } else {
++                        assertThat(result).isEqualTo("hit")
++                        assertThat(server.requestCount).isEqualTo(4)
++                        now += Duration.ofMillis(1999).toNanos()
++                        assertThat(read()).isNotNull()
++                        assertThat(checks).isEqualTo(3)
++                        now += Duration.ofMillis(1).toNanos()
++                        assertThat(read()).isNotNull()
++                        assertThat(checks).isEqualTo(4)
++                    }
++                } finally {
++                    ArkWebLoopback.cssTapScope.remove()
++                }
++            }
++        }
++    }
++
++    private fun enqueuePage(server: MockWebServer, page: String = "two", evaluate: (String) -> String) {
++        val json = ObjectMapper()
++        server.enqueue(MockResponse().setBody(
++            """[{"type":"page","url":"https://example.test/two","webSocketDebuggerUrl":"ws://127.0.0.1:${server.port}/devtools/page/$page"}]"""
++        ))
++        server.enqueue(MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
++            override fun onMessage(webSocket: WebSocket, text: String) {
++                val request = json.readTree(text)
++                val value = evaluate(request.path("params").path("expression").asText())
++                webSocket.send(json.writeValueAsString(mapOf("id" to request.path("id").asLong(),
++                    "result" to mapOf("result" to mapOf("value" to value)))))
++            }
++        }))
 +    }
 +
 +    @Test
@@ -25897,7 +26223,7 @@ index 0000000..611cc8f
 +                {"type":"page","url":"https://example.test/shared","webSocketDebuggerUrl":"ws://127.0.0.1:${server.port}/devtools/page/two"}
 +            ]"""))
 +            ArkWebLoopback(server.port, HarmonyOSArkWebTarget("sample", "https://example.test/shared")).use { browser ->
-+                val snapshot = browser.snapshot(listOf(0, 0, 100, 100), Duration.ofSeconds(2)) { true }
++                val snapshot = browser.snapshot(listOf(0, 0, 100, 100), Duration.ofSeconds(2)) { "16" }
 +                assertThat(snapshot).isNull()
 +                assertThat(server.requestCount).isEqualTo(1)
 +            }
@@ -26695,7 +27021,7 @@ index 0000000..d2de2c5
 +  ]
 +}
 diff --git a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
-index c388689..9d71186 100644
+index c388689..c3bcd68 100644
 --- a/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 +++ b/maestro-orchestra/src/main/java/maestro/orchestra/Orchestra.kt
 @@ -20,7 +20,9 @@
@@ -27393,9 +27719,26 @@ index c388689..9d71186 100644
  
          maestro.launchApp(
              appId = command.appId,
-@@ -1392,32 +1639,18 @@ class Orchestra(
+@@ -1388,38 +1635,23 @@ class Orchestra(
+         retryIfNoChange: Boolean,
+         waitUntilVisible: Boolean,
+         config: MaestroConfig?,
+-    ): Boolean {
++    ): Boolean = maestro.withCssTapScope(command.selector.css) {
          val result = findElement(command.selector, optional = command.optional)
  
++        maestro.tap(
++            element = result.element,
++            initialHierarchy = result.hierarchy,
++            retryIfNoChange = retryIfNoChange,
++            waitUntilVisible = waitUntilVisible,
++            longPress = command.longPress ?: false,
++            appId = config?.appId,
++            tapRepeat = command.repeat,
++            waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
++            cssSelector = command.selector.css,
++            relativeTapPoint = command.relativePoint?.let { calculateElementRelativePoint(result.element, it) },
++        )
  
 -        // Handle element-relative tap if specified
 -        val relativePoint = command.relativePoint
@@ -27423,22 +27766,13 @@ index c388689..9d71186 100644
 -                waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
 -            )
 -        }
-+        maestro.tap(
-+            element = result.element,
-+            initialHierarchy = result.hierarchy,
-+            retryIfNoChange = retryIfNoChange,
-+            waitUntilVisible = waitUntilVisible,
-+            longPress = command.longPress ?: false,
-+            appId = config?.appId,
-+            tapRepeat = command.repeat,
-+            waitToSettleTimeoutMs = command.waitToSettleTimeoutMs,
-+            cssSelector = command.selector.css,
-+            relativeTapPoint = command.relativePoint?.let { calculateElementRelativePoint(result.element, it) },
-+        )
- 
-         return true
+-
+-        return true
++        true
      }
-@@ -1482,6 +1715,8 @@ class Orchestra(
+ 
+     private suspend fun tapOnPoint(
+@@ -1482,6 +1714,8 @@ class Orchestra(
          selector: ElementSelector,
          optional: Boolean,
          timeoutMs: Long? = null,
@@ -27447,7 +27781,7 @@ index c388689..9d71186 100644
      ): FindElementResult {
          val timeout =
              timeoutMs ?: adjustedToLatestInteraction(
-@@ -1496,8 +1731,7 @@ class Orchestra(
+@@ -1496,8 +1730,7 @@ class Orchestra(
              var fullHierarchy = ViewHierarchy(TreeNode())
              val found = MaestroTimer.withTimeoutSuspend(timeout) {
                  fullHierarchy = maestro.viewHierarchy()
@@ -27457,7 +27791,7 @@ index c388689..9d71186 100644
              }
              if (found == null) {
                  // Both "parent never matched" and "parent matched but child isn't in it" leave `found`
-@@ -1535,7 +1769,7 @@ class Orchestra(
+@@ -1535,7 +1768,7 @@ class Orchestra(
                      debugMessage = childOfDebugMessage
                  )
              }
@@ -27466,7 +27800,7 @@ index c388689..9d71186 100644
          }
  
  
-@@ -1552,7 +1786,7 @@ class Orchestra(
+@@ -1552,7 +1785,7 @@ class Orchestra(
              filter = filterFunc
          ) ?: throw MaestroException.ElementNotFound(
              "Element not found: $description",
@@ -27475,7 +27809,7 @@ index c388689..9d71186 100644
              debugMessage = exceptionDebugMessage
          )
      }
-@@ -1605,6 +1839,19 @@ class Orchestra(
+@@ -1605,6 +1838,19 @@ class Orchestra(
          return listOfNotNull(whatFailed, elsewhere).joinToString(" ") + "\n\nPossible causes:\n" + causes
      }
  
@@ -27495,7 +27829,7 @@ index c388689..9d71186 100644
      private fun resolveParentHierarchy(
          selector: ElementSelector?,
          hierarchy: ViewHierarchy,
-@@ -1740,17 +1987,23 @@ class Orchestra(
+@@ -1740,17 +1986,23 @@ class Orchestra(
                  basicFilters += Filters.focused(it)
              }
  
@@ -27528,7 +27862,7 @@ index c388689..9d71186 100644
          }
          
          val allFilters = listOf(basicFilter) + relativeFilters
-@@ -1822,10 +2075,17 @@ class Orchestra(
+@@ -1822,10 +2074,17 @@ class Orchestra(
          return true
      }
  
@@ -27550,7 +27884,7 @@ index c388689..9d71186 100644
  
      private suspend fun copyTextFromCommand(command: CopyTextFromCommand): Boolean {
          val result = findElement(command.selector, optional = command.optional)
-@@ -1871,7 +2131,8 @@ class Orchestra(
+@@ -1871,7 +2130,8 @@ class Orchestra(
              executeCommands(
                  commands = it,
                  config = config,
