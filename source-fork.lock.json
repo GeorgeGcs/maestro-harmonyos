@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "branch": "perf/arkweb-css-tap-forward",
+  "branch": "harmonyos/stable",
   "repository": "https://github.com/GeorgeGcs/Maestro-fork.git",
   "upstreamCommit": "3fc4ef3fc408bc70ea9baf0bac0ff3e4b565710c",
   "commit": "c0227cdc1ffb6efce1b86e344721ecfddd3db07a"
