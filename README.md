@@ -236,11 +236,13 @@ node examples/agent-client/run.mjs `
 | 能力 | 当前范围 |
 | --- | --- |
 | YAML 与 ArkUI 操作 | 支持 `tapOn`、输入、滑动、可见性断言、截图及 Flow 编排；具体命令见[已实现与限制](docs/setup.md#已实现与限制)。自绘界面或不可识别节点需单独验证。 |
+| 安装测试应用 | 使用 v0.1.5 时，先用 DevEco Studio 或 HDC 安装签名 HAP，再运行 Flow。当前 `main` 构建的 CLI 新增 `harmonyos-prepare-app`，可供本机或 CI 在 Flow 外按 SHA-256 核验 HAP，安装后核对包名和版本并输出回执。[调用示例](docs/user-guide.md#准备签名-hap) |
+| 应用权限 | v0.1.5 沿用应用已有权限。当前 `main` 的 `setPermissions` 和 `launchApp.permissions` 支持在 API 26 及以上对调试签名应用已声明的单项 `user_grant` 权限执行 `allow` 或 `deny`。API 26 真机在 `launchApp` 时授予相机权限，进入样例首页后用 `setPermissions` 撤销，前后状态均已读回核对。[命令支持范围](docs/user-guide.md#当前支持范围) |
 | 报告与 CI | 支持 Flow/目录执行、Maestro 结果、JUnit 报告和通用 Windows CI 入口。首次与重试后的最终结果分别记录。 |
 | VS Code 辅助编写 | 支持截图与控件树点选、真机触摸录制和 UITest 记录导入。点击优先使用经同次录制控件树核对的唯一 ID 或文本，证据不足时生成坐标供核对。生成的标准 Maestro YAML 可在插件内校验和回放，运行面板可查看当前行、各次重试和对应的失败证据。 |
 | 视频与会话恢复 | 录屏默认关闭。启用主机录像时，VS Code 预览与录屏复用截图通道。主机录像默认保留连续相同帧。设置 `MAESTRO_HARMONYOS_HOST_RECORDING_DEDUPLICATE_FRAMES=true` 可合并连续相同画面并保留停留时长。Huawei 系统录屏仍支持[分段执行](examples/hmos-code-lab/flows/recorded-suite/README.md)，已有完整场景三段原片解码记录。会话异常后的设备释放仍按原会话和资源凭据核验。 |
 
-每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。CI 支持在运行前安装固定签名的 HAP。Flow 内安装 HAP、权限修改、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
+每个 CLI 会话操作一台本机 HDC 设备，[逐台验证脚本](docs/device-matrix.md)依次建立会话。当前源码已在 API 22 模拟器验证自定义 URI 分发和 PNG 图库导入。`addMedia`、`setOrientation` 和 `clearState` 的设备条件见[命令支持范围](docs/user-guide.md#当前支持范围)。Flow 内安装 HAP、Studio、内置 MCP 服务、多设备分片和云端运行尚未接入。面向 Agent 的 MCP 服务由上述鸿测项目提供。
 
 各版发行说明记录对应的源码、文件摘要和设备范围。v0.1.5 发行包在 API 22 模拟器完成复测，历史手机和平板的 20 轮分别沿用原冻结版本。 [v0.1.5](docs/releases/0.1.5.md) · [v0.1.4](docs/releases/0.1.4.md) · [v0.1.3](docs/releases/0.1.3.md) · [v0.1.2](docs/releases/0.1.2.md) · [v0.1.1](docs/releases/0.1.1.md)
 

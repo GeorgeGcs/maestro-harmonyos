@@ -77,7 +77,7 @@ $env:MAESTRO_HARMONYOS_HDC = 'hdc'
 
 只有一台 HDC 设备时自动选择；多台设备时必须指定 `--device '<HDC target>'`，例如放在 `hierarchy` 或 `test` 前。同一设备已有 Maestro 会话时，新会话会报错。设备列表查询不操作页面；`hierarchy` 会读取布局和截图以确认设备可用。
 
-CLI 从 YAML 的 `appId` 读取包名。省略启动 Ability 时，CLI 会在已安装应用的包信息中查找唯一入口模块的主 Ability；设置 `MAESTRO_HARMONYOS_MODULE` 可限定模块。包信息不足或入口不唯一时，请用 `MAESTRO_HARMONYOS_ABILITY` 或运行脚本的 `-AbilityName` 显式指定。默认 `launchApp` 会先停止应用，但不清除应用数据，也不自动修改已有权限。首次授权弹窗需在运行流程前处理好。
+CLI 从 YAML 的 `appId` 读取包名。省略启动 Ability 时，CLI 会在已安装应用的包信息中查找唯一入口模块的主 Ability；设置 `MAESTRO_HARMONYOS_MODULE` 可限定模块。包信息不足或入口不唯一时，请用 `MAESTRO_HARMONYOS_ABILITY` 或运行脚本的 `-AbilityName` 显式指定。默认 `launchApp` 会先停止应用，并保留应用数据和已有权限。使用 v0.1.5 时，请在运行前处理用例需要的首次授权。使用当前 `main` 自行构建 CLI 的开发者可按下方[权限条件](#已实现与限制)在 Flow 中显式授予或撤销单项权限。
 
 运行前解锁手机。长时间测试可在自有测试应用的主窗口调用 `setWindowKeepScreenOn(true)`，退到后台时恢复为 `false`。常亮不代替解锁，也不会阻止手动按电源键锁屏。
 
@@ -203,7 +203,9 @@ $env:MAESTRO_HARMONYOS_RECORDING = 'huawei-system'
 | 深链接 | `openLink` 由系统解析 URI。API 22 模拟器已验证自定义 URI 及查询参数。 |
 | 实验性 | `addMedia` 需要图库和 `mediatool`。`setOrientation` 需要提供旋转接口的 UITest RPC。`clearState` 和 `launchApp.clearState` 需要普通应用且包信息确认用户数据可清除。详见[命令支持范围](user-guide.md#当前支持范围)。 |
 | `hideKeyboard` | 11 月 19 日源码新增；先识别键盘窗口，单次返回后核对键盘隐藏且应用保留焦点；API 22 模拟器已验证。现有 v0.1.3 下载包不含此功能。 |
-| 尚未支持 | HAP 安装、权限修改、位置及代理设置 |
+| 签名 HAP | v0.1.5 需先用 DevEco Studio 或 HDC 安装应用。当前 `main` 构建的 CLI 可在 Flow 外运行 `harmonyos-prepare-app`，指定设备、预期包名和 HAP 的 SHA-256。覆盖同名包需显式传入 `--replace`。[命令及安装回执示例](user-guide.md#准备签名-hap) |
+| 应用权限 | v0.1.5 保留应用已有权限。当前 `main` 的 `setPermissions`、`launchApp.permissions` 需要 API 26 及以上、设备提供 `atm`，且调试签名的应用已声明目标 `user_grant` 权限。每次指定一个权限名及 `allow` 或 `deny`。API 26 真机在 `launchApp` 时授予相机权限，进入样例首页后用 `setPermissions` 撤销，前后状态均已读回核对。 |
+| 尚未支持 | Flow 内安装 HAP、位置及代理设置 |
 | 尚未接入 | Studio、MCP、自动启动设备、多设备分片和云端运行 |
 
 `back` 是设备返回键，不能保证在所有应用中都等同于关闭键盘。UITest 的文本输入、布局可见范围和滑动行为可能因系统版本或控件而不同；滑动时长通过速度近似换算。主机模拟测试不能证明这些行为在手机上可用。

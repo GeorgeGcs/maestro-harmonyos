@@ -25,7 +25,8 @@ Maestro HarmonyOS 让开发者在电脑上用 Maestro YAML 驱动鸿蒙应用，
 | 固定输入与统计 | CI 核对冻结输入和原生 JUnit；验证计划另行固定分母、必测步骤和首次/最终成功口径 |
 | 视频录屏 | Huawei 系统录屏实验后端，默认关闭；与操作生成 YAML 是独立功能 |
 | 实验性命令 | `clearState` 使用 `bm clean -d -n` 清理指定包的数据，以设备明确确认作为成功依据。已在 API 22 模拟器验证文件和 Preferences 清除。 |
-| 未支持 | HAP 自动安装、修改权限、Studio/MCP 鸿蒙会话、自动创建模拟器等 |
+| 应用安装与权限 | v0.1.5 使用已安装应用及其现有权限。当前源码可在 Flow 外用 `harmonyos-prepare-app` 校验并安装签名 HAP。API 26 及以上的调试签名应用可在 Flow 内授予或撤销单项已声明的 `user_grant` 权限。[安装示例和命令范围](user-guide.md#准备签名-hap) |
+| 未支持 | Flow 内安装 HAP、Studio/MCP 鸿蒙会话、自动创建模拟器等 |
 
 上游有某条 YAML 命令，不代表鸿蒙驱动已经实现其设备行为。未支持的设备操作明确报错，不能用空操作返回成功。
 
