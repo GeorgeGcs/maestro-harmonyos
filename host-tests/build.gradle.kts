@@ -12,6 +12,7 @@ kotlin {
             // Keep these dependencies without compiling the complete Maestro SDK.
             kotlin.include(
                 "maestro/harmonyos/**",
+                "maestro/Point.kt",
                 "maestro/TreeNode.kt",
                 "maestro/ScreenRecording.kt",
                 "maestro/debuglog/LogConfig.kt",
